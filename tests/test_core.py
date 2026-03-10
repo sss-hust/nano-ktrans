@@ -249,6 +249,25 @@ class TestContext:
         assert ctx.is_prefill == False
         assert ctx.max_seqlen_q == 0
 
+    def test_chunked_prefill_context(self):
+        """Chunked prefill 上下文字段"""
+        from nano_ktrans.utils.context import set_context, get_context, reset_context
+
+        cache_seqlens = torch.tensor([64], dtype=torch.int32)
+        set_context(
+            is_prefill=True,
+            is_chunked_prefill=True,
+            cache_seqlens=cache_seqlens,
+        )
+        ctx = get_context()
+        assert ctx.is_prefill == True
+        assert ctx.is_chunked_prefill == True
+        assert torch.equal(ctx.cache_seqlens, cache_seqlens)
+        reset_context()
+        ctx = get_context()
+        assert ctx.is_chunked_prefill == False
+        assert ctx.cache_seqlens is None
+
 
 # ============================================================
 # Test 7: Weight Loader (file-based, no GPU needed)
@@ -278,3 +297,64 @@ class TestMixtralExpert:
         x = torch.randn(4, 128)
         out = expert(x)
         assert out.shape == (4, 128), f"Expected (4, 128), got {out.shape}"
+
+
+# ============================================================
+# Test 9: GPU Expert Selection (generate_gpu_experts_masks)
+# ============================================================
+class TestExpertSelection:
+    def test_generate_masks_basic(self):
+        """基于激活频率选择 GPU 专家"""
+        from nano_ktrans.utils.expert_selection import generate_gpu_experts_masks
+
+        # 2 层，8 个专家
+        freq = torch.tensor([
+            [10, 2, 8, 1, 5, 3, 7, 4],  # layer 0: expert 0 和 2 最活跃
+            [1, 9, 3, 8, 2, 6, 4, 7],   # layer 1: expert 1 和 3 最活跃
+        ], dtype=torch.float)
+
+        masks = generate_gpu_experts_masks(freq, num_gpu_experts=2)
+        assert len(masks) == 2
+
+        # layer 0: experts 0 (freq=10) 和 2 (freq=8) 应在 GPU
+        assert masks[0][0] == True and masks[0][2] == True
+        assert masks[0].sum() == 2
+
+        # layer 1: experts 1 (freq=9) 和 3 (freq=8) 应在 GPU
+        assert masks[1][1] == True and masks[1][3] == True
+        assert masks[1].sum() == 2
+
+    def test_generate_masks_all_gpu(self):
+        """num_gpu_experts >= num_experts 时所有专家都在 GPU"""
+        from nano_ktrans.utils.expert_selection import generate_gpu_experts_masks
+
+        freq = torch.rand(4, 8)
+        masks = generate_gpu_experts_masks(freq, num_gpu_experts=10)
+        for mask in masks:
+            assert mask.all(), "All experts should be on GPU"
+
+    def test_uniform_masks(self):
+        """均匀选择 fallback"""
+        from nano_ktrans.utils.expert_selection import uniform_gpu_experts_masks
+
+        masks = uniform_gpu_experts_masks(num_layers=4, num_experts=8, num_gpu_experts=3)
+        assert len(masks) == 4
+        for mask in masks:
+            assert mask.sum() == 3
+            assert mask[0] == True and mask[1] == True and mask[2] == True
+            assert mask[3] == False
+
+    def test_different_layers_different_experts(self):
+        """不同层应该选择不同的热门专家"""
+        from nano_ktrans.utils.expert_selection import generate_gpu_experts_masks
+
+        freq = torch.tensor([
+            [100, 1, 1, 1],   # layer 0: only expert 0 is hot
+            [1, 100, 1, 1],   # layer 1: only expert 1 is hot
+            [1, 1, 100, 1],   # layer 2: only expert 2 is hot
+        ], dtype=torch.float)
+
+        masks = generate_gpu_experts_masks(freq, num_gpu_experts=1)
+        assert masks[0][0] == True and masks[0].sum() == 1
+        assert masks[1][1] == True and masks[1].sum() == 1
+        assert masks[2][2] == True and masks[2].sum() == 1

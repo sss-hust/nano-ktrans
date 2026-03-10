@@ -158,7 +158,10 @@ class MixtralDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.FloatTensor:
-        
+        """
+        Args:
+            hidden_states: [total_tokens, hidden_size]  扁平化的 2D 张量
+        """
         # 1. Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -169,15 +172,11 @@ class MixtralDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         
-        batch_seq_len, hidden_dim = hidden_states.shape
-        flat_hidden_states = hidden_states.view(-1, hidden_dim)
-        
         # Route
-        router_logits = self.gate(flat_hidden_states)
+        router_logits = self.gate(hidden_states)
         
         # Execute Hybrid MoE (CPU + GPU concurrent)
-        hidden_states = self.hybrid_moe(flat_hidden_states, router_logits)
-        hidden_states = hidden_states.view(batch_seq_len, hidden_dim)
+        hidden_states = self.hybrid_moe(hidden_states, router_logits)
         
         hidden_states = residual + hidden_states
         return hidden_states
@@ -210,12 +209,15 @@ class MixtralModel(nn.Module):
         input_ids: torch.LongTensor,
         positions: torch.Tensor,
     ):
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.embed_tokens(input_ids)           # [batch, seq_len, hidden]
+        batch_size, seq_len, _ = hidden_states.shape
+        hidden_states = hidden_states.view(-1, self.config.hidden_size)  # flatten to 2D
 
         for decoder_layer in self.layers:
             hidden_states = decoder_layer(positions, hidden_states)
 
         hidden_states = self.norm(hidden_states)
+        hidden_states = hidden_states.view(batch_size, seq_len, -1)     # restore to 3D
         return hidden_states
 
 

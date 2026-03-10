@@ -48,33 +48,59 @@ class Attention(nn.Module):
         self.k_cache = self.v_cache = torch.tensor([])
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+        """
+        三种注意力模式：
+        1. 标准 Prefill:   flash_attn_varlen_func（全序列因果注意力）
+        2. Chunked Prefill: flash_attn_with_kvcache + k/v 追加（分块 + cache 累积）
+        3. Decode:          flash_attn_with_kvcache（单 token 查询缓存）
+
+        输出统一为 [N, num_heads, head_dim] 3D 张量。
+        """
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
-        
-        if k_cache.numel() and v_cache.numel():
-            store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-        
+        has_cache = k_cache.numel() > 0 and v_cache.numel() > 0
+
         if context.is_prefill:
-            if context.block_tables is not None:
-                k, v = k_cache, v_cache
-            
-            o = flash_attn_varlen_func(
-                q, k, v,
-                max_seqlen_q=context.max_seqlen_q,
-                cu_seqlens_q=context.cu_seqlens_q,
-                max_seqlen_k=context.max_seqlen_k,
-                cu_seqlens_k=context.cu_seqlens_k,
-                softmax_scale=self.scale,
-                causal=True,
-                block_table=context.block_tables
-            )
+            if context.is_chunked_prefill and has_cache:
+                # ---- Chunked Prefill ----
+                # flash_attn_with_kvcache 的 k=/v= 参数会自动将新 KV 追加到 cache，
+                # 并在注意力计算中包含所有已缓存 + 新追加的 KV，实现跨 chunk 因果注意力。
+                o = flash_attn_with_kvcache(
+                    q.unsqueeze(0),           # [1, chunk_len, nheads, hdim]
+                    k_cache, v_cache,
+                    k=k.unsqueeze(0),         # 新 chunk 的 K，追加到 cache
+                    v=v.unsqueeze(0),         # 新 chunk 的 V，追加到 cache
+                    cache_seqlens=context.cache_seqlens,
+                    softmax_scale=self.scale,
+                    causal=True,
+                ).squeeze(0)                  # → [chunk_len, nheads, hdim]
+            else:
+                # ---- 标准全量 Prefill ----
+                if has_cache:
+                    store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+                if context.block_tables is not None:
+                    k, v = k_cache, v_cache
+                o = flash_attn_varlen_func(
+                    q, k, v,
+                    max_seqlen_q=context.max_seqlen_q,
+                    cu_seqlens_q=context.cu_seqlens_q,
+                    max_seqlen_k=context.max_seqlen_k,
+                    cu_seqlens_k=context.cu_seqlens_k,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    block_table=context.block_tables
+                )
         else:
+            # ---- Decode（单 token 逐步生成） ----
+            if has_cache:
+                store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
             o = flash_attn_with_kvcache(
-                q.unsqueeze(1),
+                q.unsqueeze(1),               # [batch, 1, nheads, hdim]
                 k_cache, v_cache,
                 cache_seqlens=context.context_lens,
                 block_table=context.block_tables,
                 softmax_scale=self.scale,
-                causal=True
-            )
+                causal=True,
+            ).squeeze(1)                      # → [batch, nheads, hdim]
+
         return o
