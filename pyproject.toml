@@ -24,12 +24,5 @@ dev = [
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages.find]
-where = [".."]
-include = ["nano-ktrans", "nano-ktrans.*"]
-
-[tool.setuptools.package-dir]
-nano_ktrans = "."
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
