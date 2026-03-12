@@ -30,10 +30,10 @@ class LLM:
         self.device = device
         self.max_seq_len = max_seq_len
         
-        print(f"Loading tokenizer from {model_path}...")
+        # print(f"Loading tokenizer from {model_path}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         
-        print(f"Loading config from {model_path}...")
+        # print(f"Loading config from {model_path}...")
         hf_config = PretrainedConfig.from_pretrained(model_path)
         
         config = MixtralConfig(
@@ -53,26 +53,26 @@ class LLM:
         # ===== GPU 专家选择策略 =====
         if activation_freq is not None:
             # 数据驱动：基于激活频率选择热门专家（ktransformers 核心策略）
-            print(f"Using activation frequency to select {num_gpu_experts} GPU experts per layer.")
+            # print(f"Using activation frequency to select {num_gpu_experts} GPU experts per layer.")
             layer_gpu_expert_masks = generate_gpu_experts_masks(activation_freq, num_gpu_experts)
         else:
             # Fallback：均匀选择前 N 个专家
-            print(f"No activation frequency provided, using uniform selection ({num_gpu_experts} GPU experts per layer).")
+            # print(f"No activation frequency provided, using uniform selection ({num_gpu_experts} GPU experts per layer).")
             layer_gpu_expert_masks = uniform_gpu_experts_masks(
                 config.num_hidden_layers, config.num_local_experts, num_gpu_experts
             )
 
-        print(f"Instantiating Hybrid MoE model on {device}...")
+        # print(f"Instantiating Hybrid MoE model on {device}...")
         with torch.device(device):
             self.model = MixtralForCausalLM(config, layer_gpu_expert_masks, weight_path=model_path)
             self.model = self.model.to(torch.bfloat16)
             
-        print(f"Loading weights from {model_path} into Python model...")
+        # print(f"Loading weights from {model_path} into Python model...")
         load_model(self.model, model_path)
         
-        print("Initializing SimpleEngine...")
+        # print("Initializing SimpleEngine...")
         self.engine = SimpleEngine(self.model, max_seq_len=max_seq_len, chunk_size=chunk_size)
-        print("Model loaded successfully.")
+        # print("Model loaded successfully.")
 
     def generate(self, prompt: str, max_new_tokens: int = 50) -> str:
         # 1. Tokenize prompt

@@ -17,7 +17,7 @@ def main():
     print(f"\nUser: {prompt}\n")
     print("Agent: Generating response...")
     
-    generated_text = model.generate(prompt, max_new_tokens=100)
+    generated_text = model.generate(prompt, max_new_tokens=256)
     print("\n" + "="*40 + "\n")
     print(generated_text)
     print("\n" + "="*40 + "\n")

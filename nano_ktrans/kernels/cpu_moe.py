@@ -169,7 +169,8 @@ class CPUMoEBackend:
         self.method = method
 
         # GPU 专家掩码 (pinned, 供 C++ 读取)
-        self.gpu_experts_mask = torch.empty(num_experts, dtype=torch.bool, pin_memory=True)
+        # 注意：使用 uint8 代替 bool 以支持 pin_memory，两者在内存中均为 1 字节
+        self.gpu_experts_mask = torch.empty(num_experts, dtype=torch.uint8, pin_memory=True)
         self.gpu_experts_mask.copy_(gpu_experts_mask)
 
         # 获取 CPU 推理引擎单例

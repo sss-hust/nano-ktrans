@@ -7,12 +7,13 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 
 dependencies = [
-    "torch>=2.1.0",
+    "torch==2.4.0",
     "triton>=2.1.0",
-    "flash-attn>=2.5.0",
+    "flash-attn==2.6.3",
     "transformers>=4.36.0",
     "safetensors>=0.4.0",
     "kt-kernel",
+    "setuptools",
 ]
 
 [project.optional-dependencies]
@@ -26,3 +27,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch==2.4.0", "setuptools", "wheel"]

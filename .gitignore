@@ -136,6 +136,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.python-version
+*.toml
 
 # Spyder project settings
 .spyderproject
