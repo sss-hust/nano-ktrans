@@ -50,8 +50,8 @@ class HybridMoE(nn.Module):
         gpu_experts_mask: torch.Tensor,
         layer_idx: int,
         weight_path: str,
-        num_threads: int = 32,
-        numa_pools: int = 2,
+        num_threads: int = 16,
+        numa_pools: int = 1,
         chunked_prefill_size: int = 512,
         method: str = "AMXINT4",
     ):

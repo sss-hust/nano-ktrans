@@ -43,6 +43,7 @@ CPUMoEBackend: CPU 端 MoE 专家计算的核心后端。
 - kernels.weight_loader.ExpertWeightLoader
 """
 
+import os
 import torch
 from typing import Optional, List, Dict
 from kt_kernel import kt_kernel_ext
@@ -55,6 +56,7 @@ MOEConfig = _moe_mod.MOEConfig
 AMXInt4_MOE = getattr(_moe_mod, "AMXInt4_MOE", None)
 AMXInt8_MOE = getattr(_moe_mod, "AMXInt8_MOE", None)
 AMXBF16_MOE = getattr(_moe_mod, "AMXBF16_MOE", None)
+from torch import nn
 
 from .cpu_infer import CPUInferEngine
 from .weight_loader import ExpertWeightLoader
@@ -96,23 +98,23 @@ class PinnedBufferPool:
         d = self.BUFFER_DEPTH
 
         input_cpu = [
-            torch.zeros(batch_size, hidden_size, dtype=torch.bfloat16, pin_memory=True)
+            torch.zeros(batch_size, hidden_size, dtype=torch.bfloat16, pin_memory=True, device="cpu")
             for _ in range(d)
         ]
         expert_ids_cpu = [
-            torch.zeros(batch_size, top_k, dtype=torch.long, pin_memory=True)
+            torch.zeros(batch_size, top_k, dtype=torch.long, pin_memory=True, device="cpu")
             for _ in range(d)
         ]
         weights_cpu = [
-            torch.zeros(batch_size, top_k, dtype=torch.float32, pin_memory=True)
+            torch.zeros(batch_size, top_k, dtype=torch.float32, pin_memory=True, device="cpu")
             for _ in range(d)
         ]
         output_cpu = [
-            torch.zeros(batch_size, hidden_size, dtype=torch.bfloat16, pin_memory=True)
+            torch.zeros(batch_size, hidden_size, dtype=torch.bfloat16, pin_memory=True, device="cpu")
             for _ in range(d)
         ]
         bsz_cpu = [
-            torch.full((1,), batch_size, dtype=torch.int32, pin_memory=True)
+            torch.full((1,), batch_size, dtype=torch.int32, pin_memory=True, device="cpu")
             for _ in range(d)
         ]
         output_gpu = [
@@ -156,8 +158,8 @@ class CPUMoEBackend:
         intermediate_size: int,
         gpu_experts_mask: torch.Tensor,
         weight_path: str,
-        num_threads: int = 32,
-        numa_pools: int = 2,
+        num_threads: int = 16,
+        numa_pools: int = 1,
         chunked_prefill_size: int = 512,
         method: str = "AMXINT4",
     ):
@@ -167,60 +169,88 @@ class CPUMoEBackend:
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.method = method
+        self.use_fallback = False
+
+        # 硬件检测：检查是否有 amx 或 avx512 标志
+        has_amx = False
+        try:
+            with open("/proc/cpuinfo", "r") as f:
+                content = f.read().lower()
+                has_amx = "amx" in content
+        except: pass
 
         # GPU 专家掩码 (pinned, 供 C++ 读取)
-        # 注意：使用 uint8 代替 bool 以支持 pin_memory，两者在内存中均为 1 字节
-        self.gpu_experts_mask = torch.empty(num_experts, dtype=torch.uint8, pin_memory=True)
+        self.gpu_experts_mask = torch.empty(num_experts, dtype=torch.uint8, device="cpu", pin_memory=True)
         self.gpu_experts_mask.copy_(gpu_experts_mask)
 
         # 获取 CPU 推理引擎单例
         self.cpu_infer = CPUInferEngine.get_instance(num_threads, numa_pools)
 
-        # ===== 创建 C++ MOE 实例 =====
-        moe_config = MOEConfig(
-            num_experts,
-            top_k,
-            hidden_size,
-            intermediate_size,
-            self.gpu_experts_mask.data_ptr(),
-        )
-        moe_config.layer_idx = layer_idx
-        moe_config.pool = self.cpu_infer.backend
-        moe_config.max_len = chunked_prefill_size
-        moe_config.save = True   # 在线量化模式
-        moe_config.load = False
-
-        # ===== 加载权重 =====
+        # ===== 加载原始专家权重 =====
         loader = ExpertWeightLoader(weight_path)
         stacked = loader.load_layer_experts_stacked(layer_idx, num_experts)
-
         self._gate_proj = stacked["gate"].contiguous()
         self._up_proj = stacked["up"].contiguous()
         self._down_proj = stacked["down"].contiguous()
 
-        moe_config.gate_proj = self._gate_proj.data_ptr()
-        moe_config.up_proj = self._up_proj.data_ptr()
-        moe_config.down_proj = self._down_proj.data_ptr()
-        moe_config.path = weight_path
+        if has_amx:
+            try:
+                # ===== 创建 C++ MOE 实例 =====
+                moe_config = MOEConfig(
+                    num_experts,
+                    top_k,
+                    hidden_size,
+                    intermediate_size,
+                    self.gpu_experts_mask.data_ptr(),
+                )
+                moe_config.layer_idx = layer_idx
+                moe_config.pool = self.cpu_infer.backend
+                moe_config.max_len = chunked_prefill_size
+                moe_config.save = True
+                moe_config.load = False
+                
+                # 重定向量化缓存
+                cache_path = os.path.join(os.getcwd(), "quant_cache")
+                os.makedirs(cache_path, exist_ok=True)
+                moe_config.path = cache_path
 
-        # 选择后端
-        if method == "AMXINT4":
-            if AMXInt4_MOE is None:
-                raise RuntimeError("AMXInt4 backend not available. Check kt-kernel build.")
-            self.moe = AMXInt4_MOE(moe_config)
-        elif method == "AMXINT8":
-            if AMXInt8_MOE is None:
-                raise RuntimeError("AMXInt8 backend not available. Check kt-kernel build.")
-            self.moe = AMXInt8_MOE(moe_config)
+                moe_config.gate_proj = self._gate_proj.data_ptr()
+                moe_config.up_proj = self._up_proj.data_ptr()
+                moe_config.down_proj = self._down_proj.data_ptr()
+
+                if method == "AMXINT4":
+                    self.moe = AMXInt4_MOE(moe_config)
+                elif method == "AMXINT8":
+                    self.moe = AMXInt8_MOE(moe_config)
+                
+                # 提交量化
+                self._identity_map = torch.arange(num_experts, dtype=torch.long)
+                self.cpu_infer.submit(self.moe.load_weights_task(self._identity_map.data_ptr()))
+                self.cpu_infer.sync()
+                print(f"  [CPUMoEBackend] Layer {layer_idx}: Accelerated by {method}")
+                return # 初始化成功
+            except Exception as e:
+                print(f"  [CPUMoEBackend] Layer {layer_idx}: Failed to init {method} ({e}). Falling back to PyTorch.")
         else:
-            raise NotImplementedError(f"Unsupported method: {method}")
+            print(f"  [CPUMoEBackend] Layer {layer_idx}: AMX not supported. Using PyTorch Fallback.")
 
-        # 提交权重量化任务
-        identity_map = torch.arange(num_experts, dtype=torch.long)
-        self.cpu_infer.submit(self.moe.load_weights_task(identity_map.data_ptr()))
-        self.cpu_infer.sync()
-
-        print(f"  [CPUMoEBackend] Layer {layer_idx}: loaded {num_experts} experts via {method}")
+        # ===== Fallback 模式：初始化简单的 PyTorch CPU 专家 =====
+        self.use_fallback = True
+        self.fallback_experts = nn.ModuleList()
+        for i in range(num_experts):
+            # 强制指定 device="cpu"，防止被 torch.device("cuda") 上下文拦截
+            exp = nn.Module().to("cpu")
+            exp.w1 = nn.Linear(hidden_size, intermediate_size, bias=False, device="cpu").to(torch.bfloat16)
+            exp.w2 = nn.Linear(intermediate_size, hidden_size, bias=False, device="cpu").to(torch.bfloat16)
+            exp.w3 = nn.Linear(hidden_size, intermediate_size, bias=False, device="cpu").to(torch.bfloat16)
+            
+            exp.w1.weight.data.copy_(self._gate_proj[i])
+            exp.w2.weight.data.copy_(self._down_proj[i])
+            exp.w3.weight.data.copy_(self._up_proj[i])
+            self.fallback_experts.append(exp)
+        
+        # 定义同步同步 buffer (fallback 模式下 sync 会用到)
+        self._fallback_output = None
 
     def submit_forward(
         self,
@@ -251,6 +281,46 @@ class CPUMoEBackend:
         expert_ids_cpu[slot].copy_(topk_ids.long(), non_blocking=True)
         weights_cpu[slot].copy_(topk_weights, non_blocking=True)
 
+        if self.use_fallback:
+            # Fallback 模式：直接在 CPU 上计算
+            # 既然是 Python 计算，我们需要确保 GPU 到 CPU 的异步拷贝已完成
+            torch.cuda.synchronize()
+            
+            # 找到哪些 token 指向了 CPU 专家 (gpu_experts_mask 中为 False 的专家)
+            cpu_mask = ~self.gpu_experts_mask.bool()
+            
+            output = torch.zeros(batch_size, self.hidden_size, dtype=torch.bfloat16, device="cpu")
+            flat_cpu = input_cpu[slot] # 刚才已经 copy 到了 pinned mem，直接复用
+            
+            for expert_idx in range(self.num_experts):
+                if not cpu_mask[expert_idx]:
+                    continue
+                
+                # 寻找选择该专家的 token
+                match = (expert_ids_cpu[slot] == expert_idx)
+                token_indices = torch.where(match.any(dim=1))[0]
+                
+                if len(token_indices) == 0:
+                    continue
+                
+                # 执行投影
+                exp = self.fallback_experts[expert_idx]
+                states = flat_cpu[token_indices]
+                
+                # MoE 核心计算：w2(silu(w1(x)) * w3(x))
+                expert_output = exp.w2(torch.nn.functional.silu(exp.w1(states)) * exp.w3(states))
+                
+                # 乘路由权重
+                # 我们需要找到每个 token-expert 对对应的 weight
+                # topk_weights 是 [batch, top_k]
+                row_idx, col_idx = torch.where(match[token_indices])
+                w = weights_cpu[slot][token_indices[row_idx], col_idx].unsqueeze(1)
+                
+                output.index_add_(0, token_indices[row_idx], expert_output[row_idx] * w)
+            
+            self._fallback_output = output
+            return
+
         # 提交 CPU forward 任务
         self.cpu_infer.submit_with_cuda_stream(
             cuda_stream,
@@ -280,6 +350,11 @@ class CPUMoEBackend:
             _buffer_pool.get_buffers(batch_size, self.hidden_size, self.top_k, device)
 
         slot = self.layer_idx % PinnedBufferPool.BUFFER_DEPTH
+
+        if self.use_fallback:
+            # 将 CPU 计算结果拷回 GPU
+            output_gpu[slot].copy_(self._fallback_output, non_blocking=True)
+            return output_gpu[slot]
 
         # 等待 CPU 完成
         self.cpu_infer.sync_with_cuda_stream(cuda_stream)

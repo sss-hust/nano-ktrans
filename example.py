@@ -10,7 +10,7 @@ def main():
     print(f"Starting nano-ktrans with model: {model_path}")
     
     # Initialize the minimal LLM
-    model = LLM(model_path, num_gpu_experts=2) # Keep 2 experts on GPU, rest on CPU
+    model = LLM(model_path, num_gpu_experts=1) # Keep 2 experts on GPU, rest on CPU
     
     # Generation test
     prompt = "[INST] How do I write a good Python script? [/INST]"

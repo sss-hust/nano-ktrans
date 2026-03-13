@@ -1,3 +1,4 @@
+import os
 import torch
 from typing import Optional
 from transformers import AutoTokenizer, PretrainedConfig
@@ -26,6 +27,11 @@ class LLM:
         chunk_size: int = 512,
         activation_freq: Optional[torch.Tensor] = None,
     ):
+        # 自动解析 HF repo_id 为本地路径
+        if not os.path.exists(model_path):
+            from huggingface_hub import snapshot_download
+            model_path = snapshot_download(model_path, allow_patterns=["*.safetensors", "*.json", "tokenizer*"])
+
         self.model_path = model_path
         self.device = device
         self.max_seq_len = max_seq_len
@@ -61,7 +67,10 @@ class LLM:
             layer_gpu_expert_masks = uniform_gpu_experts_masks(
                 config.num_hidden_layers, config.num_local_experts, num_gpu_experts
             )
-
+        
+        # DEBUG: 仅测试一层以排查崩溃原因
+        # config.num_hidden_layers = 1
+        
         # print(f"Instantiating Hybrid MoE model on {device}...")
         with torch.device(device):
             self.model = MixtralForCausalLM(config, layer_gpu_expert_masks, weight_path=model_path)
