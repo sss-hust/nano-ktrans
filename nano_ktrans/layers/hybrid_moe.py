@@ -20,6 +20,8 @@ from torch import nn
 from typing import Optional, Dict
 
 from nano_ktrans.kernels.cpu_moe import CPUMoEBackend
+from nano_ktrans.kernels.offload_backend import normalize_offload_backend_name
+from nano_ktrans.kernels.pim_moe import PIMMoEBackend
 
 
 class HybridMoE(nn.Module):
@@ -54,6 +56,12 @@ class HybridMoE(nn.Module):
         numa_pools: int = 1,
         chunked_prefill_size: int = 512,
         method: str = "AMXINT4",
+        offload_backend: str = "cpu",
+        offload_backend_kwargs: Optional[Dict[str, object]] = None,
+        router_use_softmax: bool = False,
+        normalize_topk_prob: bool = True,
+        expert_key_template: Optional[str] = None,
+        expert_proj_names: Optional[Dict[str, str]] = None,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -61,21 +69,35 @@ class HybridMoE(nn.Module):
         self.hidden_size = hidden_size
         self.gpu_experts_mask = gpu_experts_mask
         self.gpu_experts = gpu_experts
+        self.router_use_softmax = router_use_softmax
+        self.normalize_topk_prob = normalize_topk_prob
+        self.has_cpu_experts = bool((~gpu_experts_mask.bool()).any().item())
+        self.offload_backend_name = normalize_offload_backend_name(offload_backend)
+        self.offload_backend_kwargs = offload_backend_kwargs or {}
 
-        # CPU MoE 后端（封装了线程池、pinned buffer、AMX GEMM）
-        self.cpu_backend = CPUMoEBackend(
-            layer_idx=layer_idx,
-            num_experts=num_experts,
-            top_k=top_k,
-            hidden_size=hidden_size,
-            intermediate_size=moe_intermediate_size,
-            gpu_experts_mask=gpu_experts_mask,
-            weight_path=weight_path,
-            num_threads=num_threads,
-            numa_pools=numa_pools,
-            chunked_prefill_size=chunked_prefill_size,
-            method=method,
-        )
+        # 只有存在离线 CPU 专家时才初始化 CPU backend。
+        self.offload_backend = None
+        if self.has_cpu_experts:
+            backend_kwargs = dict(
+                layer_idx=layer_idx,
+                num_experts=num_experts,
+                top_k=top_k,
+                hidden_size=hidden_size,
+                intermediate_size=moe_intermediate_size,
+                gpu_experts_mask=gpu_experts_mask,
+                weight_path=weight_path,
+                num_threads=num_threads,
+                numa_pools=numa_pools,
+                chunked_prefill_size=chunked_prefill_size,
+                method=method,
+                expert_key_template=expert_key_template,
+                expert_proj_names=expert_proj_names,
+            )
+            backend_kwargs.update(self.offload_backend_kwargs)
+            if self.offload_backend_name == "pim_shadow":
+                self.offload_backend = PIMMoEBackend(**backend_kwargs)
+            else:
+                self.offload_backend = CPUMoEBackend(**backend_kwargs)
 
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
         """
@@ -89,14 +111,23 @@ class HybridMoE(nn.Module):
             output: [batch * seq_len, hidden_size]  加权混合后的专家输出
         """
         # ===== Step 1: 路由 =====
-        topk_weights, topk_ids = torch.topk(router_logits, self.top_k, dim=-1)
-        topk_weights = torch.softmax(topk_weights, dim=-1)
+        if self.router_use_softmax:
+            router_probs = torch.softmax(router_logits, dim=-1, dtype=torch.float32).to(router_logits.dtype)
+            topk_weights, topk_ids = torch.topk(router_probs, self.top_k, dim=-1)
+            if self.normalize_topk_prob:
+                topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        else:
+            topk_weights, topk_ids = torch.topk(router_logits, self.top_k, dim=-1)
+            topk_weights = torch.softmax(topk_weights, dim=-1)
 
         batch_seq_len, hidden_dim = hidden_states.shape
 
         # ===== Step 2: 提交 CPU 专家（异步） =====
-        cuda_stream = torch.cuda.current_stream().cuda_stream
-        self.cpu_backend.submit_forward(hidden_states, topk_ids, topk_weights, cuda_stream)
+        cuda_stream = None
+        if self.offload_backend is not None:
+            if hidden_states.is_cuda and torch.cuda.is_available():
+                cuda_stream = torch.cuda.current_stream().cuda_stream
+            self.offload_backend.submit_forward(hidden_states, topk_ids, topk_weights, cuda_stream)
 
         # ===== Step 3: 并行执行 GPU 专家 =====
         final_gpu_states = torch.zeros_like(hidden_states)
@@ -134,7 +165,17 @@ class HybridMoE(nn.Module):
             final_gpu_states.index_add_(0, token_indices, expert_output)
 
         # ===== Step 4: 同步 CPU 专家结果 =====
-        cpu_output = self.cpu_backend.sync_forward(hidden_states, cuda_stream)
+        if self.offload_backend is not None:
+            cpu_output = self.offload_backend.sync_forward(hidden_states, cuda_stream)
+        else:
+            cpu_output = torch.zeros_like(hidden_states)
 
         # ===== Step 5: 合并 (CPU 和 GPU 专家处理不同的 token-expert 对) =====
         return final_gpu_states + cpu_output
+
+    def diagnostics(self) -> dict:
+        return {
+            "offload_backend_name": self.offload_backend_name,
+            "has_cpu_experts": self.has_cpu_experts,
+            "backend": None if self.offload_backend is None else self.offload_backend.diagnostics(),
+        }

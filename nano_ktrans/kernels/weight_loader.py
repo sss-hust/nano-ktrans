@@ -49,6 +49,7 @@ class ExpertWeightLoader:
         layer_idx: int,
         num_experts: int,
         key_template: str = "model.layers.{layer}.block_sparse_moe.experts.{expert}.{proj}.weight",
+        proj_name_map: Optional[Dict[str, str]] = None,
     ) -> Dict[str, List[torch.Tensor]]:
         """
         加载指定层全部专家的三组权重。
@@ -69,7 +70,9 @@ class ExpertWeightLoader:
         """
         result = {"gate": [], "up": [], "down": []}
 
-        proj_map = {"gate": "w1", "up": "w3", "down": "w2"}
+        proj_map = proj_name_map or {"gate": "w1", "up": "w3", "down": "w2"}
+
+        uses_gate_up = "gate_up" in proj_map
 
         for expert_idx in range(num_experts):
             for proj_name, w_name in proj_map.items():
@@ -84,7 +87,16 @@ class ExpertWeightLoader:
                 file_path = self._key_to_file[key]
                 with safe_open(file_path, "pt", "cpu") as sf:
                     tensor = sf.get_tensor(key)
-                    result[proj_name].append(tensor.contiguous())
+                    if proj_name == "gate_up":
+                        gate, up = tensor.chunk(2, dim=0)
+                        result["gate"].append(gate.contiguous())
+                        result["up"].append(up.contiguous())
+                    else:
+                        result[proj_name].append(tensor.contiguous())
+
+        if uses_gate_up:
+            assert len(result["gate"]) == num_experts
+            assert len(result["up"]) == num_experts
 
         return result
 
@@ -92,6 +104,8 @@ class ExpertWeightLoader:
         self,
         layer_idx: int,
         num_experts: int,
+        key_template: str = "model.layers.{layer}.block_sparse_moe.experts.{expert}.{proj}.weight",
+        proj_name_map: Optional[Dict[str, str]] = None,
     ) -> Dict[str, torch.Tensor]:
         """
         加载并堆叠为 [num_experts, ...] 形状（用于 AMX 在线量化模式）。
@@ -103,7 +117,12 @@ class ExpertWeightLoader:
                 "down": Tensor[num_experts, hidden_size, intermediate_size],
             }
         """
-        experts = self.load_layer_experts(layer_idx, num_experts)
+        experts = self.load_layer_experts(
+            layer_idx,
+            num_experts,
+            key_template=key_template,
+            proj_name_map=proj_name_map,
+        )
         return {
             "gate": torch.stack(experts["gate"]),
             "up": torch.stack(experts["up"]),

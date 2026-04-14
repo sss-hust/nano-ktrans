@@ -1,19 +1,14 @@
 """
 CPUInfer: 异步 CPU 推理线程池的简化封装。
 
-这是 nano-ktrans 中最底层的基础设施，负责管理一个 CPU 线程池。
-通过它，我们可以把 MoE 的专家计算任务异步提交到 CPU 上执行，
-同时 GPU 继续并行处理其他专家。
-
-核心概念：
-- WorkerPool: 一个分子池的 CPU 线程池（可按 NUMA 节点分配线程）
-- submit_with_cuda_stream: 将任务提交到 CPU 线程池，并与 CUDA 流同步
-- sync_with_cuda_stream: 等待所有 CPU 任务完成，并与 CUDA 流同步
-
-依赖：kt_kernel_ext C++ 扩展（由 kt-kernel 包提供）
+没有安装 `kt-kernel` 时，保留同名接口并退化为 no-op，
+这样上层可以自动走纯 PyTorch fallback。
 """
 
-from kt_kernel import kt_kernel_ext
+try:
+    from kt_kernel import kt_kernel_ext
+except ImportError:
+    kt_kernel_ext = None
 
 
 class CPUInferEngine:
@@ -36,6 +31,10 @@ class CPUInferEngine:
             num_threads:  CPU 推理总线程数
             numa_pools:   NUMA 子池数量（通常等于 NUMA 节点数）
         """
+        if kt_kernel_ext is None:
+            self._engine = None
+            return
+
         # 构建 WorkerPool 配置
         config = kt_kernel_ext.WorkerPoolConfig()
         config.subpool_count = numa_pools
@@ -62,6 +61,8 @@ class CPUInferEngine:
     @property
     def backend(self):
         """返回底层 C++ WorkerPool 指针，用于传给 MOEConfig"""
+        if self._engine is None:
+            return None
         return self._engine.backend_
 
     def submit(self, task):
@@ -71,6 +72,8 @@ class CPUInferEngine:
         task 是 C++ 层返回的 (func_ptr, args_ptr) 对，
         例如 moe.forward_task(...) 或 moe.load_weights_task(...)。
         """
+        if self._engine is None:
+            return
         self._engine.submit(task)
 
     def sync(self, allow_pending: int = 0):
@@ -80,6 +83,8 @@ class CPUInferEngine:
         Args:
             allow_pending: 允许保留多少个挂起任务不等待
         """
+        if self._engine is None:
+            return
         self._engine.sync(allow_pending)
 
     def submit_with_cuda_stream(self, cuda_stream, task):
@@ -91,6 +96,8 @@ class CPUInferEngine:
         2. CPU 线程池等待 CUDA 拷贝完成后开始计算
         3. GPU 继续执行其他操作
         """
+        if self._engine is None:
+            return
         self._engine.submit_with_cuda_stream(cuda_stream, task)
 
     def sync_with_cuda_stream(self, cuda_stream, allow_pending: int = 0):
@@ -99,4 +106,6 @@ class CPUInferEngine:
 
         在调用 sync 后，GPU 可以安全地从 CPU 输出 buffer 拷贝结果。
         """
+        if self._engine is None:
+            return
         self._engine.sync_with_cuda_stream(cuda_stream, allow_pending)

@@ -3,7 +3,10 @@
 A minimal, educational CPU/GPU Hybrid MoE inference framework. 
 Simplified from the excellent [KTransformers](https://github.com/kvcache-ai/ktransformers) project, `nano-ktrans` aims to be the clearest educational implementation of Hybrid MoE (expert offloading) in Python. Like `nano-vLLM`, code readability, educational value, and minimalism are preferred over absolute edge-case performance.
 
-Currently focused solely on **Mixtral-8x7B**.
+Currently supports **Mixtral-style MoE**, **Qwen2-MoE**, and a compatibility
+path for **Qwen3-MoE** checkpoints with automatic expert-layout detection.
+DeepSeek-V2/V3 style MLA attention is not yet implemented, so those models
+still require a dedicated adaptation pass.
 
 ## Project Highlights
 
@@ -17,7 +20,7 @@ Currently focused solely on **Mixtral-8x7B**.
 ```text
 nano-ktrans/
 ├── nano_ktrans/
-│   ├── models/                  # Core Models (Mixtral-8x7B)
+│   ├── models/                  # Core Models / architecture adapters
 │   ├── layers/                  # Layers (Attention, Linear, RMSNorm, HybridMoE)
 │   ├── kernels/                 # CPU Matrix Acceleration logic wrapper (AMX)
 │   ├── engine/                  # Core Inference Loop
@@ -29,22 +32,45 @@ nano-ktrans/
 
 ## Setup & Installation
 
-We recommend using [`uv`](https://github.com/astral-sh/uv) to manage the environment and dependencies quickly.
+You can bring up the core project with a standard Python virtualenv. CUDA/PIM-specific
+accelerators are optional.
 
 ```bash
-# 1. Clone the repo
-git clone https://github.com/your-repo/nano-ktrans.git
-cd nano-ktrans
-
-# 2. Create and activate a fast virtual environment via uv
-uv venv .venv
+# 1. Create and activate a virtualenv
+python3 -m venv .venv
 source .venv/bin/activate
 
-# 3. Install the package and dependencies
-uv pip install -e ".[dev]"
+# 2. Install the CPU-safe core dependencies
+pip install -e ".[dev]"
 ```
 
-*Note: Ensure you have AVX512 and `kt-kernel` build prerequisites if you are compiling the backend locally.*
+Optional extras:
+
+```bash
+# CUDA attention kernels
+pip install -e ".[cuda]"
+
+# kt-kernel CPU expert backend
+pip install -e ".[cpu-kernel]"
+
+# All accelerators
+pip install -e ".[accel]"
+```
+
+Without these extras, nano-ktrans now falls back to pure PyTorch attention and
+keeps experts on the active device by default, which is the easiest way to
+bring the project up before enabling PIM or custom kernels.
+
+## Current Runtime Status
+
+As of `v0.2.0`, the repository has been validated on the local
+`Qwen3-30B-A3B-Base` checkpoint with these paths:
+
+- `cpu`: end-to-end inference works.
+- `cuda_cpu_offload`: works on the host machine with a small hot-expert set on GPU.
+- `cuda`: still OOM on the local `47.41 GiB` GPU for this model when all experts stay on device.
+- `cuda_pim_shadow`: integrated into the main inference path and records PIM visibility and routing counters, but the numerical expert compute still falls back to CPU.
+- `benchmarks/pim_microbench`: runs on real UPMEM hardware and reports transfer plus integer-kernel metrics; it is not a floating-point MoE expert benchmark.
 
 ## Testing
 
@@ -56,11 +82,26 @@ pytest tests -v
 
 ## Running an Example
 
-To execute inference, provide the local path to your unloaded Mixtral-8x7B safetensors folder:
+To execute inference, provide the local path or Hugging Face repo id for a
+supported MoE checkpoint. When you do not pass `--num-device-experts`, all
+experts stay on the active device, which is the simplest non-PIM path.
 
 ```bash
-python example.py /path/to/local/mixtral/weights
+python example.py /path/to/local/model/weights --device cpu
 ```
+
+If you have a CUDA runtime and want hybrid expert placement later:
+
+```bash
+python example.py /path/to/local/model/weights --device cuda --num-device-experts 2
+```
+
+Current status:
+
+- Mixtral-style MoE: supported
+- Qwen2-MoE style sparse MLP + shared expert: supported in the Python model path
+- Qwen3-MoE style sparse MLP + packed expert projections + q/k norm: supported
+- DeepSeek-V2/V3: blocked on MLA attention support
 
 ## License
 Apache-2.0 License. See the KTransformers project for the original implementation.

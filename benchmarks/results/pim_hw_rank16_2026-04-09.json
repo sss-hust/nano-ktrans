@@ -1,0 +1,22 @@
+{
+  "status": "ok",
+  "ranks": 16,
+  "dpus": 1024,
+  "bytes_per_dpu": 1048576,
+  "repetitions": 2,
+  "scalar": 7,
+  "profile": "",
+  "host_to_pim_seconds": 0.088554276,
+  "host_to_pim_gbps": 12.125240,
+  "kernel_seconds": 0.022677992,
+  "kernel_workload": "int32 affine transform: y = x * scalar + 1",
+  "kernel_effective_gbps": 189.389227,
+  "kernel_element_gops": 23.673653,
+  "kernel_int32_gops_estimate": 47.347307,
+  "pim_to_host_seconds": 0.192325387,
+  "pim_to_host_gbps": 5.582944,
+  "end_to_end_seconds": 0.303557655,
+  "kernel_cycles_min": 8960048,
+  "kernel_cycles_avg": 8975204.953,
+  "kernel_cycles_max": 8987968
+}

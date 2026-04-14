@@ -14,6 +14,7 @@ def load_model(model: nn.Module, path: str):
     (e.g. CPU expert weights are skipped because they are not initialized in nn.ModuleDict)
     """
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
+    weight_name_substitutions = getattr(model, "weight_name_substitutions", [])
     
     for file in glob(os.path.join(path, "*.safetensors")):
         with safe_open(file, "pt", "cpu") as f:
@@ -26,6 +27,10 @@ def load_model(model: nn.Module, path: str):
                         target_substring, shard_id = v
                         target_param_name = weight_name.replace(k, target_substring)
                         break
+
+                for src, dst in weight_name_substitutions:
+                    if src in target_param_name:
+                        target_param_name = target_param_name.replace(src, dst)
 
                 try:
                     param = model.get_parameter(target_param_name)

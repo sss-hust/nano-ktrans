@@ -1,8 +1,11 @@
 import os
-import torch
 from typing import Optional
-from transformers import AutoTokenizer, PretrainedConfig
-from nano_ktrans.models.mixtral import MixtralForCausalLM, MixtralConfig
+
+import torch
+from transformers import AutoConfig, AutoTokenizer
+
+from nano_ktrans.models.mixtral import MixtralForCausalLM
+from nano_ktrans.models.config import GenericMoeConfig, adapt_config_to_checkpoint
 from nano_ktrans.utils.loader import load_model
 from nano_ktrans.utils.expert_selection import (
     generate_gpu_experts_masks,
@@ -22,59 +25,89 @@ class LLM:
         self, 
         model_path: str, 
         max_seq_len: int = 2048, 
-        device: str = "cuda", 
-        num_gpu_experts: int = 2,
+        device: Optional[str] = None,
+        num_gpu_experts: Optional[int] = None,
         chunk_size: int = 512,
+        offload_backend: str = "cpu",
+        offload_backend_kwargs: Optional[dict] = None,
         activation_freq: Optional[torch.Tensor] = None,
     ):
+        if device is None or device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        elif device.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError("CUDA device requested but no CUDA runtime is available.")
+
         # 自动解析 HF repo_id 为本地路径
         if not os.path.exists(model_path):
             from huggingface_hub import snapshot_download
-            model_path = snapshot_download(model_path, allow_patterns=["*.safetensors", "*.json", "tokenizer*"])
+            model_path = snapshot_download(
+                model_path,
+                allow_patterns=[
+                    "*.safetensors",
+                    "*.json",
+                    "*.txt",
+                    "*.model",
+                    "tokenizer*",
+                    "vocab.json",
+                    "merges.txt",
+                ],
+            )
 
         self.model_path = model_path
         self.device = device
         self.max_seq_len = max_seq_len
+        self.offload_backend = offload_backend
+        self.offload_backend_kwargs = offload_backend_kwargs or {}
         
         # print(f"Loading tokenizer from {model_path}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         
         # print(f"Loading config from {model_path}...")
-        hf_config = PretrainedConfig.from_pretrained(model_path)
+        hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=False)
         
-        config = MixtralConfig(
-            vocab_size=hf_config.vocab_size,
-            hidden_size=hf_config.hidden_size,
-            intermediate_size=hf_config.intermediate_size,
-            num_hidden_layers=hf_config.num_hidden_layers,
-            num_attention_heads=hf_config.num_attention_heads,
-            num_key_value_heads=hf_config.num_key_value_heads,
-            num_local_experts=hf_config.num_local_experts,
-            num_experts_per_tok=hf_config.num_experts_per_tok,
-            rms_norm_eps=hf_config.rms_norm_eps,
-            max_position_embeddings=hf_config.max_position_embeddings,
-            rope_theta=getattr(hf_config, "rope_theta", 1000000.0),
+        config = GenericMoeConfig.from_hf_config(hf_config)
+        config = adapt_config_to_checkpoint(config, model_path)
+        if config.attention_backend != "standard":
+            raise NotImplementedError(
+                f"Model type '{getattr(hf_config, 'model_type', 'unknown')}' uses an attention backend "
+                f"that nano-ktrans does not implement yet. DeepSeek-V2/V3 style MLA still needs a "
+                f"separate adaptation pass before expert offload can be tested."
         )
         
         # ===== GPU 专家选择策略 =====
-        if activation_freq is not None:
-            # 数据驱动：基于激活频率选择热门专家（ktransformers 核心策略）
-            # print(f"Using activation frequency to select {num_gpu_experts} GPU experts per layer.")
-            layer_gpu_expert_masks = generate_gpu_experts_masks(activation_freq, num_gpu_experts)
-        else:
-            # Fallback：均匀选择前 N 个专家
-            # print(f"No activation frequency provided, using uniform selection ({num_gpu_experts} GPU experts per layer).")
+        effective_num_gpu_experts = config.num_local_experts if num_gpu_experts is None else num_gpu_experts
+        effective_num_gpu_experts = max(0, min(effective_num_gpu_experts, config.num_local_experts))
+
+        if config.num_local_experts > 0 and effective_num_gpu_experts == config.num_local_experts:
             layer_gpu_expert_masks = uniform_gpu_experts_masks(
-                config.num_hidden_layers, config.num_local_experts, num_gpu_experts
+                config.num_hidden_layers, config.num_local_experts, config.num_local_experts
             )
+        elif config.num_local_experts > 0 and activation_freq is not None:
+            # 数据驱动：基于激活频率选择热门专家（ktransformers 核心策略）
+            layer_gpu_expert_masks = generate_gpu_experts_masks(activation_freq, effective_num_gpu_experts)
+        elif config.num_local_experts > 0:
+            # Fallback：均匀选择前 N 个专家
+            layer_gpu_expert_masks = uniform_gpu_experts_masks(
+                config.num_hidden_layers, config.num_local_experts, effective_num_gpu_experts
+            )
+        else:
+            layer_gpu_expert_masks = [
+                torch.zeros(0, dtype=torch.bool) for _ in range(config.num_hidden_layers)
+            ]
         
         # DEBUG: 仅测试一层以排查崩溃原因
         # config.num_hidden_layers = 1
         
         # print(f"Instantiating Hybrid MoE model on {device}...")
-        with torch.device(device):
-            self.model = MixtralForCausalLM(config, layer_gpu_expert_masks, weight_path=model_path)
-            self.model = self.model.to(torch.bfloat16)
+        model_dtype = torch.bfloat16 if device == "cpu" or device.startswith("cuda") else torch.float32
+        self.model = MixtralForCausalLM(
+            config,
+            layer_gpu_expert_masks,
+            weight_path=model_path,
+            offload_backend=offload_backend,
+            offload_backend_kwargs=self.offload_backend_kwargs,
+        )
+        self.model = self.model.to(device=device, dtype=model_dtype)
             
         # print(f"Loading weights from {model_path} into Python model...")
         load_model(self.model, model_path)
@@ -112,3 +145,16 @@ class LLM:
         # 4. Decode output
         output_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
         return output_text
+
+    def get_offload_diagnostics(self) -> dict:
+        layers = []
+        for layer_idx, layer in enumerate(self.model.model.layers):
+            hybrid_moe = getattr(layer, "hybrid_moe", None)
+            if hybrid_moe is None:
+                continue
+            layers.append({"layer_idx": layer_idx, **hybrid_moe.diagnostics()})
+        return {
+            "offload_backend": self.offload_backend,
+            "layer_count": len(layers),
+            "layers": layers,
+        }

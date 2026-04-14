@@ -1,0 +1,20 @@
+{
+  "status": "ok",
+  "ranks": 1,
+  "dpus": 1,
+  "bytes_per_dpu": 1048576,
+  "repetitions": 2,
+  "scalar": 7,
+  "profile": "backend=simulator,chipId=0x42",
+  "host_to_pim_seconds": 0.001399653,
+  "host_to_pim_gbps": 0.749169,
+  "kernel_seconds": 0.845117275,
+  "kernel_effective_gbps": 0.004963,
+  "kernel_gops": 0.000620,
+  "pim_to_host_seconds": 0.001441023,
+  "pim_to_host_gbps": 0.727661,
+  "end_to_end_seconds": 0.847957951,
+  "kernel_cycles_min": 8942720,
+  "kernel_cycles_avg": 8942720.000,
+  "kernel_cycles_max": 8942720
+}

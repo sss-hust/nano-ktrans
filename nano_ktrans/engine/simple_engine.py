@@ -24,7 +24,7 @@ class SimpleEngine:
         self.k_caches = []
         self.v_caches = []
         
-        head_dim = config.hidden_size // config.num_attention_heads
+        head_dim = getattr(config, "head_dim", None) or (config.hidden_size // config.num_attention_heads)
         
         for layer in self.model.model.layers:
             # Shape for flash_attn_with_kvcache with block_table=None is:

@@ -173,6 +173,7 @@ class TestMixtralConfig:
         assert config.num_key_value_heads == 8
         assert config.num_local_experts == 8
         assert config.num_experts_per_tok == 2
+        assert config.arch.name == "mixtral"
 
     def test_custom_config(self):
         """MixtralConfig 自定义参数"""
@@ -186,6 +187,150 @@ class TestMixtralConfig:
         assert config.vocab_size == 64000
         assert config.hidden_size == 2048
         assert config.num_hidden_layers == 16
+
+
+class TestArchitectureConfig:
+    def test_qwen2_moe_config_mapping(self):
+        from types import SimpleNamespace
+        from nano_ktrans.models.config import GenericMoeConfig
+
+        hf_config = SimpleNamespace(
+            model_type="qwen2_moe",
+            architectures=["Qwen2MoeForCausalLM"],
+            vocab_size=151936,
+            hidden_size=2048,
+            intermediate_size=5632,
+            moe_intermediate_size=1408,
+            shared_expert_intermediate_size=5632,
+            num_hidden_layers=24,
+            num_attention_heads=16,
+            num_key_value_heads=16,
+            num_experts=60,
+            num_experts_per_tok=4,
+            rms_norm_eps=1e-6,
+            max_position_embeddings=32768,
+            rope_theta=10000.0,
+            hidden_act="silu",
+            decoder_sparse_step=2,
+            mlp_only_layers=[0, 1],
+            qkv_bias=True,
+        )
+
+        config = GenericMoeConfig.from_hf_config(hf_config)
+        assert config.arch.name == "qwen2_moe"
+        assert config.num_local_experts == 60
+        assert config.moe_intermediate_size == 1408
+        assert config.shared_expert_intermediate_size == 5632
+        assert config.is_moe_layer(0) is False
+        assert config.is_moe_layer(1) is False
+        assert config.is_moe_layer(2) is False
+        assert config.is_moe_layer(3) is True
+
+    def test_deepseek_marks_attention_gap(self):
+        from types import SimpleNamespace
+        from nano_ktrans.models.config import GenericMoeConfig
+
+        hf_config = SimpleNamespace(
+            model_type="deepseek_v2",
+            architectures=["DeepseekV2ForCausalLM"],
+            vocab_size=32000,
+            hidden_size=4096,
+            intermediate_size=11008,
+            moe_intermediate_size=1407,
+            num_hidden_layers=32,
+            num_attention_heads=32,
+            num_key_value_heads=32,
+            n_routed_experts=64,
+            num_experts_per_tok=6,
+            rms_norm_eps=1e-6,
+            max_position_embeddings=4096,
+            rope_theta=10000.0,
+            hidden_act="silu",
+            attention_bias=False,
+        )
+
+        config = GenericMoeConfig.from_hf_config(hf_config)
+        assert config.attention_backend == "mla"
+
+    def test_qwen3_moe_config_mapping(self):
+        from types import SimpleNamespace
+        from nano_ktrans.models.config import GenericMoeConfig
+
+        hf_config = SimpleNamespace(
+            model_type="qwen3_moe",
+            architectures=["Qwen3MoeForCausalLM"],
+            vocab_size=151936,
+            hidden_size=2048,
+            intermediate_size=6144,
+            moe_intermediate_size=768,
+            num_hidden_layers=24,
+            num_attention_heads=32,
+            num_key_value_heads=4,
+            num_experts=128,
+            num_experts_per_tok=8,
+            rms_norm_eps=1e-6,
+            max_position_embeddings=32768,
+            rope_parameters={"rope_theta": 10000.0},
+            hidden_act="silu",
+            decoder_sparse_step=1,
+            mlp_only_layers=[],
+            attention_bias=False,
+            head_dim=128,
+        )
+
+        config = GenericMoeConfig.from_hf_config(hf_config)
+        assert config.arch.name == "qwen3_moe"
+        assert config.arch.use_qk_norm is True
+        assert config.arch.experts_are_packed is True
+        assert config.num_local_experts == 128
+        assert config.num_key_value_heads == 4
+
+    def test_qwen3_checkpoint_layout_adaptation(self, tmp_path):
+        from types import SimpleNamespace
+        from safetensors.torch import save_file
+        from nano_ktrans.models.config import GenericMoeConfig, adapt_config_to_checkpoint
+
+        hf_config = SimpleNamespace(
+            model_type="qwen3_moe",
+            architectures=["Qwen3MoeForCausalLM"],
+            vocab_size=151936,
+            hidden_size=128,
+            intermediate_size=256,
+            moe_intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_experts=8,
+            num_experts_per_tok=2,
+            rms_norm_eps=1e-6,
+            max_position_embeddings=1024,
+            rope_parameters={"rope_theta": 10000.0},
+            hidden_act="silu",
+            decoder_sparse_step=1,
+            mlp_only_layers=[],
+            attention_bias=False,
+            head_dim=32,
+        )
+
+        save_file(
+            {
+                "model.layers.0.mlp.experts.0.gate_proj.weight": torch.zeros(64, 128),
+                "model.layers.0.mlp.experts.0.up_proj.weight": torch.zeros(64, 128),
+                "model.layers.0.mlp.experts.0.down_proj.weight": torch.zeros(128, 64),
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        config = GenericMoeConfig.from_hf_config(hf_config)
+        assert config.arch.experts_are_packed is True
+
+        config = adapt_config_to_checkpoint(config, str(tmp_path))
+        assert config.arch.experts_are_packed is False
+        assert config.arch.expert_proj_names == {
+            "gate": "gate_proj",
+            "up": "up_proj",
+            "down": "down_proj",
+        }
 
 
 # ============================================================
@@ -358,3 +503,13 @@ class TestExpertSelection:
         assert masks[0][0] == True and masks[0].sum() == 1
         assert masks[1][1] == True and masks[1].sum() == 1
         assert masks[2][2] == True and masks[2].sum() == 1
+
+
+class TestOffloadBackendHelpers:
+    def test_normalize_offload_backend_name(self):
+        from nano_ktrans.kernels.offload_backend import normalize_offload_backend_name
+
+        assert normalize_offload_backend_name(None) == "cpu"
+        assert normalize_offload_backend_name("cpu") == "cpu"
+        assert normalize_offload_backend_name("pim") == "pim_shadow"
+        assert normalize_offload_backend_name("pim-shadow") == "pim_shadow"

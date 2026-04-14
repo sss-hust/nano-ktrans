@@ -1,24 +1,34 @@
 [project]
 name = "nano-ktrans"
-version = "0.1.0"
+version = "0.2.0"
 description = "A minimal, educational CPU/GPU Hybrid MoE inference framework, simplified from KTransformers."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 
 dependencies = [
-    "torch==2.4.0",
-    "triton>=2.1.0",
-    "flash-attn==2.6.3",
+    "torch>=2.4.0",
     "transformers>=4.36.0",
     "safetensors>=0.4.0",
-    "kt-kernel",
+    "huggingface_hub>=0.23.0",
     "setuptools",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+]
+accel = [
+    "triton>=2.1.0",
+    "flash-attn==2.6.3",
+    "kt-kernel",
+]
+cuda = [
+    "triton>=2.1.0",
+    "flash-attn==2.6.3",
+]
+cpu-kernel = [
+    "kt-kernel",
 ]
 
 [build-system]

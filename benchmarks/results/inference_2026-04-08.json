@@ -1,0 +1,35 @@
+{
+  "model_path": "/home/yangfu/models/Qwen--Qwen3-30B-A3B-Base",
+  "torch_version": "2.4.0+cu121",
+  "cuda_available": false,
+  "results": [
+    {
+      "backend": "cpu",
+      "status": "ok",
+      "device": "cpu",
+      "num_device_experts": null,
+      "load_seconds": 96.84004576224834,
+      "runs": [
+        {
+          "prompt_tokens": 14,
+          "generated_tokens": 2,
+          "prefill_seconds": 8.331679877825081,
+          "decode_seconds": 1.1636791126802564,
+          "total_seconds": 9.498907077126205,
+          "decode_tokens_per_second": 1.7186868598109306,
+          "output_text": " Kylie Kylie"
+        }
+      ]
+    },
+    {
+      "backend": "cuda",
+      "status": "unavailable",
+      "reason": "torch.cuda.is_available() is false"
+    },
+    {
+      "backend": "cuda_cpu_offload",
+      "status": "unavailable",
+      "reason": "torch.cuda.is_available() is false"
+    }
+  ]
+}
