@@ -185,3 +185,5 @@ tags: [changelog]
 - <!-- updated: 2026-04-16 01:30 --> **[resident-staging]** `ExpertMaterializationManager` 新增 `stage_expert()` 和 `resident_stage_hits`，可以记录“从 resident tier 直接命中 staging cache”的次数，减少 decode promotion 对 checkpoint 扫描的依赖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `55 passed`。
 - <!-- updated: 2026-04-16 01:50 --> **[warm-expert-cache]** `HybridMoE` 新增 demotion 后的 warm expert cache：GPU 驱逐下来的 expert module 可暂存到 CPU 侧 warm cache，后续短时间 re-promotion 时可直接复用 module，减少重复构建成本。
 - <!-- updated: 2026-04-16 01:50 --> **[warm-cache-diagnostics]** 新增 `warm_cache_hits / stores / evictions / size` 诊断，并补充单测覆盖 demote 后缓存与 re-promotion 命中；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `57 passed`。
+- <!-- updated: 2026-04-16 02:10 --> **[ready-prebuild]** token-step pipeline 现在会在 decode 进入模型前，对已经 `READY` 但尚未 materialize 的 promotion 预先构建 expert module，并放入 warm cache；后续 `READY -> APPLIED` promotion 可直接命中 warm cache。
+- <!-- updated: 2026-04-16 02:10 --> **[ready-prebuild-tests]** 新增单测覆盖 `READY` expert 在 pipeline hook 中被 prebuild，再由 promotion 直接命中 warm cache 的路径；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `58 passed`。

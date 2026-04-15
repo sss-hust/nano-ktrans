@@ -119,6 +119,7 @@ class HybridMoE(nn.Module):
         self.warm_cache_hits = 0
         self.warm_cache_stores = 0
         self.warm_cache_evictions = 0
+        self.warm_cache_prebuilt = 0
         self.materialization_manager = ExpertMaterializationManager(
             weight_path=weight_path,
             expert_key_template=self.expert_key_template,
@@ -269,6 +270,41 @@ class HybridMoE(nn.Module):
             )
         return len(ready_keys)
 
+    def _store_warm_module(self, expert_idx: int, module: nn.Module, *, count_store: bool) -> None:
+        if self.expert_warm_cache_size <= 0:
+            return
+        expert_key = str(expert_idx)
+        self.warm_expert_cache[expert_key] = module.to(device="cpu")
+        self.warm_expert_cache.move_to_end(expert_key)
+        if count_store:
+            self.warm_cache_stores += 1
+        while len(self.warm_expert_cache) > self.expert_warm_cache_size:
+            self.warm_expert_cache.popitem(last=False)
+            self.warm_cache_evictions += 1
+
+    def _prebuild_ready_experts(self, *, phase: str, device: torch.device, dtype: torch.dtype) -> int:
+        if (
+            phase != "decode"
+            or self.offload_backend is None
+            or self.expert_warm_cache_size <= 0
+        ):
+            return 0
+        built = 0
+        for op in self.offload_backend.migration_manager.peek_layer(self.layer_idx):
+            if op.dst != ExpertResidency.GPU:
+                continue
+            expert_idx = int(op.expert_idx)
+            if self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx) != MigrationLifecycle.READY:
+                continue
+            expert_key = str(expert_idx)
+            if expert_key in self.gpu_experts or expert_key in self.warm_expert_cache:
+                continue
+            module = self._build_runtime_expert(expert_idx, device, dtype)
+            self._store_warm_module(expert_idx, module, count_store=False)
+            built += 1
+        self.warm_cache_prebuilt += built
+        return built
+
     def _promote_ready_migrations(
         self,
         *,
@@ -398,6 +434,7 @@ class HybridMoE(nn.Module):
     ) -> dict[str, int]:
         prefetch_submitted = self._prime_pending_promotions(phase=phase)
         ready_polled = self.refresh_offload_state()
+        warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
         ready_applied = 0
         ready_deferred = 0
         if phase == "decode":
@@ -414,6 +451,7 @@ class HybridMoE(nn.Module):
             "ready_applied": int(ready_applied),
             "ready_deferred": int(ready_deferred),
             "prefetch_submitted": int(prefetch_submitted),
+            "warm_prebuilt": int(warm_prebuilt),
         }
 
     def _request_prefetch_candidates(self, *, phase: str) -> None:
@@ -467,13 +505,7 @@ class HybridMoE(nn.Module):
         if expert_key in self.gpu_experts:
             expert_module = self.gpu_experts[expert_key]
             del self.gpu_experts[expert_key]
-            if self.expert_warm_cache_size > 0:
-                self.warm_expert_cache[expert_key] = expert_module.to(device="cpu")
-                self.warm_expert_cache.move_to_end(expert_key)
-                self.warm_cache_stores += 1
-                while len(self.warm_expert_cache) > self.expert_warm_cache_size:
-                    self.warm_expert_cache.popitem(last=False)
-                    self.warm_cache_evictions += 1
+            self._store_warm_module(expert_idx, expert_module, count_store=True)
         self.gpu_experts_mask[expert_idx] = False
         self._set_residency(expert_idx, dst)
         return True
@@ -860,6 +892,7 @@ class HybridMoE(nn.Module):
             "warm_cache_hits": self.warm_cache_hits,
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,
+            "warm_cache_prebuilt": self.warm_cache_prebuilt,
             "warm_cache_size": len(self.warm_expert_cache),
             "materialization_manager": self.materialization_manager.diagnostics(),
             "layer_residency": layer_residency,

@@ -195,6 +195,15 @@ tags: [architecture]
     - CPU staging / warm cache：为 promotion 准备的短期中间层
     - GPU resident experts：当前 token window 中的热点执行层
     这虽然还不是最终的异步分层存储系统，但已经更接近真正的缓存层次结构，而不是单纯“现用现建”。
+34. warm cache 现在又前移了一步：
+    - 当某个 promotion 已经进入 `READY`，但还没正式 `APPLIED`
+    - token-step pipeline 会尝试先把对应 expert module build 出来并放进 warm cache
+    - 这样真正执行 `READY -> APPLIED` 时，更多情况下只是在 warm cache 和 GPU resident set 之间搬运，而不是临场 build module
+35. 这意味着当前 decode 前的 pipeline 已经在逐步承担三类工作：
+    - `queued -> prefetching/deferred`
+    - `prefetching -> ready`
+    - `ready -> warm-prebuilt`
+    主路径里剩下的更多是“消费这些已准备好的结果”，而不是从零开始搭建迁移对象。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
