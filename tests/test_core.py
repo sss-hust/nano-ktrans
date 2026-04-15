@@ -1762,6 +1762,108 @@ class TestDynamicScheduler:
         assert diagnostics["materialization_manager"]["pending_prefetches"] == 0
         assert diagnostics["materialization_manager"]["cache_size"] == 1
 
+    def test_hybrid_moe_forward_skips_duplicate_decode_migration_after_pipeline_tick(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.context import reset_context, set_context
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+                decode_require_prefetch_ready=True,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+        ).to(dtype=torch.float32)
+
+        hybrid.offload_backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=1,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="pipeline_then_forward",
+                )
+            ],
+            phase="decode",
+        )
+        hybrid.materialization_manager.stage_expert(
+            0,
+            1,
+            {
+                "gate": torch.randn(8, 4),
+                "up": torch.randn(8, 4),
+                "down": torch.randn(4, 8),
+            },
+        )
+        hybrid.offload_backend.migration_manager.mark_state(
+            0,
+            1,
+            state=MigrationLifecycle.READY,
+            phase="decode",
+        )
+
+        hybrid.advance_offload_pipeline(
+            phase="decode",
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+
+        hidden_states = torch.randn(1, 4)
+        router_logits = torch.tensor([[0.0, 1.0]], dtype=torch.float32)
+        set_context(is_prefill=False)
+        try:
+            output = hybrid(hidden_states, router_logits)
+        finally:
+            reset_context()
+
+        diagnostics = hybrid.diagnostics()
+        assert output.shape == (1, 4)
+        assert diagnostics["pipeline_ready_applied"] == 1
+        assert diagnostics["applied_migration_ops"] == 2
+
     def test_hybrid_moe_demote_keeps_warm_expert_cache(self, tmp_path):
         from safetensors.torch import save_file
 
@@ -2205,6 +2307,7 @@ class TestDynamicScheduler:
             expert_prefetch_workers=0,
             expert_warm_cache_size=4,
         ).to(dtype=torch.float32)
+        hybrid.dynamic_expert_scheduler.plan_layer = lambda *args, **kwargs: []
 
         for expert_idx in (1, 2):
             hybrid.offload_backend.queue_migration_plan(
@@ -2505,6 +2608,234 @@ class TestDynamicScheduler:
         assert layer_diag["pending_ops"] == 1
         assert layer_diag["total_enqueued_ops"] == 2
         assert layer_diag["total_deferred_events"] == 0
+
+    def test_forward_path_keeps_unapplied_ready_promotions_pending(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.context import reset_context, set_context
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(3):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+                decode_require_prefetch_ready=False,
+            ),
+        )
+        residency_plan.layer_state(0).hotness[1] = 9.0
+        residency_plan.layer_state(0).hotness[2] = 5.0
+
+        hybrid = HybridMoE(
+            num_experts=3,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=4,
+        ).to(dtype=torch.float32)
+
+        for expert_idx in (1, 2):
+            hybrid.offload_backend.queue_migration_plan(
+                [
+                    ExpertMigrationOp(
+                        layer_idx=0,
+                        expert_idx=expert_idx,
+                        src=ExpertResidency.PIM,
+                        dst=ExpertResidency.GPU,
+                        reason="forward_ready_budget",
+                    )
+                ],
+                phase="decode",
+            )
+            hybrid.materialization_manager.stage_expert(
+                0,
+                expert_idx,
+                {
+                    "gate": torch.randn(8, 4),
+                    "up": torch.randn(8, 4),
+                    "down": torch.randn(4, 8),
+                },
+            )
+            hybrid.offload_backend.migration_manager.mark_state(
+                0,
+                expert_idx,
+                state=MigrationLifecycle.READY,
+                phase="decode",
+            )
+
+        hidden_states = torch.randn(1, 4)
+        router_logits = torch.tensor([[0.0, 1.0, 0.5]], dtype=torch.float32)
+        set_context(is_prefill=False)
+        try:
+            output = hybrid(hidden_states, router_logits)
+        finally:
+            reset_context()
+
+        diagnostics = hybrid.diagnostics()
+        layer_diag = diagnostics["backend"]["migration_manager"]["layers"][0]
+        lifecycle = {entry["expert_idx"]: entry["state"] for entry in layer_diag["lifecycle"]}
+
+        assert output.shape == (1, 4)
+        assert diagnostics["applied_migration_ops"] == 2  # 1 eviction + 1 promotion
+        assert layer_diag["pending_ops"] == 1
+        assert lifecycle[1] == MigrationLifecycle.APPLIED.value
+        assert lifecycle[2] == MigrationLifecycle.READY.value
+        assert str(1) in hybrid.gpu_experts
+        assert str(2) not in hybrid.gpu_experts
+
+    def test_forward_path_only_removes_applied_demotion(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.expert_mlp import build_expert_module, load_expert_weights
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.context import reset_context, set_context
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=2,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+        ).to(dtype=torch.float32)
+        hybrid.dynamic_expert_scheduler.plan_layer = lambda *args, **kwargs: []
+        hybrid.gpu_experts_mask[1] = True
+
+        hybrid.materialization_manager.stage_expert(
+            0,
+            0,
+            {
+                "gate": torch.randn(8, 4),
+                "up": torch.randn(8, 4),
+                "down": torch.randn(4, 8),
+            },
+        )
+        hybrid.materialization_manager.stage_expert(
+            0,
+            1,
+            {
+                "gate": torch.randn(8, 4),
+                "up": torch.randn(8, 4),
+                "down": torch.randn(4, 8),
+            },
+        )
+        for expert_idx in (0, 1):
+            module = build_expert_module(
+                hidden_size=4,
+                intermediate_size=8,
+                hidden_act="silu",
+                experts_are_packed=False,
+            ).to(dtype=torch.float32)
+            load_expert_weights(module, hybrid.materialization_manager.get_expert(0, expert_idx))
+            hybrid.gpu_experts[str(expert_idx)] = module
+
+        hybrid.offload_backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=0,
+                    src=ExpertResidency.GPU,
+                    dst=ExpertResidency.PIM,
+                    reason="demote_active_skip",
+                ),
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=1,
+                    src=ExpertResidency.GPU,
+                    dst=ExpertResidency.PIM,
+                    reason="demote_inactive_apply",
+                ),
+            ],
+            phase="decode",
+        )
+
+        hidden_states = torch.randn(1, 4)
+        router_logits = torch.tensor([[1.0, 0.0]], dtype=torch.float32)
+        set_context(is_prefill=False)
+        try:
+            output = hybrid(hidden_states, router_logits)
+        finally:
+            reset_context()
+
+        diagnostics = hybrid.diagnostics()
+        layer_diag = diagnostics["backend"]["migration_manager"]["layers"][0]
+        lifecycle = {entry["expert_idx"]: entry["state"] for entry in layer_diag["lifecycle"]}
+
+        assert output.shape == (1, 4)
+        assert layer_diag["pending_ops"] == 1
+        assert lifecycle[0] == MigrationLifecycle.QUEUED.value
+        assert lifecycle[1] == MigrationLifecycle.APPLIED.value
+        assert bool(hybrid.gpu_experts_mask[0].item()) is True
+        assert bool(hybrid.gpu_experts_mask[1].item()) is False
+        assert str(0) in hybrid.gpu_experts
+        assert str(1) not in hybrid.gpu_experts
 
     def test_llm_reset_offload_diagnostics_zeros_runtime_counters(self):
         from nano_ktrans.llm import LLM

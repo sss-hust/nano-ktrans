@@ -274,6 +274,18 @@ tags: [architecture]
     - `warm`: 命中 CPU warm cache，但仍需一次 device activation
     - `cold`: 仍需从 staging/checkpoint 构建 expert module
     系统现在会把这些 source 汇总成 per-run 指标，后面就可以直接比较“有多少 promotion 已经脱离冷启动”。这对评估 PIM 路径能否追上甚至超过 `cpu+gpu` 非常关键，因为它把真正的流水线收益量化出来了。
+49. decode 层内 migration 消费最近也做了进一步收敛：
+    - 旧路径会在 `HybridMoE.forward()` 里先 `drain/take_ready` 整层 queue
+    - 再把本步没消费掉的 op 重新 enqueue 成 `*_deferred`
+    - 当前改成 `peek + selective consume`
+    - 只有真正 `applied` 的 promotion / demotion 才会从 queue 中移除
+    - 因预算不足暂未消费的 `ready/warmed/activated` promotion 会继续保留在原 pending queue 中
+    这样 layer-forward 和 token-step pipeline 不会再围绕同一批 decode migration 做多余的“取出 -> 再塞回”操作。
+50. strict ready-only 语义也被进一步统一到了 layer-forward：
+    - 若 `decode_require_prefetch_ready=true`
+    - layer-forward 只接受 lifecycle 已推进到 `READY/WARMED/ACTIVATED` 的 promotion
+    - 即便 materialization cache 当前步已经同步命中，也不会在同一个 forward 中越级把 expert 直接视为 `ready`
+    这让 token-step pipeline 和 layer-forward 在“什么叫真正 ready”这个问题上保持一致，避免前台逻辑绕过既有流水线阶段。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

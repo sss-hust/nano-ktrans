@@ -802,6 +802,8 @@ class HybridMoE(nn.Module):
             or not self.dynamic_expert_scheduler.enabled
         ):
             return
+        if self.pipeline_ticks > 0:
+            return
 
         require_prefetch_ready = (
             phase == "decode"
@@ -810,9 +812,7 @@ class HybridMoE(nn.Module):
         )
         if require_prefetch_ready:
             self._prime_pending_promotions(phase=phase)
-            queued_ops = self.offload_backend.migration_manager.take_ready_layer(self.layer_idx)
-        else:
-            queued_ops = self.offload_backend.migration_manager.drain_layer(self.layer_idx)
+        queued_ops = self.offload_backend.migration_manager.peek_layer(self.layer_idx)
         if not queued_ops:
             return
 
@@ -821,9 +821,9 @@ class HybridMoE(nn.Module):
         gpu_budget = self._runtime_gpu_budget()
         applied = 0
         applied_promotions = 0
-        deferred = []
         device = hidden_states.device
         dtype = hidden_states.dtype
+        completed_expert_ids: set[int] = set()
         promotion_ops = [op for op in queued_ops if op.dst == ExpertResidency.GPU]
         demotion_ops = [
             op for op in queued_ops if op.src == ExpertResidency.GPU and op.dst != ExpertResidency.GPU
@@ -831,16 +831,17 @@ class HybridMoE(nn.Module):
         promotion_ops.sort(key=lambda op: self._promotion_sort_key(op, active_experts, phase))
 
         for op in demotion_ops:
-            if int(op.expert_idx) in active_experts:
-                deferred.append(op)
+            expert_idx = int(op.expert_idx)
+            if expert_idx in active_experts:
                 continue
-            applied_ok = self._demote_expert_from_gpu(op.expert_idx, op.dst)
+            applied_ok = self._demote_expert_from_gpu(expert_idx, op.dst)
             if applied_ok:
                 applied += 1
+                completed_expert_ids.add(expert_idx)
                 if self.offload_backend is not None:
                     self.offload_backend.migration_manager.mark_state(
                         self.layer_idx,
-                        op.expert_idx,
+                        expert_idx,
                         src=op.src.value,
                         dst=op.dst.value,
                         reason=op.reason,
@@ -856,45 +857,61 @@ class HybridMoE(nn.Module):
                         "reason": op.reason,
                     }
                 )
-            else:
-                deferred.append(op)
 
         protected_experts = set(active_experts)
         protected_experts.update(int(op.expert_idx) for op in promotion_ops)
 
         for op in promotion_ops:
             if applied_promotions >= max_promotions:
-                deferred.append(op)
                 continue
 
-            if bool(self.gpu_experts_mask[int(op.expert_idx)].item()):
+            expert_idx = int(op.expert_idx)
+            if bool(self.gpu_experts_mask[expert_idx].item()):
+                completed_expert_ids.add(expert_idx)
+                if self.offload_backend is not None:
+                    self.offload_backend.migration_manager.mark_state(
+                        self.layer_idx,
+                        expert_idx,
+                        src=op.src.value,
+                        dst=op.dst.value,
+                        reason=op.reason,
+                        phase=phase,
+                        state=MigrationLifecycle.APPLIED,
+                    )
                 continue
 
-            is_ready = self.materialization_manager.is_ready(self.layer_idx, int(op.expert_idx))
-            if is_ready and self.offload_backend is not None:
+            lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+            is_ready = self.materialization_manager.is_ready(self.layer_idx, expert_idx)
+            ready_for_decode = lifecycle in {
+                MigrationLifecycle.READY,
+                MigrationLifecycle.WARMED,
+                MigrationLifecycle.ACTIVATED,
+            }
+            if is_ready and self.offload_backend is not None and not require_prefetch_ready:
                 self.offload_backend.migration_manager.mark_state(
                     self.layer_idx,
-                    op.expert_idx,
+                    expert_idx,
                     src=op.src.value,
                     dst=op.dst.value,
                     reason=op.reason,
                     phase=phase,
                     state=MigrationLifecycle.READY,
                 )
-            if require_prefetch_ready and not is_ready:
-                deferred.append(op)
+                ready_for_decode = True
+            if require_prefetch_ready and not ready_for_decode:
                 self.runtime_deferred_for_prefetch += 1
                 if self.offload_backend is not None:
                     self.offload_backend.migration_manager.mark_state(
                         self.layer_idx,
-                        op.expert_idx,
+                        expert_idx,
                         src=op.src.value,
                         dst=op.dst.value,
                         reason=op.reason,
                         phase=phase,
                         state=MigrationLifecycle.DEFERRED,
                     )
-                self._request_prefetch(int(op.expert_idx))
+                if not is_ready:
+                    self._request_prefetch(expert_idx)
                 continue
 
             while gpu_budget > 0 and int(self.gpu_experts_mask.bool().sum().item()) >= gpu_budget:
@@ -905,12 +922,12 @@ class HybridMoE(nn.Module):
                 )
                 victim = self._pick_eviction_candidate(protected_experts, fallback_dst)
                 if victim is None:
-                    deferred.append(op)
                     break
                 victim_idx, victim_dst = victim
                 self._demote_expert_from_gpu(victim_idx, victim_dst)
                 self.runtime_evictions += 1
                 applied += 1
+                completed_expert_ids.add(victim_idx)
                 if self.offload_backend is not None:
                     self.offload_backend.migration_manager.mark_state(
                         self.layer_idx,
@@ -935,15 +952,16 @@ class HybridMoE(nn.Module):
                     self.decode_prefetch_hits += 1
                 else:
                     self.decode_prefetch_misses += 1
-                applied_ok = self._promote_expert_to_gpu(op.expert_idx, device, dtype)
+                applied_ok = self._promote_expert_to_gpu(expert_idx, device, dtype)
                 if applied_ok:
                     applied += 1
                     applied_promotions += 1
+                    completed_expert_ids.add(expert_idx)
                     self.prefetch_materialized += 1
                     if self.offload_backend is not None:
                         self.offload_backend.migration_manager.mark_state(
                             self.layer_idx,
-                            op.expert_idx,
+                            expert_idx,
                             src=op.src.value,
                             dst=op.dst.value,
                             reason=op.reason,
@@ -959,16 +977,17 @@ class HybridMoE(nn.Module):
                             "reason": op.reason,
                         }
                     )
-                else:
-                    deferred.append(op)
                 continue
 
             continue
 
         self.applied_migration_history = self.applied_migration_history[-64:]
 
-        if deferred:
-            self.offload_backend.queue_migration_plan(deferred, phase=f"{phase}_deferred")
+        if completed_expert_ids:
+            self.offload_backend.migration_manager.take_layer(
+                self.layer_idx,
+                lambda queued_op: int(queued_op.expert_idx) in completed_expert_ids,
+            )
 
         if applied:
             self.applied_migration_ops += applied
