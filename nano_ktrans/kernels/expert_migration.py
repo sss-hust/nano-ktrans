@@ -24,12 +24,6 @@ PERSISTENT_MIGRATION_STATES = {
     MigrationLifecycle.ACTIVATED,
 }
 
-DEFER_OR_BETTER_MIGRATION_STATES = {
-    MigrationLifecycle.DEFERRED,
-    *PERSISTENT_MIGRATION_STATES,
-}
-
-
 @dataclass
 class MigrationPhaseRecord:
     phase: str
@@ -65,6 +59,7 @@ class LayerMigrationQueue:
     total_deferred_events: int = 0
     total_applied_events: int = 0
     total_requeue_preserved_states: int = 0
+    total_stage_skips: int = 0
 
     def _queued_state_for_expert(
         self,
@@ -75,7 +70,7 @@ class LayerMigrationQueue:
         if tracked is None:
             return queued_state
         if queued_state in {MigrationLifecycle.QUEUED, MigrationLifecycle.DEFERRED}:
-            if tracked.state in DEFER_OR_BETTER_MIGRATION_STATES:
+            if tracked.state == MigrationLifecycle.DEFERRED or tracked.state in PERSISTENT_MIGRATION_STATES:
                 self.total_requeue_preserved_states += 1
                 return tracked.state
         return queued_state
@@ -172,6 +167,13 @@ class LayerMigrationQueue:
         expert_idx = int(expert_idx)
         tracked = self.lifecycle.get(expert_idx)
         previous_state = tracked.state if tracked is not None else None
+        if previous_state is not None:
+            if previous_state in PERSISTENT_MIGRATION_STATES and state in {
+                MigrationLifecycle.QUEUED,
+                MigrationLifecycle.DEFERRED,
+            }:
+                self.total_stage_skips += 1
+                return
         if tracked is None:
             tracked = MigrationLifecycleRecord(
                 expert_idx=expert_idx,
@@ -318,6 +320,7 @@ class ExpertMigrationManager:
                     "total_deferred_events": queue.total_deferred_events,
                     "total_applied_events": queue.total_applied_events,
                     "total_requeue_preserved_states": queue.total_requeue_preserved_states,
+                    "total_stage_skips": queue.total_stage_skips,
                     "lifecycle_state_counts": queue.lifecycle_state_counts(),
                     "lifecycle": [
                         {

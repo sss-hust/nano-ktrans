@@ -2291,6 +2291,28 @@ class TestDynamicScheduler:
         assert diagnostics["total_deferred_events"] == 1
         assert diagnostics["total_requeue_preserved_states"] == 1
 
+    def test_migration_queue_skips_backward_stage_regression(self):
+        from nano_ktrans.kernels.expert_migration import ExpertMigrationManager, MigrationLifecycle
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency
+
+        manager = ExpertMigrationManager()
+        op = ExpertMigrationOp(
+            layer_idx=0,
+            expert_idx=5,
+            src=ExpertResidency.PIM,
+            dst=ExpertResidency.GPU,
+            reason="skip_stage_regression",
+        )
+        manager.queue(0, [op], phase="decode")
+        manager.mark_state(0, 5, state=MigrationLifecycle.READY, phase="decode")
+        manager.mark_state(0, 5, state=MigrationLifecycle.DEFERRED, phase="decode")
+
+        diagnostics = manager.diagnostics()["layers"][0]
+        lifecycle = diagnostics["lifecycle"][0]
+
+        assert lifecycle["state"] == MigrationLifecycle.READY.value
+        assert diagnostics["total_stage_skips"] == 1
+
     def test_ready_promotions_do_not_requeue_after_budget_limit(self, tmp_path):
         from safetensors.torch import save_file
 

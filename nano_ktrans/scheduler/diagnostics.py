@@ -63,6 +63,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "migration_prefetching_events": 0,
         "migration_ready_events": 0,
         "migration_requeue_preserved_states": 0,
+        "migration_stage_skips": 0,
         "migration_deferred_events": 0,
         "migration_applied_events": 0,
         "migration_lifecycle_counts": {
@@ -131,6 +132,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
             summary["migration_requeue_preserved_states"] += int(
                 migration_layer.get("total_requeue_preserved_states", 0)
             )
+            summary["migration_stage_skips"] += int(migration_layer.get("total_stage_skips", 0))
             summary["migration_deferred_events"] += int(migration_layer.get("total_deferred_events", 0))
             summary["migration_applied_events"] += int(migration_layer.get("total_applied_events", 0))
             for key in summary["migration_lifecycle_counts"]:
