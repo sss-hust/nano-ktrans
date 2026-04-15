@@ -874,3 +874,33 @@ class TestDynamicScheduler:
         assert diagnostics["materialization_manager"]["prefetch_resolved"] >= 1
         assert diagnostics["materialization_manager"]["cache_size"] >= 1
         assert diagnostics["decode_prefetch_hits"] >= 1
+
+    def test_scheduler_respects_recent_access_and_cooldown(self):
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        masks = [torch.tensor([True, False, False], dtype=torch.bool)]
+        plan = ExpertResidencyPlan.from_gpu_masks(masks, default_offload_tier=ExpertResidency.PIM)
+        scheduler = DynamicExpertScheduler(
+            residency_plan=plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                demotion_idle_steps=2,
+                migration_cooldown_steps=2,
+            ),
+        )
+
+        scheduler.observe(0, torch.tensor([[0]]), phase="decode")
+        ops = scheduler.plan_layer(0, phase="decode")
+        assert [op.expert_idx for op in ops if op.dst == ExpertResidency.GPU] == []
+        assert [op.expert_idx for op in ops if op.src == ExpertResidency.GPU] == []
+
+        scheduler.step = 3
+        scheduler.observe(0, torch.tensor([[1]]), phase="decode")
+        ops = scheduler.plan_layer(0, phase="decode")
+        promoted = [op.expert_idx for op in ops if op.dst == ExpertResidency.GPU]
+        demoted = [op.expert_idx for op in ops if op.src == ExpertResidency.GPU]
+        assert promoted == [1]
+        assert demoted == [0]

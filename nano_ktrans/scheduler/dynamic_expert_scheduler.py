@@ -23,6 +23,8 @@ class SchedulerConfig:
     prefill_force_gpu_budget_per_layer: int = 0
     prefill_offload_threshold_tokens: int = 8
     decode_promote_k: int = 2
+    demotion_idle_steps: int = 0
+    migration_cooldown_steps: int = 0
 
 
 class DynamicExpertScheduler:
@@ -47,6 +49,7 @@ class DynamicExpertScheduler:
             return
         state = self.residency_plan.layer_state(layer_idx)
         state.hotness = update_hotness(state.hotness, topk_ids, decay=self.config.hotness_decay)
+        state.mark_access(topk_ids, self.step)
         self.last_phase = phase
 
     def plan_layer(self, layer_idx: int, *, phase: Optional[str] = None) -> List[ExpertMigrationOp]:
@@ -61,6 +64,9 @@ class DynamicExpertScheduler:
             state,
             gpu_budget=gpu_budget,
             offload_source=self.config.offload_tier,
+            current_step=self.step,
+            demotion_idle_steps=self.config.demotion_idle_steps,
+            migration_cooldown_steps=self.config.migration_cooldown_steps,
         )
         state.pending_ops = list(ops)
         return ops
@@ -94,6 +100,8 @@ class DynamicExpertScheduler:
             "prefill_force_gpu_budget_per_layer": self.config.prefill_force_gpu_budget_per_layer,
             "prefill_offload_threshold_tokens": self.config.prefill_offload_threshold_tokens,
             "decode_promote_k": self.config.decode_promote_k,
+            "demotion_idle_steps": self.config.demotion_idle_steps,
+            "migration_cooldown_steps": self.config.migration_cooldown_steps,
             "last_phase": self.last_phase,
             "offload_tier": self.config.offload_tier.value,
             "last_plan_size": len(self.last_plan),

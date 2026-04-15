@@ -103,6 +103,7 @@ class HybridMoE(nn.Module):
         self.prefetch_enqueued = 0
         self.prefetch_materialized = 0
         self.runtime_evictions = 0
+        self.runtime_skipped_demotion_cooldown = 0
         self.decode_prefetch_hits = 0
         self.decode_prefetch_misses = 0
         self.materialization_manager = ExpertMaterializationManager(
@@ -166,12 +167,8 @@ class HybridMoE(nn.Module):
         if self.residency_plan is None:
             return
         state = self.residency_plan.layer_state(self.layer_idx)
-        if residency == ExpertResidency.GPU:
-            state.residency[expert_idx] = 1
-        elif residency == ExpertResidency.PIM:
-            state.residency[expert_idx] = 2
-        else:
-            state.residency[expert_idx] = 3
+        step = 0 if self.dynamic_expert_scheduler is None else self.dynamic_expert_scheduler.step
+        state.record_residency_change(expert_idx, residency, step=step)
 
     def _runtime_gpu_budget(self) -> int:
         if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
@@ -226,13 +223,30 @@ class HybridMoE(nn.Module):
             return None
 
         hotness = None
+        last_change = None
         if self.residency_plan is not None:
-            hotness = self.residency_plan.layer_state(self.layer_idx).hotness
+            state = self.residency_plan.layer_state(self.layer_idx)
+            hotness = state.hotness
+            last_change = state.last_residency_change_step
+        current_step = 0 if self.dynamic_expert_scheduler is None else self.dynamic_expert_scheduler.step
+        cooldown_steps = 0
+        if self.dynamic_expert_scheduler is not None:
+            cooldown_steps = int(self.dynamic_expert_scheduler.config.migration_cooldown_steps)
+        cooled_candidates = candidates
+        if last_change is not None and cooldown_steps > 0:
+            cooled_candidates = [
+                expert_idx
+                for expert_idx in candidates
+                if current_step - int(last_change[expert_idx].item()) >= cooldown_steps
+            ]
+            if not cooled_candidates:
+                self.runtime_skipped_demotion_cooldown += len(candidates)
+                return None
 
         if hotness is not None and hotness.numel() > 0:
-            coldest = min(candidates, key=lambda expert_idx: float(hotness[expert_idx].item()))
+            coldest = min(cooled_candidates, key=lambda expert_idx: float(hotness[expert_idx].item()))
         else:
-            coldest = min(candidates)
+            coldest = min(cooled_candidates)
         return coldest, fallback_dst
 
     def _promotion_sort_key(self, op, active_experts: set[int], phase: str) -> tuple[int, int, float, int]:
@@ -491,6 +505,7 @@ class HybridMoE(nn.Module):
             "prefetch_enqueued": self.prefetch_enqueued,
             "prefetch_materialized": self.prefetch_materialized,
             "runtime_evictions": self.runtime_evictions,
+            "runtime_skipped_demotion_cooldown": self.runtime_skipped_demotion_cooldown,
             "decode_prefetch_hits": self.decode_prefetch_hits,
             "decode_prefetch_misses": self.decode_prefetch_misses,
             "materialization_manager": self.materialization_manager.diagnostics(),

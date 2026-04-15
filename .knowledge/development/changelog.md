@@ -81,3 +81,8 @@ tags: [changelog]
 
 - `ExpertMaterializationManager.prefetch()` 现在会返回是否真的触发了新预取，避免把重复请求误记成有效预热。
 - `HybridMoE` 诊断新增 `prefetch_enqueued`，用于区分“请求数”和“真正进入 staging cache 的次数”。
+
+<!-- updated: 2026-04-15 07:44 -->
+
+- `LayerExpertState` 新增 `last_access_step` 与 `last_residency_change_step`，scheduler 已开始维护这些 anti-thrashing 元数据。
+- 当前 cooldown / idle-age 逻辑先以配置和诊断形式接入，默认值保持不改变现有行为。

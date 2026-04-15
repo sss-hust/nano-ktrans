@@ -80,6 +80,7 @@ tags: [architecture]
    - 其次是当前 step 已活跃的 expert
    - 同优先级内按 hotness 从高到低
 7. 对没有在本步立刻 promotion 的候选 expert，系统仍会尽早发起预取，为后续 decode step 预热 staging cache。
+8. 调度器当前还会记录每个 expert 的访问时间和最近一次驻留变化时间，为后续 anti-thrashing 策略提供元数据。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
