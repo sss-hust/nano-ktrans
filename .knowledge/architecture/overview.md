@@ -88,6 +88,11 @@ tags: [architecture]
    - prefill 只更新热度和预取候选
    - 不直接发出迁移计划
    这样更符合“prefill 负责探测和预热，decode 负责实际迁移”的目标。
+11. decode 侧现在还支持更保守的 promotion 模式：
+    - 若 `decode_require_prefetch_ready=true`
+    - 则只消费 staging cache 已就绪的 promotion
+    - 未就绪的 expert 先 defer，并继续预热
+    这更接近真正的“迁移未完成时不要阻塞计算”的 overlap 语义。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

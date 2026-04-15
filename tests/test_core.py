@@ -931,3 +931,100 @@ class TestDynamicScheduler:
         diagnostics = scheduler.diagnostics()
         assert diagnostics["prefill_collect_only"] is True
         assert diagnostics["residency_plan"]["layers"][0]["logical_step"] == 8
+
+    def test_hybrid_moe_can_defer_decode_promotion_until_prefetch_ready(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.context import reset_context, set_context
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+                decode_require_prefetch_ready=True,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+        ).to(dtype=torch.float32)
+
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp
+
+        hidden_states = torch.randn(1, 4)
+        router_logits = torch.tensor([[0.0, 1.0]], dtype=torch.float32)
+        set_context(is_prefill=False)
+        try:
+            hybrid.offload_backend.queue_migration_plan(
+                [
+                    ExpertMigrationOp(
+                        layer_idx=0,
+                        expert_idx=1,
+                        src=ExpertResidency.PIM,
+                        dst=ExpertResidency.GPU,
+                        reason="test_promote",
+                    )
+                ],
+                phase="decode",
+            )
+            output = hybrid(hidden_states, router_logits)
+            assert output.shape == (1, 4)
+            assert "1" not in hybrid.gpu_experts
+
+            hybrid.offload_backend.queue_migration_plan(
+                [
+                    ExpertMigrationOp(
+                        layer_idx=0,
+                        expert_idx=1,
+                        src=ExpertResidency.PIM,
+                        dst=ExpertResidency.GPU,
+                        reason="test_promote",
+                    )
+                ],
+                phase="decode",
+            )
+            output = hybrid(hidden_states, router_logits)
+        finally:
+            reset_context()
+
+        assert output.shape == (1, 4)
+        assert "1" in hybrid.gpu_experts
+        diagnostics = hybrid.diagnostics()
+        assert diagnostics["runtime_deferred_for_prefetch"] >= 1

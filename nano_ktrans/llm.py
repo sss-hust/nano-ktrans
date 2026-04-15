@@ -45,6 +45,7 @@ class LLM:
         scheduler_step_stride_decode: int = 1,
         scheduler_demotion_idle_steps: int = 0,
         scheduler_migration_cooldown_steps: int = 0,
+        scheduler_decode_require_prefetch_ready: bool = False,
     ):
         if device is None or device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -134,6 +135,7 @@ class LLM:
                 step_stride_decode=scheduler_step_stride_decode,
                 demotion_idle_steps=scheduler_demotion_idle_steps,
                 migration_cooldown_steps=scheduler_migration_cooldown_steps,
+                decode_require_prefetch_ready=scheduler_decode_require_prefetch_ready,
             ),
         )
 

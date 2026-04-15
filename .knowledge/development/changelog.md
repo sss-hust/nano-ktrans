@@ -91,3 +91,9 @@ tags: [changelog]
 
 - scheduler 新增 `prefill_collect_only`、`step_stride_prefill` 和 `step_stride_decode` 配置。
 - `LLM`、`example.py`、`benchmark_inference.py` 已暴露这些入口，后续可以直接在真实 benchmark 中对比不同调度策略。
+
+<!-- updated: 2026-04-15 08:01 -->
+
+- decode migration 新增 `decode_require_prefetch_ready` 开关。
+- 开启后，未完成 staging prefetch 的 promotion 会先 defer，而不是直接在 decode 关键路径上同步 materialize。
+- 新增测试覆盖“defer until prefetch ready”的 decode migration 路径。

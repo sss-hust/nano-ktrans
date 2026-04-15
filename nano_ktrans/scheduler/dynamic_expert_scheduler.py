@@ -28,6 +28,7 @@ class SchedulerConfig:
     prefill_collect_only: bool = True
     step_stride_prefill: int = 8
     step_stride_decode: int = 1
+    decode_require_prefetch_ready: bool = False
 
 
 class DynamicExpertScheduler:

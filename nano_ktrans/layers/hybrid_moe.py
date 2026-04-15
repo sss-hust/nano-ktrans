@@ -104,6 +104,7 @@ class HybridMoE(nn.Module):
         self.prefetch_materialized = 0
         self.runtime_evictions = 0
         self.runtime_skipped_demotion_cooldown = 0
+        self.runtime_deferred_for_prefetch = 0
         self.decode_prefetch_hits = 0
         self.decode_prefetch_misses = 0
         self.materialization_manager = ExpertMaterializationManager(
@@ -322,6 +323,18 @@ class HybridMoE(nn.Module):
             if bool(self.gpu_experts_mask[int(op.expert_idx)].item()):
                 continue
 
+            require_prefetch_ready = (
+                phase == "decode"
+                and self.dynamic_expert_scheduler is not None
+                and self.dynamic_expert_scheduler.config.decode_require_prefetch_ready
+            )
+            is_ready = self.materialization_manager.is_ready(self.layer_idx, int(op.expert_idx))
+            if require_prefetch_ready and not is_ready:
+                deferred.append(op)
+                self.runtime_deferred_for_prefetch += 1
+                self._request_prefetch(int(op.expert_idx))
+                continue
+
             while gpu_budget > 0 and int(self.gpu_experts_mask.bool().sum().item()) >= gpu_budget:
                 fallback_dst = (
                     self.dynamic_expert_scheduler.config.offload_tier
@@ -346,7 +359,7 @@ class HybridMoE(nn.Module):
                     }
                 )
             else:
-                if self.materialization_manager.is_ready(self.layer_idx, int(op.expert_idx)):
+                if is_ready:
                     self.decode_prefetch_hits += 1
                 else:
                     self.decode_prefetch_misses += 1
@@ -506,6 +519,7 @@ class HybridMoE(nn.Module):
             "prefetch_materialized": self.prefetch_materialized,
             "runtime_evictions": self.runtime_evictions,
             "runtime_skipped_demotion_cooldown": self.runtime_skipped_demotion_cooldown,
+            "runtime_deferred_for_prefetch": self.runtime_deferred_for_prefetch,
             "decode_prefetch_hits": self.decode_prefetch_hits,
             "decode_prefetch_misses": self.decode_prefetch_misses,
             "materialization_manager": self.materialization_manager.diagnostics(),

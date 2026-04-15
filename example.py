@@ -93,6 +93,11 @@ def main():
         default=0,
         help="Minimum logical steps between consecutive residency changes for the same expert.",
     )
+    parser.add_argument(
+        "--scheduler-decode-require-prefetch-ready",
+        action="store_true",
+        help="During decode, only promote experts whose staging prefetch is already ready; otherwise defer migration.",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=256)
     args = parser.parse_args()
 
@@ -120,6 +125,7 @@ def main():
         scheduler_step_stride_decode=args.scheduler_step_stride_decode,
         scheduler_demotion_idle_steps=args.scheduler_demotion_idle_steps,
         scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
+        scheduler_decode_require_prefetch_ready=args.scheduler_decode_require_prefetch_ready,
     )
     
     # Generation test
