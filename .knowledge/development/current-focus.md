@@ -49,6 +49,7 @@ updated: 2026-04-16 02:40
 - [x] token-step pipeline 现在显式区分 `warmed -> activated -> applied`，把 warm cache 上的 device transfer 从最终 promotion 应用里拆出来单独观测
 - [x] token-step pipeline 现在为 activated expert 引入单独 device-side cache，`activated -> applied` 可以优先命中已完成 device transfer 的 module
 - [x] activated cache 现在会按 hotness 和 lifecycle 优先级保留更热的候选，避免 decode 批量 promotion 时把 device-side 预算浪费在较冷 expert 上
+- [x] deferred requeue 现在会保留 `prefetching/ready/warmed/activated` 等中间态，不会把已经准备到一半的 expert 重新打回 `queued/deferred`
 
 ## 阻塞项
 
@@ -83,6 +84,7 @@ updated: 2026-04-16 02:40
 - 当前 `activated` 只是“warm module 已搬到目标 device、尚未进入 GPU resident set”的前台状态，不是真正后台 activation worker
 - 当前 activated cache 仍由前台 token-step hook 填充，尚未按 layer batch 或独立 CUDA stream 做真正异步 activation
 - 当前 activated cache 已开始做预算裁剪，但仍是逐 expert 激活/驱逐，不是按层打包 promotion
+- 当前 deferred op 虽然已保留中间 lifecycle，但 migration queue 还没有按“阶段完成度”做真正的分层批处理
 - 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`

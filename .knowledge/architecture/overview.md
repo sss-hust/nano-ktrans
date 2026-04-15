@@ -240,6 +240,11 @@ tags: [architecture]
     - pipeline 会根据 lifecycle 优先级（`activated > warmed > ready`）和 hotness 只保留更热的候选
     - 较冷的 activated expert 会被降回 CPU warm cache
     这让 decode 前的 device-side 准备不再是“谁先到谁上”，而是更接近真正的热点激活预算管理。
+42. migration queue 的 deferred 重排语义也做了修正：
+    - 早期实现里，已经 `ready/warmed/activated` 的 expert 若因 budget 或时机问题被重新排队，会被简单写回 `deferred`
+    - 现在 queue 会保留这些 expert 已完成的中间 lifecycle，只把“尚未开始”的 op 记成 `queued/deferred`
+    - 这保证了 pipeline 是“逐步向前推进”的，而不是遇到 defer 就把已完成的预热/激活进度丢掉
+    对想把 PIM 路径真正做成流水线来说，这个语义修正很关键，因为它避免了控制面自身制造回退。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

@@ -17,6 +17,14 @@ class MigrationLifecycle(str, Enum):
     APPLIED = "applied"
 
 
+PERSISTENT_MIGRATION_STATES = {
+    MigrationLifecycle.PREFETCHING,
+    MigrationLifecycle.READY,
+    MigrationLifecycle.WARMED,
+    MigrationLifecycle.ACTIVATED,
+}
+
+
 @dataclass
 class MigrationPhaseRecord:
     phase: str
@@ -52,6 +60,19 @@ class LayerMigrationQueue:
     total_deferred_events: int = 0
     total_applied_events: int = 0
 
+    def _queued_state_for_expert(
+        self,
+        expert_idx: int,
+        queued_state: MigrationLifecycle,
+    ) -> MigrationLifecycle:
+        tracked = self.lifecycle.get(int(expert_idx))
+        if tracked is None:
+            return queued_state
+        if queued_state in {MigrationLifecycle.QUEUED, MigrationLifecycle.DEFERRED}:
+            if tracked.state in PERSISTENT_MIGRATION_STATES:
+                return tracked.state
+        return queued_state
+
     def _dedupe_ops(self, ops: Sequence[ExpertMigrationOp]) -> List[ExpertMigrationOp]:
         latest_by_expert: Dict[int, ExpertMigrationOp] = {}
         ordered_expert_ids: List[int] = []
@@ -80,16 +101,15 @@ class LayerMigrationQueue:
             )
         )
         queued_state = MigrationLifecycle.DEFERRED if phase.endswith("_deferred") else MigrationLifecycle.QUEUED
-        if queued_state == MigrationLifecycle.DEFERRED:
-            self.total_deferred_events += len(deduped_ops)
         for op in deduped_ops:
+            expert_state = self._queued_state_for_expert(op.expert_idx, queued_state)
             self.mark_state(
                 op.expert_idx,
                 src=op.src.value,
                 dst=op.dst.value,
                 reason=op.reason,
                 phase=phase,
-                state=queued_state,
+                state=expert_state,
             )
 
     def drain(self) -> List[ExpertMigrationOp]:

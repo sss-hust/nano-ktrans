@@ -2244,3 +2244,25 @@ class TestDynamicScheduler:
         assert "1" in hybrid.gpu_experts
         assert "2" not in hybrid.activated_expert_cache
         assert layer_migration["total_activated_events"] == 1
+
+    def test_migration_queue_preserves_warmed_state_on_deferred_requeue(self):
+        from nano_ktrans.kernels.expert_migration import ExpertMigrationManager, MigrationLifecycle
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency
+
+        manager = ExpertMigrationManager()
+        op = ExpertMigrationOp(
+            layer_idx=0,
+            expert_idx=3,
+            src=ExpertResidency.PIM,
+            dst=ExpertResidency.GPU,
+            reason="preserve_warmed",
+        )
+        manager.queue(0, [op], phase="decode")
+        manager.mark_state(0, 3, state=MigrationLifecycle.WARMED, phase="decode")
+        manager.queue(0, [op], phase="decode_deferred")
+
+        diagnostics = manager.diagnostics()["layers"][0]
+        lifecycle = diagnostics["lifecycle"][0]
+
+        assert lifecycle["state"] == MigrationLifecycle.WARMED.value
+        assert diagnostics["total_deferred_events"] == 0
