@@ -870,6 +870,7 @@ class TestDynamicScheduler:
         assert output.shape == (1, 4)
         diagnostics = hybrid.diagnostics()
         assert diagnostics["prefetch_requested"] >= 2
+        assert diagnostics["prefetch_enqueued"] >= 1
         assert diagnostics["materialization_manager"]["prefetch_resolved"] >= 1
         assert diagnostics["materialization_manager"]["cache_size"] >= 1
         assert diagnostics["decode_prefetch_hits"] >= 1

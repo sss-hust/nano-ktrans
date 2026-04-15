@@ -76,3 +76,8 @@ tags: [changelog]
 
 - decode promotion 队列进一步接入 `prefetch ready` 优先级，优先消费 staging cache 已就绪的专家。
 - `HybridMoE` 诊断中新增 `decode_prefetch_hits` / `decode_prefetch_misses`，用于观察预热是否真正命中 decode promotion。
+
+<!-- updated: 2026-04-15 07:37 -->
+
+- `ExpertMaterializationManager.prefetch()` 现在会返回是否真的触发了新预取，避免把重复请求误记成有效预热。
+- `HybridMoE` 诊断新增 `prefetch_enqueued`，用于区分“请求数”和“真正进入 staging cache 的次数”。

@@ -100,6 +100,7 @@ class HybridMoE(nn.Module):
         self.last_applied_migration_phase = ""
         self.applied_migration_history: list[dict[str, object]] = []
         self.prefetch_requested = 0
+        self.prefetch_enqueued = 0
         self.prefetch_materialized = 0
         self.runtime_evictions = 0
         self.decode_prefetch_hits = 0
@@ -157,8 +158,9 @@ class HybridMoE(nn.Module):
         return expert
 
     def _request_prefetch(self, expert_idx: int) -> None:
-        self.materialization_manager.prefetch(self.layer_idx, expert_idx)
         self.prefetch_requested += 1
+        if self.materialization_manager.prefetch(self.layer_idx, expert_idx):
+            self.prefetch_enqueued += 1
 
     def _set_residency(self, expert_idx: int, residency: ExpertResidency) -> None:
         if self.residency_plan is None:
@@ -486,6 +488,7 @@ class HybridMoE(nn.Module):
             "runtime_gpu_experts": sorted(int(expert_idx) for expert_idx in self.gpu_experts.keys()),
             "gpu_experts_mask_sum": int(self.gpu_experts_mask.bool().sum().item()),
             "prefetch_requested": self.prefetch_requested,
+            "prefetch_enqueued": self.prefetch_enqueued,
             "prefetch_materialized": self.prefetch_materialized,
             "runtime_evictions": self.runtime_evictions,
             "decode_prefetch_hits": self.decode_prefetch_hits,

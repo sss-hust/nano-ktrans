@@ -86,18 +86,19 @@ class ExpertMaterializationManager:
             self._cache.popitem(last=False)
             self.cache_evictions += 1
 
-    def prefetch(self, layer_idx: int, expert_idx: int) -> None:
+    def prefetch(self, layer_idx: int, expert_idx: int) -> bool:
         key = self._cache_key(layer_idx, expert_idx)
         with self._lock:
             if key in self._cache or key in self._futures:
-                return
+                return False
             self.prefetch_submitted += 1
             if self.executor is None:
                 weights = self._load_expert(layer_idx, expert_idx)
                 self._store_cache(key, weights)
                 self.prefetch_resolved += 1
-                return
+                return True
             self._futures[key] = self.executor.submit(self._load_expert, layer_idx, expert_idx)
+            return True
 
     def get_expert(self, layer_idx: int, expert_idx: int) -> ExpertWeights:
         key = self._cache_key(layer_idx, expert_idx)
