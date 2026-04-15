@@ -3,6 +3,18 @@ from __future__ import annotations
 from typing import Any
 
 
+PROFILE_SWEEP_SORT_KEYS = (
+    "decode_tokens_per_second",
+    "pipeline_prefetch_overlap_hits",
+    "pipeline_promotion_source_activated",
+    "pipeline_promotion_source_warm",
+    "pipeline_promotion_source_cold",
+    "pipeline_apply_batch_size_avg",
+    "pipeline_apply_batch_evictions",
+    "runtime_deferred_for_prefetch",
+)
+
+
 def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[str, Any]:
     scheduler = offload_diagnostics.get("dynamic_scheduler", {})
     layers = offload_diagnostics.get("layers", [])
@@ -170,3 +182,79 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
     else:
         summary["pipeline_apply_batch_size_avg"] = None
     return summary
+
+
+def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    profiles: list[dict[str, Any]] = []
+    best_profile: dict[str, Any] | None = None
+    best_decode_tps = float("-inf")
+
+    for result in results:
+        if result.get("status") != "ok":
+            continue
+        scheduler_summary = result.get("scheduler_summary") or {}
+        runs = result.get("runs") or []
+        if not runs:
+            continue
+
+        decode_tps_values = [
+            float(run["decode_tokens_per_second"])
+            for run in runs
+            if run.get("decode_tokens_per_second") is not None
+        ]
+        decode_tps_avg = (
+            sum(decode_tps_values) / len(decode_tps_values)
+            if decode_tps_values
+            else None
+        )
+
+        item = {
+            "backend": result.get("backend"),
+            "scheduler_profile": result.get("scheduler_profile"),
+            "decode_tokens_per_second": decode_tps_avg,
+            "prefill_seconds_avg": (
+                sum(float(run["prefill_seconds"]) for run in runs) / len(runs)
+                if runs
+                else None
+            ),
+            "decode_seconds_avg": (
+                sum(float(run["decode_seconds"]) for run in runs) / len(runs)
+                if runs
+                else None
+            ),
+            "pipeline_prefetch_overlap_hits": int(
+                scheduler_summary.get("pipeline_prefetch_overlap_hits", 0)
+            ),
+            "pipeline_promotion_source_activated": int(
+                scheduler_summary.get("pipeline_promotion_source_activated", 0)
+            ),
+            "pipeline_promotion_source_warm": int(
+                scheduler_summary.get("pipeline_promotion_source_warm", 0)
+            ),
+            "pipeline_promotion_source_cold": int(
+                scheduler_summary.get("pipeline_promotion_source_cold", 0)
+            ),
+            "pipeline_apply_batches": int(
+                scheduler_summary.get("pipeline_apply_batches", 0)
+            ),
+            "pipeline_apply_batch_size_avg": scheduler_summary.get(
+                "pipeline_apply_batch_size_avg"
+            ),
+            "pipeline_apply_batch_evictions": int(
+                scheduler_summary.get("pipeline_apply_batch_evictions", 0)
+            ),
+            "runtime_deferred_for_prefetch": int(
+                scheduler_summary.get("runtime_deferred_for_prefetch", 0)
+            ),
+        }
+        profiles.append(item)
+
+        if decode_tps_avg is not None and decode_tps_avg > best_decode_tps:
+            best_decode_tps = decode_tps_avg
+            best_profile = item
+
+    return {
+        "sort_keys": list(PROFILE_SWEEP_SORT_KEYS),
+        "profiles": profiles,
+        "best_by_decode_tokens_per_second": best_profile,
+    }

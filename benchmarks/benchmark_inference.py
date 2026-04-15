@@ -13,6 +13,7 @@ from nano_ktrans.scheduler import (
     SCHEDULER_PROFILE_NAMES,
     normalize_scheduler_profiles,
     summarize_offload_diagnostics,
+    summarize_profile_sweep_results,
 )
 
 
@@ -390,6 +391,8 @@ def main() -> None:
             )
             result["scheduler_profile"] = scheduler_profile
             results["results"].append(result)
+
+    results["profile_sweep_summary"] = summarize_profile_sweep_results(results["results"])
 
     rendered = json.dumps(results, indent=2, ensure_ascii=False)
     print(rendered)

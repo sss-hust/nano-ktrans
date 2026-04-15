@@ -158,6 +158,22 @@ def main():
     print("Scheduler Summary:")
     from nano_ktrans.scheduler import summarize_offload_diagnostics
     print(summarize_offload_diagnostics(diagnostics))
+    refresh_diag = diagnostics.get("offload_refresh") or {}
+    if refresh_diag:
+        print("Offload Pipeline Totals:")
+        print(
+            {
+                "offload_pipeline_apply_batch_count_total": refresh_diag.get(
+                    "offload_pipeline_apply_batch_count_total", 0
+                ),
+                "offload_pipeline_apply_batch_experts_total": refresh_diag.get(
+                    "offload_pipeline_apply_batch_experts_total", 0
+                ),
+                "offload_pipeline_apply_batch_evictions_total": refresh_diag.get(
+                    "offload_pipeline_apply_batch_evictions_total", 0
+                ),
+            }
+        )
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,5 @@
 from .dynamic_expert_scheduler import DynamicExpertScheduler, SchedulerConfig
-from .diagnostics import summarize_offload_diagnostics
+from .diagnostics import summarize_offload_diagnostics, summarize_profile_sweep_results
 from .profiles import (
     SCHEDULER_PROFILE_BASELINE,
     SCHEDULER_PROFILE_EAGER,
@@ -25,4 +25,5 @@ __all__ = [
     "resolve_scheduler_profile",
     "scheduler_profile_summary",
     "summarize_offload_diagnostics",
+    "summarize_profile_sweep_results",
 ]

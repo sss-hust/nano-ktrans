@@ -300,6 +300,14 @@ tags: [architecture]
     - 每次 tick 会带出本步 `apply_batch_count / apply_batch_experts / apply_batch_evictions`
     - 模型级 runtime 诊断则会累计成 `offload_pipeline_apply_batch_*_total`
     这样后续 benchmark 就不只是看 layer 本地的 ready/applied 计数，而能直接从 step 级视角判断“流水线这一轮到底像不像一个批处理系统”。
+54. benchmark/profile sweep 现在也有了更贴近决策的自动汇总层：
+    - 会把每个 profile 的 `decode_tokens_per_second`
+    - `pipeline_prefetch_overlap_hits`
+    - `promotion source breakdown`
+    - `pipeline_apply_batch_*`
+    - `runtime_deferred_for_prefetch`
+    汇总成结构化摘要，并直接给出按 decode TPS 选出的当前最好 profile。
+    这让后续调度实验不再只是看原始 JSON，而是能更快回答“哪组策略最接近让 PIM 路径追上甚至超过 `cpu+gpu`”。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

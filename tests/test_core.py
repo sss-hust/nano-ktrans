@@ -697,6 +697,63 @@ class TestDynamicScheduler:
         assert summary["pipeline_apply_batch_evictions"] == 1
         assert summary["pipeline_apply_batch_size_avg"] == pytest.approx(2.5)
 
+    def test_summarize_profile_sweep_results(self):
+        from nano_ktrans.scheduler import summarize_profile_sweep_results
+
+        summary = summarize_profile_sweep_results(
+            [
+                {
+                    "backend": "cuda_cpu_offload",
+                    "scheduler_profile": "baseline",
+                    "status": "ok",
+                    "scheduler_summary": {
+                        "pipeline_prefetch_overlap_hits": 2,
+                        "pipeline_promotion_source_activated": 1,
+                        "pipeline_promotion_source_warm": 1,
+                        "pipeline_promotion_source_cold": 3,
+                        "pipeline_apply_batches": 2,
+                        "pipeline_apply_batch_size_avg": 1.5,
+                        "pipeline_apply_batch_evictions": 1,
+                        "runtime_deferred_for_prefetch": 4,
+                    },
+                    "runs": [
+                        {
+                            "prefill_seconds": 2.0,
+                            "decode_seconds": 1.0,
+                            "decode_tokens_per_second": 1.5,
+                        }
+                    ],
+                },
+                {
+                    "backend": "cuda_cpu_offload",
+                    "scheduler_profile": "overlap_safe",
+                    "status": "ok",
+                    "scheduler_summary": {
+                        "pipeline_prefetch_overlap_hits": 4,
+                        "pipeline_promotion_source_activated": 3,
+                        "pipeline_promotion_source_warm": 0,
+                        "pipeline_promotion_source_cold": 1,
+                        "pipeline_apply_batches": 3,
+                        "pipeline_apply_batch_size_avg": 2.0,
+                        "pipeline_apply_batch_evictions": 2,
+                        "runtime_deferred_for_prefetch": 1,
+                    },
+                    "runs": [
+                        {
+                            "prefill_seconds": 1.5,
+                            "decode_seconds": 0.5,
+                            "decode_tokens_per_second": 2.5,
+                        }
+                    ],
+                },
+            ]
+        )
+
+        assert len(summary["profiles"]) == 2
+        assert summary["best_by_decode_tokens_per_second"]["scheduler_profile"] == "overlap_safe"
+        assert summary["best_by_decode_tokens_per_second"]["decode_tokens_per_second"] == pytest.approx(2.5)
+        assert "pipeline_apply_batch_size_avg" in summary["sort_keys"]
+
     def test_migration_pipeline_runtime_tracks_apply_batch_totals(self):
         from nano_ktrans.kernels.migration_runtime import MigrationPipelineRuntime
 
