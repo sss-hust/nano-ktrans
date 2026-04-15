@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-16 02:10
+updated: 2026-04-16 02:25
 ---
 
 # 🔥 当前工作焦点
@@ -44,6 +44,7 @@ updated: 2026-04-16 02:10
 - [x] GPU promotion 预热现在可优先直接从 offload resident 权重 staging，不必总是回到 checkpoint/safetensors 扫描
 - [x] GPU demotion 现在支持 warm expert cache，短时间内回迁的热点 expert 可避免重复模块构建
 - [x] ready expert 现在可以在 token-step pipeline 中提前 prebuild 到 warm cache，进一步压缩 applied 时的 build/load 开销
+- [x] warm cache 的 prebuild 现在固定落在 CPU，再在 promotion 时执行单次 device transfer，避免 prebuild 阶段污染 GPU 关键路径
 
 ## 阻塞项
 
@@ -74,6 +75,7 @@ updated: 2026-04-16 02:10
 - 当前 resident-tier 预热已先在 CPU/PIM backend 上打通 export 接口，但还只是同步导出到 CPU staging cache，不是 PIM->GPU 真异步搬运
 - 当前 warm expert cache 还只是 CPU 侧 module 复用层，尚未接入 GPU pinned buffer / CUDA graph / 异步拷贝优化
 - 当前 prebuild 仍由前台 pipeline hook 触发，适合做控制面和缓存层验证；要真正赢过 cpu+gpu，还需要把 prebuild 与 PIM resident 传输变成异步后台执行
+- 当前 warm cache 的 device transfer 仍是同步 `.to(device)`，还没拆成独立 CUDA stream 或后台 copy worker
 - 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`

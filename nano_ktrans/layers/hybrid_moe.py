@@ -120,6 +120,7 @@ class HybridMoE(nn.Module):
         self.warm_cache_stores = 0
         self.warm_cache_evictions = 0
         self.warm_cache_prebuilt = 0
+        self.warm_cache_device_transfers = 0
         self.materialization_manager = ExpertMaterializationManager(
             weight_path=weight_path,
             expert_key_template=self.expert_key_template,
@@ -282,6 +283,11 @@ class HybridMoE(nn.Module):
             self.warm_expert_cache.popitem(last=False)
             self.warm_cache_evictions += 1
 
+    def _activate_warm_module(self, module: nn.Module, device: torch.device, dtype: torch.dtype) -> nn.Module:
+        non_blocking = device.type == "cuda"
+        self.warm_cache_device_transfers += 1
+        return module.to(device=device, dtype=dtype, non_blocking=non_blocking)
+
     def _prebuild_ready_experts(self, *, phase: str, device: torch.device, dtype: torch.dtype) -> int:
         if (
             phase != "decode"
@@ -299,7 +305,7 @@ class HybridMoE(nn.Module):
             expert_key = str(expert_idx)
             if expert_key in self.gpu_experts or expert_key in self.warm_expert_cache:
                 continue
-            module = self._build_runtime_expert(expert_idx, device, dtype)
+            module = self._build_runtime_expert(expert_idx, torch.device("cpu"), dtype)
             self._store_warm_module(expert_idx, module, count_store=False)
             built += 1
         self.warm_cache_prebuilt += built
@@ -493,7 +499,7 @@ class HybridMoE(nn.Module):
             warm_module = self.warm_expert_cache.pop(expert_key, None)
             if warm_module is not None:
                 self.warm_cache_hits += 1
-                self.gpu_experts[expert_key] = warm_module.to(device=device, dtype=dtype)
+                self.gpu_experts[expert_key] = self._activate_warm_module(warm_module, device, dtype)
             else:
                 self.gpu_experts[expert_key] = self._build_runtime_expert(expert_idx, device, dtype)
         self.gpu_experts_mask[expert_idx] = True
@@ -893,6 +899,7 @@ class HybridMoE(nn.Module):
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,
             "warm_cache_prebuilt": self.warm_cache_prebuilt,
+            "warm_cache_device_transfers": self.warm_cache_device_transfers,
             "warm_cache_size": len(self.warm_expert_cache),
             "materialization_manager": self.materialization_manager.diagnostics(),
             "layer_residency": layer_residency,

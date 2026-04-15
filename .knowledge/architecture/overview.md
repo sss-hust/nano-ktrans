@@ -204,6 +204,11 @@ tags: [architecture]
     - `prefetching -> ready`
     - `ready -> warm-prebuilt`
     主路径里剩下的更多是“消费这些已准备好的结果”，而不是从零开始搭建迁移对象。
+36. `ready -> warm-prebuilt` 这一步现在也更贴近流水线语义：
+    - prebuild 固定在 CPU 侧完成
+    - promotion 时才把 warm module 激活到目标 device
+    - 因此 pipeline hook 负责“对象准备”，而 decode promotion 更像“最后一跳激活”
+    这比一开始直接在 GPU 上 build module 更适合后续接真正的异步拷贝和独立 stream。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

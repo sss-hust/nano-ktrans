@@ -187,3 +187,5 @@ tags: [changelog]
 - <!-- updated: 2026-04-16 01:50 --> **[warm-cache-diagnostics]** 新增 `warm_cache_hits / stores / evictions / size` 诊断，并补充单测覆盖 demote 后缓存与 re-promotion 命中；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `57 passed`。
 - <!-- updated: 2026-04-16 02:10 --> **[ready-prebuild]** token-step pipeline 现在会在 decode 进入模型前，对已经 `READY` 但尚未 materialize 的 promotion 预先构建 expert module，并放入 warm cache；后续 `READY -> APPLIED` promotion 可直接命中 warm cache。
 - <!-- updated: 2026-04-16 02:10 --> **[ready-prebuild-tests]** 新增单测覆盖 `READY` expert 在 pipeline hook 中被 prebuild，再由 promotion 直接命中 warm cache 的路径；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `58 passed`。
+- <!-- updated: 2026-04-16 02:25 --> **[cpu-prebuild]** ready expert 的 prebuild 现在固定在 CPU 上进行，promotion 再执行单次 device transfer；这让 token-step pipeline 的 prebuild 更接近“后台准备对象，前台只做激活”。
+- <!-- updated: 2026-04-16 02:25 --> **[warm-transfer-diagnostics]** 新增 `warm_cache_device_transfers` 统计，用于观察 warm cache 命中后实际发生了多少次 CPU->device 激活拷贝。

@@ -1879,6 +1879,7 @@ class TestDynamicScheduler:
 
         assert build_calls == [1]
         assert diagnostics["warm_cache_hits"] == 1
+        assert diagnostics["warm_cache_device_transfers"] == 1
 
     def test_hybrid_moe_pipeline_prebuilds_ready_expert(self, tmp_path):
         from safetensors.torch import save_file
@@ -1976,3 +1977,4 @@ class TestDynamicScheduler:
         assert build_calls == [1]
         assert diagnostics["warm_cache_prebuilt"] == 1
         assert diagnostics["warm_cache_hits"] == 1
+        assert diagnostics["warm_cache_device_transfers"] == 1
