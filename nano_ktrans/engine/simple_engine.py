@@ -47,6 +47,7 @@ class SimpleEngine:
         """
         处理初始 prompt。长序列自动切换到 chunked prefill。
         """
+        self.model.model.refresh_offload_state()
         seq_len = input_ids.shape[1]
         assert input_ids.shape[0] == 1, "Only batch size 1 is supported."
         assert seq_len <= self.max_seq_len, f"Prompt ({seq_len}) > max_seq_len ({self.max_seq_len})."
@@ -111,6 +112,7 @@ class SimpleEngine:
     @torch.no_grad()
     def decode_step(self, input_id: torch.Tensor, current_seq_len: int) -> torch.Tensor:
         """Generate a single token."""
+        self.model.model.refresh_offload_state()
         assert input_id.shape == (1, 1), "Decode step requires input shape (1, 1)"
         assert current_seq_len < self.max_seq_len, "KV Cache exhausted."
         

@@ -147,3 +147,9 @@ tags: [changelog]
 
 - `ExpertMaterializationManager` 新增 completion queue；后台 prefetch 完成后会先进入 queue，再由 `poll_ready()` 消费。
 - benchmark 摘要新增 `prefetch_completion_events`，用于区分“future 已完成”和“前台已轮询并入 cache”。
+
+<!-- updated: 2026-04-15 11:45 -->
+
+- `HybridMoE.forward()` 不再每层自行轮询 ready prefetch。
+- `SimpleEngine` 现在会在每次 `prefill` / `decode_step` 进入模型前统一调用 `MixtralModel.refresh_offload_state()`，将 ready 刷新上移到 token-step 级别。
+- 新增对应测试，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `49 passed`。

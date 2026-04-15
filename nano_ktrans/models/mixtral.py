@@ -247,6 +247,15 @@ class MixtralModel(nn.Module):
         
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def refresh_offload_state(self) -> int:
+        ready_count = 0
+        for decoder_layer in self.layers:
+            hybrid_moe = getattr(decoder_layer, "hybrid_moe", None)
+            if hybrid_moe is None:
+                continue
+            ready_count += int(hybrid_moe.refresh_offload_state())
+        return ready_count
+
     def forward(
         self,
         input_ids: torch.LongTensor,

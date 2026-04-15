@@ -1357,6 +1357,24 @@ class TestDynamicScheduler:
         assert diagnostics["prefetch_candidate_scans"] >= 1
         assert diagnostics["prefetch_enqueued"] >= 2
 
+    def test_mixtral_model_refreshes_all_hybrid_moe_layers(self):
+        from nano_ktrans.models.mixtral import MixtralModel
+
+        class DummyHybrid:
+            def __init__(self, ready_count):
+                self.ready_count = ready_count
+
+            def refresh_offload_state(self):
+                return self.ready_count
+
+        model = MixtralModel.__new__(MixtralModel)
+        layer0 = type("Layer", (), {"hybrid_moe": DummyHybrid(2)})()
+        layer1 = type("Layer", (), {"hybrid_moe": None})()
+        layer2 = type("Layer", (), {"hybrid_moe": DummyHybrid(3)})()
+        model.layers = [layer0, layer1, layer2]
+
+        assert model.refresh_offload_state() == 5
+
     def test_materialization_manager_poll_ready(self, tmp_path):
         from safetensors.torch import save_file
 

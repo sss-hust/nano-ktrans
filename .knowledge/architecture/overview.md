@@ -136,6 +136,10 @@ tags: [architecture]
     - 预取 future 完成时先进入 completion queue
     - `poll_ready()` 只消费 completion queue，而不是每次扫描所有 future
     这让后台 prefetch 的完成路径更接近真正的 completion event。
+21. ready 轮询入口现在也从 `HybridMoE.forward()` 上移到了 engine/model 层：
+    - `SimpleEngine.prefill()` / `decode_step()` 进入模型前先统一刷新一次
+    - `MixtralModel.refresh_offload_state()` 再遍历各层 `HybridMoE`
+    这样同一个 token step 只做一次全局 ready 刷新，而不是每层重复触发。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
