@@ -86,3 +86,8 @@ tags: [changelog]
 
 - `LayerExpertState` 新增 `last_access_step` 与 `last_residency_change_step`，scheduler 已开始维护这些 anti-thrashing 元数据。
 - 当前 cooldown / idle-age 逻辑先以配置和诊断形式接入，默认值保持不改变现有行为。
+
+<!-- updated: 2026-04-15 07:53 -->
+
+- scheduler 新增 `prefill_collect_only`、`step_stride_prefill` 和 `step_stride_decode` 配置。
+- `LLM`、`example.py`、`benchmark_inference.py` 已暴露这些入口，后续可以直接在真实 benchmark 中对比不同调度策略。

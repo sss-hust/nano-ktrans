@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 07:44
+updated: 2026-04-15 07:53
 ---
 
 # 🔥 当前工作焦点
@@ -24,6 +24,7 @@ updated: 2026-04-15 07:44
 - [x] decode promotion 会优先消费“已预热完成”的 expert
 - [x] 预取诊断已区分 request 与真实 enqueue，避免把重复请求误当成有效预热
 - [x] scheduler 已接入 access age / residency cooldown 元数据与诊断
+- [x] scheduler 已支持逻辑步长和 prefill collect-only 模式
 
 ## 阻塞项
 
@@ -44,7 +45,11 @@ updated: 2026-04-15 07:44
 - 当前 promotion 队列已按“本步活跃优先 + hotness 优先”排序，resident set 更接近真正的热点 cache 语义
 - 当前 decode promotion 排序已经额外把“prefetch 已就绪”作为最高优先级，减少关键路径阻塞
 - 当前诊断里已经能分辨：
- - 当前 scheduler 已维护每个 expert 的：
+- 当前 scheduler 已维护每个 expert 的：
+ - 当前 scheduler 已新增两类更接近真实系统的控制旋钮：
+  - `prefill_collect_only`
+  - `step_stride_prefill / step_stride_decode`
+- 当前 scheduler 已维护每个 expert 的：
   - `last_access_step`
   - `last_residency_change_step`
   为后续真正的 anti-thrashing 策略做准备
@@ -71,6 +76,9 @@ updated: 2026-04-15 07:44
 - 把“prefetch ready”从统计信号继续推进到真正的异步 overlap 控制条件
 - 开始把 migration 控制面指标压实，方便后续用 benchmark 观察 overlap 是否真的发生
 - 下一步可以在不破坏现有行为的前提下，逐步把 cooldown / idle-age 从纯诊断指标提升成可调度约束
+- 后续 benchmark 可以开始扫描：
+  - prefill 只收集热度 vs prefill 直接发迁移计划
+  - 大步长 prefill vs 小步长 decode
 - 对比 `cpu`、`cuda_cpu_offload`、`pim` 三条链路的 prefill/decode 延迟与 offload 命中分布
 - 继续补充架构说明、依赖说明和版本化文档
 

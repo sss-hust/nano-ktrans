@@ -542,6 +542,7 @@ class TestDynamicScheduler:
                 gpu_budget_per_layer=1,
                 prefill_force_gpu_budget_per_layer=2,
                 offload_tier=ExpertResidency.PIM,
+                prefill_collect_only=False,
             ),
         )
         scheduler.observe(0, torch.tensor([[2, 3], [2, 2]]), phase="prefill")
@@ -700,6 +701,7 @@ class TestDynamicScheduler:
                 prefill_force_gpu_budget_per_layer=2,
                 offload_tier=ExpertResidency.PIM,
                 decode_promote_k=1,
+                prefill_collect_only=False,
             ),
         )
 
@@ -897,10 +899,35 @@ class TestDynamicScheduler:
         assert [op.expert_idx for op in ops if op.dst == ExpertResidency.GPU] == []
         assert [op.expert_idx for op in ops if op.src == ExpertResidency.GPU] == []
 
-        scheduler.step = 3
+        scheduler.observe(0, torch.tensor([[2]]), phase="decode")
+        scheduler.observe(0, torch.tensor([[1]]), phase="decode")
         scheduler.observe(0, torch.tensor([[1]]), phase="decode")
         ops = scheduler.plan_layer(0, phase="decode")
         promoted = [op.expert_idx for op in ops if op.dst == ExpertResidency.GPU]
         demoted = [op.expert_idx for op in ops if op.src == ExpertResidency.GPU]
         assert promoted == [1]
         assert demoted == [0]
+
+    def test_scheduler_prefill_collect_only(self):
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        masks = [torch.tensor([True, False, False], dtype=torch.bool)]
+        plan = ExpertResidencyPlan.from_gpu_masks(masks, default_offload_tier=ExpertResidency.PIM)
+        scheduler = DynamicExpertScheduler(
+            residency_plan=plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                prefill_force_gpu_budget_per_layer=2,
+                prefill_collect_only=True,
+                offload_tier=ExpertResidency.PIM,
+            ),
+        )
+
+        scheduler.observe(0, torch.tensor([[1, 2], [2, 2]]), phase="prefill")
+        ops = scheduler.plan_layer(0, phase="prefill")
+        assert ops == []
+        diagnostics = scheduler.diagnostics()
+        assert diagnostics["prefill_collect_only"] is True
+        assert diagnostics["residency_plan"]["layers"][0]["logical_step"] == 8

@@ -64,6 +64,35 @@ def main():
         default=None,
         help="During prefill, temporarily target at least this many GPU-resident experts per layer.",
     )
+    parser.add_argument(
+        "--scheduler-prefill-collect-only",
+        action="store_true",
+        help="During prefill, only collect hotness and prefetch candidates without emitting migrations.",
+    )
+    parser.add_argument(
+        "--scheduler-step-stride-prefill",
+        type=int,
+        default=8,
+        help="Logical step stride used when updating hotness during prefill.",
+    )
+    parser.add_argument(
+        "--scheduler-step-stride-decode",
+        type=int,
+        default=1,
+        help="Logical step stride used when updating hotness during decode.",
+    )
+    parser.add_argument(
+        "--scheduler-demotion-idle-steps",
+        type=int,
+        default=0,
+        help="Minimum logical steps since last access before a GPU expert may be demoted.",
+    )
+    parser.add_argument(
+        "--scheduler-migration-cooldown-steps",
+        type=int,
+        default=0,
+        help="Minimum logical steps between consecutive residency changes for the same expert.",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=256)
     args = parser.parse_args()
 
@@ -86,6 +115,11 @@ def main():
         },
         enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
         scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
+        scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,
+        scheduler_step_stride_prefill=args.scheduler_step_stride_prefill,
+        scheduler_step_stride_decode=args.scheduler_step_stride_decode,
+        scheduler_demotion_idle_steps=args.scheduler_demotion_idle_steps,
+        scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
     )
     
     # Generation test

@@ -25,6 +25,9 @@ class SchedulerConfig:
     decode_promote_k: int = 2
     demotion_idle_steps: int = 0
     migration_cooldown_steps: int = 0
+    prefill_collect_only: bool = True
+    step_stride_prefill: int = 8
+    step_stride_decode: int = 1
 
 
 class DynamicExpertScheduler:
@@ -48,8 +51,11 @@ class DynamicExpertScheduler:
         if not self.enabled:
             return
         state = self.residency_plan.layer_state(layer_idx)
+        stride = self.config.step_stride_prefill if phase == "prefill" else self.config.step_stride_decode
+        stride = max(1, int(stride))
+        state.logical_step += stride
         state.hotness = update_hotness(state.hotness, topk_ids, decay=self.config.hotness_decay)
-        state.mark_access(topk_ids, self.step)
+        state.mark_access(topk_ids, state.logical_step)
         self.last_phase = phase
 
     def plan_layer(self, layer_idx: int, *, phase: Optional[str] = None) -> List[ExpertMigrationOp]:
@@ -57,6 +63,9 @@ class DynamicExpertScheduler:
             return []
         state = self.residency_plan.layer_state(layer_idx)
         effective_phase = self.last_phase if phase is None else phase
+        if effective_phase == "prefill" and self.config.prefill_collect_only:
+            state.pending_ops = []
+            return []
         gpu_budget = self.config.gpu_budget_per_layer
         if effective_phase == "prefill":
             gpu_budget = max(gpu_budget, self.config.prefill_force_gpu_budget_per_layer)
@@ -64,7 +73,7 @@ class DynamicExpertScheduler:
             state,
             gpu_budget=gpu_budget,
             offload_source=self.config.offload_tier,
-            current_step=self.step,
+            current_step=state.logical_step,
             demotion_idle_steps=self.config.demotion_idle_steps,
             migration_cooldown_steps=self.config.migration_cooldown_steps,
         )
@@ -102,6 +111,9 @@ class DynamicExpertScheduler:
             "decode_promote_k": self.config.decode_promote_k,
             "demotion_idle_steps": self.config.demotion_idle_steps,
             "migration_cooldown_steps": self.config.migration_cooldown_steps,
+            "prefill_collect_only": self.config.prefill_collect_only,
+            "step_stride_prefill": self.config.step_stride_prefill,
+            "step_stride_decode": self.config.step_stride_decode,
             "last_phase": self.last_phase,
             "offload_tier": self.config.offload_tier.value,
             "last_plan_size": len(self.last_plan),

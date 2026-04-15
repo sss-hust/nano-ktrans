@@ -54,6 +54,7 @@ class LayerExpertState:
     hotness: torch.Tensor
     last_access_step: torch.Tensor
     last_residency_change_step: torch.Tensor
+    logical_step: int = 0
     epoch: int = 0
     pending_ops: List[ExpertMigrationOp] = field(default_factory=list)
 
@@ -161,6 +162,7 @@ class ExpertResidencyPlan:
                     "gpu_experts": layer.count(ExpertResidency.GPU),
                     "pim_experts": layer.count(ExpertResidency.PIM),
                     "cpu_experts": layer.count(ExpertResidency.CPU),
+                    "logical_step": layer.logical_step,
                     "epoch": layer.epoch,
                 }
                 for layer in self.layers

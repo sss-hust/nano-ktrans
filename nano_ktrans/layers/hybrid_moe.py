@@ -167,7 +167,7 @@ class HybridMoE(nn.Module):
         if self.residency_plan is None:
             return
         state = self.residency_plan.layer_state(self.layer_idx)
-        step = 0 if self.dynamic_expert_scheduler is None else self.dynamic_expert_scheduler.step
+        step = state.logical_step
         state.record_residency_change(expert_idx, residency, step=step)
 
     def _runtime_gpu_budget(self) -> int:
@@ -228,7 +228,7 @@ class HybridMoE(nn.Module):
             state = self.residency_plan.layer_state(self.layer_idx)
             hotness = state.hotness
             last_change = state.last_residency_change_step
-        current_step = 0 if self.dynamic_expert_scheduler is None else self.dynamic_expert_scheduler.step
+        current_step = 0 if self.residency_plan is None else self.residency_plan.layer_state(self.layer_idx).logical_step
         cooldown_steps = 0
         if self.dynamic_expert_scheduler is not None:
             cooldown_steps = int(self.dynamic_expert_scheduler.config.migration_cooldown_steps)

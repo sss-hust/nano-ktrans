@@ -40,6 +40,11 @@ class LLM:
         scheduler_prefill_force_gpu_budget_per_layer: Optional[int] = None,
         scheduler_prefill_offload_threshold_tokens: int = 8,
         scheduler_decode_promote_k: int = 2,
+        scheduler_prefill_collect_only: bool = True,
+        scheduler_step_stride_prefill: int = 8,
+        scheduler_step_stride_decode: int = 1,
+        scheduler_demotion_idle_steps: int = 0,
+        scheduler_migration_cooldown_steps: int = 0,
     ):
         if device is None or device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -124,6 +129,11 @@ class LLM:
                 ),
                 prefill_offload_threshold_tokens=scheduler_prefill_offload_threshold_tokens,
                 decode_promote_k=scheduler_decode_promote_k,
+                prefill_collect_only=scheduler_prefill_collect_only,
+                step_stride_prefill=scheduler_step_stride_prefill,
+                step_stride_decode=scheduler_step_stride_decode,
+                demotion_idle_steps=scheduler_demotion_idle_steps,
+                migration_cooldown_steps=scheduler_migration_cooldown_steps,
             ),
         )
 

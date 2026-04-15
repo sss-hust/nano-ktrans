@@ -87,6 +87,11 @@ def benchmark_backend(
     pim_prefill_token_threshold: int,
     enable_dynamic_expert_scheduler: bool,
     scheduler_prefill_force_gpu_budget_per_layer: int | None,
+    scheduler_prefill_collect_only: bool,
+    scheduler_step_stride_prefill: int,
+    scheduler_step_stride_decode: int,
+    scheduler_demotion_idle_steps: int,
+    scheduler_migration_cooldown_steps: int,
 ) -> dict[str, Any]:
     llm = None
     offload_backend = "cpu"
@@ -149,6 +154,11 @@ def benchmark_backend(
             offload_backend_kwargs=offload_backend_kwargs,
             enable_dynamic_expert_scheduler=enable_dynamic_expert_scheduler,
             scheduler_prefill_force_gpu_budget_per_layer=scheduler_prefill_force_gpu_budget_per_layer,
+            scheduler_prefill_collect_only=scheduler_prefill_collect_only,
+            scheduler_step_stride_prefill=scheduler_step_stride_prefill,
+            scheduler_step_stride_decode=scheduler_step_stride_decode,
+            scheduler_demotion_idle_steps=scheduler_demotion_idle_steps,
+            scheduler_migration_cooldown_steps=scheduler_migration_cooldown_steps,
         )
         synchronize_if_needed(llm.device)
         load_seconds = time.perf_counter() - load_start
@@ -284,6 +294,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="During prefill, temporarily target at least this many GPU-resident experts per layer.",
     )
+    parser.add_argument(
+        "--scheduler-prefill-collect-only",
+        action="store_true",
+        help="During prefill, only collect hotness and prefetch candidates without emitting migrations.",
+    )
+    parser.add_argument("--scheduler-step-stride-prefill", type=int, default=8)
+    parser.add_argument("--scheduler-step-stride-decode", type=int, default=1)
+    parser.add_argument("--scheduler-demotion-idle-steps", type=int, default=0)
+    parser.add_argument("--scheduler-migration-cooldown-steps", type=int, default=0)
     parser.add_argument("--json-out", help="Optional path to write the benchmark results as JSON.")
     return parser.parse_args()
 
@@ -319,6 +338,11 @@ def main() -> None:
             pim_prefill_token_threshold=args.pim_prefill_token_threshold,
             enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
             scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
+            scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,
+            scheduler_step_stride_prefill=args.scheduler_step_stride_prefill,
+            scheduler_step_stride_decode=args.scheduler_step_stride_decode,
+            scheduler_demotion_idle_steps=args.scheduler_demotion_idle_steps,
+            scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
         )
         results["results"].append(result)
 
