@@ -177,6 +177,15 @@ tags: [architecture]
     - layer forward：消费剩余未就绪/未提前应用的迁移，并执行真实 GPU/offload 混合计算
     - backend/offload tier：继续承担 CPU/PIM 数值计算
     这比早期“所有迁移控制都塞在 `HybridMoE.forward()` 里”更接近真正的流水线系统。
+30. resident tier 到 staging cache 的路径也开始收敛：
+    - `ExpertOffloadBackend` 现在可以导出 resident expert 权重
+    - `HybridMoE._request_prefetch()` 会优先尝试从 offload backend 直接拿 resident weights
+    - `ExpertMaterializationManager.stage_expert()` 则把这些 resident weights 直接放入 CPU staging cache
+    这意味着 GPU promotion 的预热路径，已经开始从“checkpoint -> staging”转向“resident tier -> staging”。
+31. 当前这条 resident staging 路径的意义在于：
+    - 对 CPU backend，它避免反复回 safetensors 扫描本来就常驻在 backend 内存里的专家
+    - 对 PIM backend，它为后续真正的 “PIM resident -> GPU resident” 数据面留出了统一接口
+    - 但现在它仍是同步 CPU staging，不是独立的 PIM->GPU 异步搬运
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

@@ -275,6 +275,16 @@ class CPUMoEBackend(ExpertOffloadBackend):
     def update_gpu_expert_mask(self, gpu_experts_mask: torch.Tensor) -> None:
         self.gpu_experts_mask = gpu_experts_mask.to(dtype=torch.uint8, device="cpu")
 
+    def export_expert_weights(self, expert_idx: int) -> Dict[str, torch.Tensor] | None:
+        cpu_slot = self.cpu_expert_lookup.get(int(expert_idx))
+        if cpu_slot is None:
+            return None
+        return {
+            "gate": self._gate_proj[cpu_slot].to(dtype=self.fallback_dtype).contiguous().cpu(),
+            "up": self._up_proj[cpu_slot].to(dtype=self.fallback_dtype).contiguous().cpu(),
+            "down": self._down_proj[cpu_slot].to(dtype=self.fallback_dtype).contiguous().cpu(),
+        }
+
     def _compute_expert_output_cpu(self, states: torch.Tensor, cpu_slot: int) -> torch.Tensor:
         states = states.to(dtype=self.fallback_dtype)
         gate = F.linear(states, self._gate_proj[cpu_slot])

@@ -54,6 +54,9 @@ class ExpertOffloadBackend(ABC):
     def update_gpu_expert_mask(self, gpu_experts_mask: torch.Tensor) -> None:
         raise NotImplementedError
 
+    def export_expert_weights(self, expert_idx: int) -> dict[str, torch.Tensor] | None:
+        return None
+
     def queue_migration_plan(self, ops: list[Any], *, phase: str = "") -> None:
         self.migration_submit_calls += 1
         self.last_migration_plan_size = len(ops)

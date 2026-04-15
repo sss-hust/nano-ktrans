@@ -55,6 +55,7 @@ class ExpertMaterializationManager:
         self.prefetch_resolved = 0
         self.prefetch_polled_ready = 0
         self.prefetch_completion_events = 0
+        self.resident_stage_hits = 0
         self.cache_hits = 0
         self.sync_loads = 0
         self.cache_evictions = 0
@@ -93,6 +94,22 @@ class ExpertMaterializationManager:
         while len(self._cache) > self.max_cached_experts:
             self._cache.popitem(last=False)
             self.cache_evictions += 1
+
+    def stage_expert(
+        self,
+        layer_idx: int,
+        expert_idx: int,
+        weights: ExpertWeights,
+    ) -> bool:
+        key = self._cache_key(layer_idx, expert_idx)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return False
+            self._store_cache(key, {name: tensor.contiguous().cpu() for name, tensor in weights.items()})
+            self.prefetch_resolved += 1
+            self.resident_stage_hits += 1
+        return True
 
     def _on_prefetch_done(self, key: ExpertKey, future: Future) -> None:
         with self._lock:
@@ -175,6 +192,7 @@ class ExpertMaterializationManager:
                 "prefetch_resolved": self.prefetch_resolved,
                 "prefetch_polled_ready": self.prefetch_polled_ready,
                 "prefetch_completion_events": self.prefetch_completion_events,
+                "resident_stage_hits": self.resident_stage_hits,
                 "cache_hits": self.cache_hits,
                 "sync_loads": self.sync_loads,
                 "cache_evictions": self.cache_evictions,

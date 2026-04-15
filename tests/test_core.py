@@ -1472,6 +1472,44 @@ class TestDynamicScheduler:
         assert manager.has_cached(0, 1) is True
         assert manager.has_pending_or_ready() is False
 
+    def test_materialization_manager_can_stage_resident_expert(self):
+        from nano_ktrans.kernels.expert_materialization import ExpertMaterializationManager
+
+        manager = ExpertMaterializationManager.__new__(ExpertMaterializationManager)
+        manager.expert_key_template = ""
+        manager.expert_proj_names = None
+        manager.max_cached_experts = 2
+        manager.prefetch_workers = 0
+        manager.executor = None
+        from collections import OrderedDict, deque
+        from threading import Lock
+
+        manager._cache = OrderedDict()
+        manager._futures = {}
+        manager._ready_queue = deque()
+        manager._lock = Lock()
+        manager.prefetch_submitted = 0
+        manager.prefetch_resolved = 0
+        manager.prefetch_polled_ready = 0
+        manager.prefetch_completion_events = 0
+        manager.resident_stage_hits = 0
+        manager.cache_hits = 0
+        manager.sync_loads = 0
+        manager.cache_evictions = 0
+
+        staged = manager.stage_expert(
+            0,
+            3,
+            {
+                "gate": torch.randn(8, 4),
+                "up": torch.randn(8, 4),
+                "down": torch.randn(4, 8),
+            },
+        )
+        assert staged is True
+        assert manager.has_cached(0, 3) is True
+        assert manager.diagnostics()["prefetch_resolved"] == 1
+
     def test_hybrid_moe_pipeline_applies_ready_promotions(self, tmp_path):
         from safetensors.torch import save_file
 
@@ -1646,5 +1684,76 @@ class TestDynamicScheduler:
         assert stats["prefetch_submitted"] == 1
         assert stats["ready_applied"] == 0
         assert diagnostics["prefetch_enqueued"] == 1
-        assert submitted == [(0, 1)]
+        assert submitted == []
+        assert diagnostics["materialization_manager"]["resident_stage_hits"] == 1
         assert lifecycle["state"] == MigrationLifecycle.DEFERRED.value
+
+    def test_hybrid_moe_prefetch_uses_offload_resident_weights(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=1,
+        ).to(dtype=torch.float32)
+
+        calls = []
+
+        def fake_export(expert_idx):
+            calls.append(expert_idx)
+            return {
+                "gate": torch.ones(8, 4),
+                "up": torch.ones(8, 4),
+                "down": torch.ones(4, 8),
+            }
+
+        hybrid.offload_backend.export_expert_weights = fake_export
+        hybrid._request_prefetch(1)
+        diagnostics = hybrid.diagnostics()
+
+        assert calls == [1]
+        assert diagnostics["prefetch_enqueued"] == 1
+        assert diagnostics["materialization_manager"]["pending_prefetches"] == 0
+        assert diagnostics["materialization_manager"]["cache_size"] == 1
