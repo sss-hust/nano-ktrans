@@ -697,6 +697,38 @@ class TestDynamicScheduler:
         assert summary["pipeline_apply_batch_evictions"] == 1
         assert summary["pipeline_apply_batch_size_avg"] == pytest.approx(2.5)
 
+    def test_migration_pipeline_runtime_tracks_apply_batch_totals(self):
+        from nano_ktrans.kernels.migration_runtime import MigrationPipelineRuntime
+
+        class DummyLayer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.ones(1))
+                self.hybrid_moe = self
+
+            def advance_offload_pipeline(self, *, phase, device, dtype):
+                return {
+                    "ready_polled": 1,
+                    "ready_applied": 2,
+                    "ready_deferred": 1,
+                    "prefetch_submitted": 3,
+                    "activation_ready": 4,
+                    "apply_batch_count": 2,
+                    "apply_batch_experts": 5,
+                    "apply_batch_evictions": 1,
+                }
+
+        runtime = MigrationPipelineRuntime()
+        tick = runtime.tick_layers([DummyLayer()], phase="decode")
+        diagnostics = runtime.diagnostics()
+
+        assert tick["apply_batch_count"] == 2
+        assert tick["apply_batch_experts"] == 5
+        assert tick["apply_batch_evictions"] == 1
+        assert diagnostics["offload_pipeline_apply_batch_count_total"] == 2
+        assert diagnostics["offload_pipeline_apply_batch_experts_total"] == 5
+        assert diagnostics["offload_pipeline_apply_batch_evictions_total"] == 1
+
     def test_residency_plan_from_gpu_masks(self):
         from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
 

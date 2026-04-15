@@ -296,6 +296,10 @@ tags: [architecture]
     - 会先统一计算当前 batch 还缺多少个 GPU slot
     - 再通过 `_evict_for_promotion_batch()` 一次性完成这一批次需要的 eviction
     这样 batch 内的各个 expert 不再各自循环做一次 resident budget 检查，控制面更接近“先为本批次腾位，再消费本批次”。
+53. token-step runtime 现在也开始汇总这批次推进信息：
+    - 每次 tick 会带出本步 `apply_batch_count / apply_batch_experts / apply_batch_evictions`
+    - 模型级 runtime 诊断则会累计成 `offload_pipeline_apply_batch_*_total`
+    这样后续 benchmark 就不只是看 layer 本地的 ready/applied 计数，而能直接从 step 级视角判断“流水线这一轮到底像不像一个批处理系统”。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

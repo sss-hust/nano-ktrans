@@ -652,6 +652,9 @@ class HybridMoE(nn.Module):
             "prefetch_submitted": int(prefetch_submitted),
             "warm_prebuilt": int(warm_prebuilt),
             "activation_ready": int(activation_ready),
+            "apply_batch_count": int(self.pipeline_apply_batches),
+            "apply_batch_experts": int(self.pipeline_apply_batch_experts),
+            "apply_batch_evictions": int(self.pipeline_apply_batch_evictions),
         }
 
     def _request_prefetch_candidates(self, *, phase: str) -> None:
