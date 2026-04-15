@@ -46,6 +46,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "pipeline_promotion_source_cold": 0,
         "pipeline_apply_batches": 0,
         "pipeline_apply_batch_experts": 0,
+        "pipeline_apply_batch_evictions": 0,
         "activation_submitted": 0,
         "activation_ready": 0,
         "activation_applied": 0,
@@ -108,6 +109,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["pipeline_promotion_source_cold"] += int(layer.get("pipeline_promotion_source_cold", 0))
         summary["pipeline_apply_batches"] += int(layer.get("pipeline_apply_batches", 0))
         summary["pipeline_apply_batch_experts"] += int(layer.get("pipeline_apply_batch_experts", 0))
+        summary["pipeline_apply_batch_evictions"] += int(layer.get("pipeline_apply_batch_evictions", 0))
         summary["activation_submitted"] += int(layer.get("activation_submitted", 0))
         summary["activation_ready"] += int(layer.get("activation_ready", 0))
         summary["activation_applied"] += int(layer.get("activation_applied", 0))

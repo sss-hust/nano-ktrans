@@ -686,6 +686,7 @@ class TestDynamicScheduler:
                     {
                         "pipeline_apply_batches": 2,
                         "pipeline_apply_batch_experts": 5,
+                        "pipeline_apply_batch_evictions": 1,
                     }
                 ],
             }
@@ -693,6 +694,7 @@ class TestDynamicScheduler:
 
         assert summary["pipeline_apply_batches"] == 2
         assert summary["pipeline_apply_batch_experts"] == 5
+        assert summary["pipeline_apply_batch_evictions"] == 1
         assert summary["pipeline_apply_batch_size_avg"] == pytest.approx(2.5)
 
     def test_residency_plan_from_gpu_masks(self):
@@ -2203,6 +2205,7 @@ class TestDynamicScheduler:
         assert layer_migration["pending_ops"] == 0
         assert diagnostics["pipeline_apply_batches"] == 1
         assert diagnostics["pipeline_apply_batch_experts"] == 1
+        assert diagnostics["pipeline_apply_batch_evictions"] == 1
 
     def test_hybrid_moe_promotion_prefers_activated_cache(self, tmp_path):
         from safetensors.torch import save_file
@@ -2622,6 +2625,7 @@ class TestDynamicScheduler:
         assert layer_diag["total_deferred_events"] == 0
         assert diagnostics["pipeline_apply_batches"] == 1
         assert diagnostics["pipeline_apply_batch_experts"] == 1
+        assert diagnostics["pipeline_apply_batch_evictions"] == 1
 
     def test_forward_path_keeps_unapplied_ready_promotions_pending(self, tmp_path):
         from safetensors.torch import save_file

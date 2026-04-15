@@ -291,6 +291,11 @@ tags: [architecture]
     - 然后经由 `_select_ready_promotion_batch()` 做同层批次截断
     - pipeline 诊断会记录 `pipeline_apply_batches` 和 `pipeline_apply_batch_experts`
     这还不是最终的“同层真正批量 apply”，但系统已经开始把 decode promotion 从逐 expert 思维转成“先选一批值得应用的 expert，再执行该批次”。
+52. 这一批次语义又继续往前推进了一层：
+    - pipeline 在真正 apply 这一批 ready experts 之前
+    - 会先统一计算当前 batch 还缺多少个 GPU slot
+    - 再通过 `_evict_for_promotion_batch()` 一次性完成这一批次需要的 eviction
+    这样 batch 内的各个 expert 不再各自循环做一次 resident budget 检查，控制面更接近“先为本批次腾位，再消费本批次”。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

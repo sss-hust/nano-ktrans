@@ -120,6 +120,7 @@ class HybridMoE(nn.Module):
         self.pipeline_promotion_source_cold = 0
         self.pipeline_apply_batches = 0
         self.pipeline_apply_batch_experts = 0
+        self.pipeline_apply_batch_evictions = 0
         self.expert_warm_cache_size = max(0, int(expert_warm_cache_size))
         self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
@@ -540,76 +541,14 @@ class HybridMoE(nn.Module):
             return 0, deferred
         gpu_budget = self._runtime_gpu_budget()
         protected_experts = {int(op.expert_idx) for op in promotion_ops}
+        resident_ops = [op for op in promotion_ops if bool(self.gpu_experts_mask[int(op.expert_idx)].item())]
+        pending_ops = [op for op in promotion_ops if not bool(self.gpu_experts_mask[int(op.expert_idx)].item())]
 
         applied = 0
         completed_expert_ids: set[int] = set()
-        for op in promotion_ops:
+        for op in resident_ops:
             expert_idx = int(op.expert_idx)
-            if bool(self.gpu_experts_mask[expert_idx].item()):
-                if self.offload_backend is not None:
-                    self.offload_backend.migration_manager.mark_state(
-                        self.layer_idx,
-                        expert_idx,
-                        src=op.src.value,
-                        dst=op.dst.value,
-                        reason=op.reason,
-                        phase=phase,
-                        state=MigrationLifecycle.APPLIED,
-                    )
-                completed_expert_ids.add(expert_idx)
-                continue
-
-            while gpu_budget > 0 and int(self.gpu_experts_mask.bool().sum().item()) >= gpu_budget:
-                fallback_dst = self.dynamic_expert_scheduler.config.offload_tier
-                victim = self._pick_eviction_candidate(protected_experts, fallback_dst)
-                if victim is None:
-                    deferred += 1
-                    break
-                victim_idx, victim_dst = victim
-                self._demote_expert_from_gpu(victim_idx, victim_dst)
-                self.runtime_evictions += 1
-                self.applied_migration_ops += 1
-                self.applied_migration_history.append(
-                    {
-                        "phase": phase,
-                        "expert_idx": victim_idx,
-                        "src": ExpertResidency.GPU.value,
-                        "dst": victim_dst.value,
-                        "reason": "evict_for_ready_promotion",
-                    }
-                )
-                self.offload_backend.migration_manager.mark_state(
-                    self.layer_idx,
-                    victim_idx,
-                    src=ExpertResidency.GPU.value,
-                    dst=victim_dst.value,
-                    reason="evict_for_ready_promotion",
-                    phase=phase,
-                    state=MigrationLifecycle.APPLIED,
-                )
-            else:
-                source = self._promote_expert_to_gpu(expert_idx, device, dtype)
-                if source == "activated":
-                    self.pipeline_promotion_source_activated += 1
-                elif source == "warm":
-                    self.pipeline_promotion_source_warm += 1
-                else:
-                    self.pipeline_promotion_source_cold += 1
-                self.decode_prefetch_hits += 1
-                self.prefetch_materialized += 1
-                self.applied_migration_ops += 1
-                applied += 1
-                if source != "cold":
-                    self.pipeline_prefetch_overlap_hits += 1
-                self.applied_migration_history.append(
-                    {
-                        "phase": phase,
-                        "expert_idx": expert_idx,
-                        "src": op.src.value,
-                        "dst": op.dst.value,
-                        "reason": op.reason,
-                    }
-                )
+            if self.offload_backend is not None:
                 self.offload_backend.migration_manager.mark_state(
                     self.layer_idx,
                     expert_idx,
@@ -619,8 +558,56 @@ class HybridMoE(nn.Module):
                     phase=phase,
                     state=MigrationLifecycle.APPLIED,
                 )
-                completed_expert_ids.add(expert_idx)
-                continue
+            completed_expert_ids.add(expert_idx)
+
+        if gpu_budget > 0 and pending_ops:
+            current_gpu_residents = int(self.gpu_experts_mask.bool().sum().item())
+            free_slots = max(0, gpu_budget - current_gpu_residents)
+            required_slots = max(0, len(pending_ops) - free_slots)
+            evicted = self._evict_for_promotion_batch(
+                protected_experts=protected_experts,
+                fallback_dst=self.dynamic_expert_scheduler.config.offload_tier,
+                required_slots=required_slots,
+                phase=phase,
+            )
+            promotable = min(len(pending_ops), free_slots + evicted)
+            deferred += max(0, len(pending_ops) - promotable)
+            pending_ops = pending_ops[:promotable]
+
+        for op in pending_ops:
+            expert_idx = int(op.expert_idx)
+            source = self._promote_expert_to_gpu(expert_idx, device, dtype)
+            if source == "activated":
+                self.pipeline_promotion_source_activated += 1
+            elif source == "warm":
+                self.pipeline_promotion_source_warm += 1
+            else:
+                self.pipeline_promotion_source_cold += 1
+            self.decode_prefetch_hits += 1
+            self.prefetch_materialized += 1
+            self.applied_migration_ops += 1
+            applied += 1
+            if source != "cold":
+                self.pipeline_prefetch_overlap_hits += 1
+            self.applied_migration_history.append(
+                {
+                    "phase": phase,
+                    "expert_idx": expert_idx,
+                    "src": op.src.value,
+                    "dst": op.dst.value,
+                    "reason": op.reason,
+                }
+            )
+            self.offload_backend.migration_manager.mark_state(
+                self.layer_idx,
+                expert_idx,
+                src=op.src.value,
+                dst=op.dst.value,
+                reason=op.reason,
+                phase=phase,
+                state=MigrationLifecycle.APPLIED,
+            )
+            completed_expert_ids.add(expert_idx)
 
         if applied:
             self.last_applied_migration_phase = phase
@@ -757,6 +744,48 @@ class HybridMoE(nn.Module):
             self.pipeline_apply_batches += 1
             self.pipeline_apply_batch_experts += len(selected)
         return selected, deferred
+
+    def _evict_for_promotion_batch(
+        self,
+        *,
+        protected_experts: set[int],
+        fallback_dst: ExpertResidency,
+        required_slots: int,
+        phase: str,
+    ) -> int:
+        if required_slots <= 0:
+            return 0
+
+        evicted = 0
+        for _ in range(required_slots):
+            victim = self._pick_eviction_candidate(protected_experts, fallback_dst)
+            if victim is None:
+                break
+            victim_idx, victim_dst = victim
+            self._demote_expert_from_gpu(victim_idx, victim_dst)
+            self.runtime_evictions += 1
+            self.applied_migration_ops += 1
+            self.pipeline_apply_batch_evictions += 1
+            self.applied_migration_history.append(
+                {
+                    "phase": phase,
+                    "expert_idx": victim_idx,
+                    "src": ExpertResidency.GPU.value,
+                    "dst": victim_dst.value,
+                    "reason": "evict_for_ready_promotion",
+                }
+            )
+            self.offload_backend.migration_manager.mark_state(
+                self.layer_idx,
+                victim_idx,
+                src=ExpertResidency.GPU.value,
+                dst=victim_dst.value,
+                reason="evict_for_ready_promotion",
+                phase=phase,
+                state=MigrationLifecycle.APPLIED,
+            )
+            evicted += 1
+        return evicted
 
     def _pick_eviction_candidate(
         self,
@@ -1148,6 +1177,7 @@ class HybridMoE(nn.Module):
             "pipeline_promotion_source_cold": self.pipeline_promotion_source_cold,
             "pipeline_apply_batches": self.pipeline_apply_batches,
             "pipeline_apply_batch_experts": self.pipeline_apply_batch_experts,
+            "pipeline_apply_batch_evictions": self.pipeline_apply_batch_evictions,
             "warm_cache_hits": self.warm_cache_hits,
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,

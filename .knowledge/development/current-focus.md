@@ -59,6 +59,7 @@ updated: 2026-04-16 02:40
 - [x] decode 层内 migration 消费已改成 `peek + selective consume`，只移除真正 `applied` 的 promotion/demotion，预算不足或未 ready 的 op 会继续留在原 pending queue 中
 - [x] layer-forward 在 strict ready-only 模式下现在只消费 lifecycle 已推进到 `ready/warmed/activated` 的 promotion，不再因为同一步 materialization cache 命中而越级 promotion
 - [x] ready promotion 现在已先经过同层小批量截断，并开始输出 `pipeline_apply_batches / pipeline_apply_batch_experts`，为后续真正的 layer-batched apply 做诊断基础
+- [x] ready promotion 批次现在会先统一计算并执行本批次需要的 eviction，减少 batch 内每个 expert 重复做 GPU budget 检查
 
 ## 阻塞项
 
@@ -98,12 +99,14 @@ updated: 2026-04-16 02:40
 - 当前 ready promotion 还没有完全拆成 batch commit；虽然已避免重复 requeue，但 applied/deferred 仍是逐 expert 判定
 - 当前 decode 层内 migration 虽已避免 drain/requeue 抖动，但 promotion/apply 仍是逐 expert 提交，尚未做真正的同层批量 apply
 - 当前 ready promotion 虽然已有 batch 统计和批次截断，但真正的 apply 路径仍是逐 expert 激活/插入 resident set
+- 当前 ready promotion 虽然已经批量算出了 eviction 需求，但 batch 内真正的 warm/activated 命中与 resident set 注入仍是逐 expert 完成
 - 当前 strict ready-only 语义已经覆盖 resident staging，但 `prefetching -> ready` 仍然依赖前台 refresh，而不是真 completion event 驱动
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总
 - 当前 prebuild 已做候选裁剪，但 warm cache 还没有独立的“低优先级淘汰”策略，仍然主要依赖容量上限和 LRU
 - 当前已经能量化 promotion source，但 benchmark 还缺少跨 profile 的自动排名/对比表
 - 将 `activated -> applied` 从当前逐 expert 路径推进到同层小批量提交，继续压 decode 关键路径上的 Python 控制开销
 - 将当前“批次截断 + 逐 expert apply”升级成真正的 per-layer batched activation/apply，尽量减少 batch 内重复的 GPU budget 检查与 Python 字典操作
+- 将当前“批量预腾位 + 逐 expert apply”继续推进成真正的 per-layer batched activation/apply，把 warm/activated 命中后的 resident set 注入也批处理化
 - 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`

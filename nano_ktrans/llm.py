@@ -265,6 +265,7 @@ class LLM:
             hybrid_moe.pipeline_promotion_source_cold = 0
             hybrid_moe.pipeline_apply_batches = 0
             hybrid_moe.pipeline_apply_batch_experts = 0
+            hybrid_moe.pipeline_apply_batch_evictions = 0
             hybrid_moe.warm_cache_hits = 0
             hybrid_moe.warm_cache_stores = 0
             hybrid_moe.warm_cache_evictions = 0
