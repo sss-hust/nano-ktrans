@@ -22,6 +22,7 @@ def synchronize_if_needed(device: str) -> None:
 
 
 def run_single_generation(llm: LLM, prompt: str, max_new_tokens: int) -> dict[str, Any]:
+    llm.reset_offload_diagnostics()
     inputs = llm.tokenizer(prompt, return_tensors="pt")
     input_ids = inputs.input_ids.to(llm.device)
     prompt_tokens = int(input_ids.shape[1])
@@ -59,6 +60,7 @@ def run_single_generation(llm: LLM, prompt: str, max_new_tokens: int) -> dict[st
     generated_tokens = len(generated_ids)
     decode_tps = generated_tokens / decode_seconds if decode_seconds > 0 else None
 
+    offload_diagnostics = llm.get_offload_diagnostics()
     result: dict[str, Any] = {
         "prompt_tokens": prompt_tokens,
         "generated_tokens": generated_tokens,
@@ -67,6 +69,7 @@ def run_single_generation(llm: LLM, prompt: str, max_new_tokens: int) -> dict[st
         "total_seconds": total_seconds,
         "decode_tokens_per_second": decode_tps,
         "output_text": output_text,
+        "scheduler_summary": summarize_offload_diagnostics(offload_diagnostics),
     }
     if llm.device.startswith("cuda") and torch.cuda.is_available():
         result["cuda_max_memory_bytes"] = int(torch.cuda.max_memory_allocated())

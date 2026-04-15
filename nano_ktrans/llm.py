@@ -241,3 +241,32 @@ class LLM:
             "layer_count": len(layers),
             "layers": layers,
         }
+
+    def reset_offload_diagnostics(self) -> None:
+        for layer in self.model.model.layers:
+            hybrid_moe = getattr(layer, "hybrid_moe", None)
+            if hybrid_moe is None:
+                continue
+            hybrid_moe.prefetch_requested = 0
+            hybrid_moe.prefetch_enqueued = 0
+            hybrid_moe.prefetch_materialized = 0
+            hybrid_moe.prefetch_candidate_scans = 0
+            hybrid_moe.runtime_evictions = 0
+            hybrid_moe.runtime_skipped_demotion_cooldown = 0
+            hybrid_moe.runtime_deferred_for_prefetch = 0
+            hybrid_moe.decode_prefetch_hits = 0
+            hybrid_moe.decode_prefetch_misses = 0
+            hybrid_moe.pipeline_ready_applied = 0
+            hybrid_moe.pipeline_ready_deferred = 0
+            hybrid_moe.pipeline_ticks = 0
+            hybrid_moe.warm_cache_hits = 0
+            hybrid_moe.warm_cache_stores = 0
+            hybrid_moe.warm_cache_evictions = 0
+            hybrid_moe.warm_cache_prebuilt = 0
+            hybrid_moe.warm_cache_device_transfers = 0
+            hybrid_moe.activated_cache_hits = 0
+            hybrid_moe.activated_cache_stores = 0
+            hybrid_moe.activated_cache_evictions = 0
+            hybrid_moe.activation_submitted = 0
+            hybrid_moe.activation_ready = 0
+            hybrid_moe.activation_applied = 0

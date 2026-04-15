@@ -2406,3 +2406,47 @@ class TestDynamicScheduler:
         assert layer_diag["pending_ops"] == 1
         assert layer_diag["total_enqueued_ops"] == 2
         assert layer_diag["total_deferred_events"] == 0
+
+    def test_llm_reset_offload_diagnostics_zeros_runtime_counters(self):
+        from nano_ktrans.llm import LLM
+
+        llm = LLM.__new__(LLM)
+
+        class DummyHybrid:
+            def __init__(self):
+                self.prefetch_requested = 3
+                self.prefetch_enqueued = 2
+                self.prefetch_materialized = 1
+                self.prefetch_candidate_scans = 4
+                self.runtime_evictions = 5
+                self.runtime_skipped_demotion_cooldown = 6
+                self.runtime_deferred_for_prefetch = 7
+                self.decode_prefetch_hits = 8
+                self.decode_prefetch_misses = 9
+                self.pipeline_ready_applied = 10
+                self.pipeline_ready_deferred = 11
+                self.pipeline_ticks = 12
+                self.warm_cache_hits = 13
+                self.warm_cache_stores = 14
+                self.warm_cache_evictions = 15
+                self.warm_cache_prebuilt = 16
+                self.warm_cache_device_transfers = 17
+                self.activated_cache_hits = 18
+                self.activated_cache_stores = 19
+                self.activated_cache_evictions = 20
+                self.activation_submitted = 21
+                self.activation_ready = 22
+                self.activation_applied = 23
+
+        dummy_hybrid = DummyHybrid()
+        layer = type("Layer", (), {"hybrid_moe": dummy_hybrid})()
+        llm.model = type("Wrapper", (), {"model": type("Inner", (), {"layers": [layer]})()})()
+
+        llm.reset_offload_diagnostics()
+
+        assert dummy_hybrid.prefetch_requested == 0
+        assert dummy_hybrid.runtime_evictions == 0
+        assert dummy_hybrid.pipeline_ticks == 0
+        assert dummy_hybrid.warm_cache_prebuilt == 0
+        assert dummy_hybrid.activated_cache_hits == 0
+        assert dummy_hybrid.activation_applied == 0

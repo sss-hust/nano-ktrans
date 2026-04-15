@@ -259,6 +259,11 @@ tags: [architecture]
     - decode prime 阶段也不会在同一步把它直接视作 `ready`
     - 它必须先经过下一次 refresh/pipeline tick，才会真正进入 ready-only 消费路径
     这样系统里的 `ready` 更接近“上一阶段已经完成”的稳定信号，而不是“本阶段临时凑出来”的同步捷径。
+46. benchmark 侧现在也开始按“单次 run”观察流水线：
+    - 每次 generation 前会重置 HybridMoE 的 runtime/queue/cache 计数器
+    - 每个 run 结果都带自己的 `scheduler_summary`
+    - 这样 `baseline / overlap_safe / eager` 的 profile sweep 就可以直接按单次 run 比较 pipeline 行为，而不是读混在一起的累计诊断
+    这对后续证明 PIM 路径是否真的开始压过 `cpu+gpu` 很关键，因为我们终于能把一次生成里的 promotion/prefetch/activation 代价独立量出来。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

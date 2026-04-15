@@ -154,6 +154,10 @@ def main():
     print("\n" + "="*40 + "\n")
     print(generated_text)
     print("\n" + "="*40 + "\n")
+    diagnostics = model.get_offload_diagnostics()
+    print("Scheduler Summary:")
+    from nano_ktrans.scheduler import summarize_offload_diagnostics
+    print(summarize_offload_diagnostics(diagnostics))
 
 if __name__ == "__main__":
     main()
