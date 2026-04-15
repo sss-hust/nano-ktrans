@@ -27,6 +27,17 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "migration_total_deduped_ops": 0,
         "migration_total_drained_ops": 0,
         "migration_pending_ops": 0,
+        "migration_prefetching_events": 0,
+        "migration_ready_events": 0,
+        "migration_deferred_events": 0,
+        "migration_applied_events": 0,
+        "migration_lifecycle_counts": {
+            "queued": 0,
+            "prefetching": 0,
+            "ready": 0,
+            "deferred": 0,
+            "applied": 0,
+        },
         "prefetch_hit_rate": None,
         "dedupe_ratio": None,
         "decode_ready_rate": None,
@@ -55,6 +66,15 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
             summary["migration_total_deduped_ops"] += int(migration_layer.get("total_deduped_ops", 0))
             summary["migration_total_drained_ops"] += int(migration_layer.get("total_drained_ops", 0))
             summary["migration_pending_ops"] += int(migration_layer.get("pending_ops", 0))
+            summary["migration_prefetching_events"] += int(
+                migration_layer.get("total_prefetching_events", 0)
+            )
+            summary["migration_ready_events"] += int(migration_layer.get("total_ready_events", 0))
+            summary["migration_deferred_events"] += int(migration_layer.get("total_deferred_events", 0))
+            summary["migration_applied_events"] += int(migration_layer.get("total_applied_events", 0))
+            lifecycle_counts = migration_layer.get("lifecycle_state_counts", {})
+            for key in summary["migration_lifecycle_counts"]:
+                summary["migration_lifecycle_counts"][key] += int(lifecycle_counts.get(key, 0))
 
     total_prefetch_decisions = summary["decode_prefetch_hits"] + summary["decode_prefetch_misses"]
     if total_prefetch_decisions > 0:

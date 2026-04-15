@@ -112,6 +112,13 @@ tags: [architecture]
     - `runtime_deferred_for_prefetch`
     - `migration_total_enqueued_ops / deduped_ops / drained_ops`
     这样可以直接比较不同调度策略的 overlap 相关效果，而不必人工汇总每层诊断。
+16. migration manager 现在还会跟踪每个 expert 的 lifecycle：
+    - `queued`
+    - `prefetching`
+    - `ready`
+    - `deferred`
+    - `applied`
+    目前这仍主要服务于诊断和后续异步数据面设计，但已经把“迁移请求”和“迁移执行状态”区分开了。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

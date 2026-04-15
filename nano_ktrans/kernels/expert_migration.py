@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, List, Sequence
 
 from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp
+
+
+class MigrationLifecycle(str, Enum):
+    QUEUED = "queued"
+    PREFETCHING = "prefetching"
+    READY = "ready"
+    DEFERRED = "deferred"
+    APPLIED = "applied"
 
 
 @dataclass
@@ -15,13 +24,28 @@ class MigrationPhaseRecord:
 
 
 @dataclass
+class MigrationLifecycleRecord:
+    expert_idx: int
+    src: str
+    dst: str
+    reason: str
+    phase: str
+    state: MigrationLifecycle
+
+
+@dataclass
 class LayerMigrationQueue:
     layer_idx: int
     pending_ops: List[ExpertMigrationOp] = field(default_factory=list)
     history: List[MigrationPhaseRecord] = field(default_factory=list)
+    lifecycle: Dict[int, MigrationLifecycleRecord] = field(default_factory=dict)
     total_enqueued_ops: int = 0
     total_deduped_ops: int = 0
     total_drained_ops: int = 0
+    total_prefetching_events: int = 0
+    total_ready_events: int = 0
+    total_deferred_events: int = 0
+    total_applied_events: int = 0
 
     def _dedupe_ops(self, ops: Sequence[ExpertMigrationOp]) -> List[ExpertMigrationOp]:
         latest_by_expert: Dict[int, ExpertMigrationOp] = {}
@@ -50,6 +74,18 @@ class LayerMigrationQueue:
                 completed=False,
             )
         )
+        queued_state = MigrationLifecycle.DEFERRED if phase.endswith("_deferred") else MigrationLifecycle.QUEUED
+        if queued_state == MigrationLifecycle.DEFERRED:
+            self.total_deferred_events += len(deduped_ops)
+        for op in deduped_ops:
+            self.mark_state(
+                op.expert_idx,
+                src=op.src.value,
+                dst=op.dst.value,
+                reason=op.reason,
+                phase=phase,
+                state=queued_state,
+            )
 
     def drain(self) -> List[ExpertMigrationOp]:
         ops = list(self.pending_ops)
@@ -58,6 +94,54 @@ class LayerMigrationQueue:
         if self.history:
             self.history[-1].completed = True
         return ops
+
+    def mark_state(
+        self,
+        expert_idx: int,
+        *,
+        src: str | None = None,
+        dst: str | None = None,
+        reason: str | None = None,
+        phase: str | None = None,
+        state: MigrationLifecycle,
+    ) -> None:
+        expert_idx = int(expert_idx)
+        tracked = self.lifecycle.get(expert_idx)
+        if tracked is None:
+            tracked = MigrationLifecycleRecord(
+                expert_idx=expert_idx,
+                src=src or "",
+                dst=dst or "",
+                reason=reason or "",
+                phase=phase or "",
+                state=state,
+            )
+            self.lifecycle[expert_idx] = tracked
+        else:
+            if src is not None:
+                tracked.src = src
+            if dst is not None:
+                tracked.dst = dst
+            if reason is not None:
+                tracked.reason = reason
+            if phase is not None:
+                tracked.phase = phase
+            tracked.state = state
+
+        if state == MigrationLifecycle.PREFETCHING:
+            self.total_prefetching_events += 1
+        elif state == MigrationLifecycle.READY:
+            self.total_ready_events += 1
+        elif state == MigrationLifecycle.DEFERRED:
+            self.total_deferred_events += 1
+        elif state == MigrationLifecycle.APPLIED:
+            self.total_applied_events += 1
+
+    def lifecycle_state_counts(self) -> Dict[str, int]:
+        counts = {state.value: 0 for state in MigrationLifecycle}
+        for tracked in self.lifecycle.values():
+            counts[tracked.state.value] += 1
+        return counts
 
 
 class ExpertMigrationManager:
@@ -81,6 +165,29 @@ class ExpertMigrationManager:
             return []
         return queue.drain()
 
+    def mark_state(
+        self,
+        layer_idx: int,
+        expert_idx: int,
+        *,
+        state: MigrationLifecycle,
+        src: str | None = None,
+        dst: str | None = None,
+        reason: str | None = None,
+        phase: str | None = None,
+    ) -> None:
+        queue = self._queues.get(layer_idx)
+        if queue is None:
+            return
+        queue.mark_state(
+            expert_idx,
+            src=src,
+            dst=dst,
+            reason=reason,
+            phase=phase,
+            state=state,
+        )
+
     def diagnostics(self) -> dict:
         return {
             "layers": [
@@ -99,6 +206,22 @@ class ExpertMigrationManager:
                     "total_enqueued_ops": queue.total_enqueued_ops,
                     "total_deduped_ops": queue.total_deduped_ops,
                     "total_drained_ops": queue.total_drained_ops,
+                    "total_prefetching_events": queue.total_prefetching_events,
+                    "total_ready_events": queue.total_ready_events,
+                    "total_deferred_events": queue.total_deferred_events,
+                    "total_applied_events": queue.total_applied_events,
+                    "lifecycle_state_counts": queue.lifecycle_state_counts(),
+                    "lifecycle": [
+                        {
+                            "expert_idx": tracked.expert_idx,
+                            "src": tracked.src,
+                            "dst": tracked.dst,
+                            "reason": tracked.reason,
+                            "phase": tracked.phase,
+                            "state": tracked.state.value,
+                        }
+                        for _, tracked in sorted(queue.lifecycle.items())
+                    ],
                 }
                 for layer_idx, queue in sorted(self._queues.items())
             ]

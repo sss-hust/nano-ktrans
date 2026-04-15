@@ -21,6 +21,7 @@ from typing import Optional, Dict
 
 from nano_ktrans.kernels.cpu_moe import CPUMoEBackend
 from nano_ktrans.kernels.expert_materialization import ExpertMaterializationManager
+from nano_ktrans.kernels.expert_migration import MigrationLifecycle
 from nano_ktrans.kernels.offload_backend import normalize_offload_backend_name
 from nano_ktrans.kernels.pim_moe import PIMMoEBackend
 from nano_ktrans.layers.expert_mlp import build_expert_module, load_expert_weights
@@ -162,6 +163,12 @@ class HybridMoE(nn.Module):
 
     def _request_prefetch(self, expert_idx: int) -> None:
         self.prefetch_requested += 1
+        if self.offload_backend is not None:
+            self.offload_backend.migration_manager.mark_state(
+                self.layer_idx,
+                expert_idx,
+                state=MigrationLifecycle.PREFETCHING,
+            )
         if self.materialization_manager.prefetch(self.layer_idx, expert_idx):
             self.prefetch_enqueued += 1
 
@@ -312,6 +319,16 @@ class HybridMoE(nn.Module):
             applied_ok = self._demote_expert_from_gpu(op.expert_idx, op.dst)
             if applied_ok:
                 applied += 1
+                if self.offload_backend is not None:
+                    self.offload_backend.migration_manager.mark_state(
+                        self.layer_idx,
+                        op.expert_idx,
+                        src=op.src.value,
+                        dst=op.dst.value,
+                        reason=op.reason,
+                        phase=phase,
+                        state=MigrationLifecycle.APPLIED,
+                    )
                 self.applied_migration_history.append(
                     {
                         "phase": phase,
@@ -341,9 +358,29 @@ class HybridMoE(nn.Module):
                 and self.dynamic_expert_scheduler.config.decode_require_prefetch_ready
             )
             is_ready = self.materialization_manager.is_ready(self.layer_idx, int(op.expert_idx))
+            if is_ready and self.offload_backend is not None:
+                self.offload_backend.migration_manager.mark_state(
+                    self.layer_idx,
+                    op.expert_idx,
+                    src=op.src.value,
+                    dst=op.dst.value,
+                    reason=op.reason,
+                    phase=phase,
+                    state=MigrationLifecycle.READY,
+                )
             if require_prefetch_ready and not is_ready:
                 deferred.append(op)
                 self.runtime_deferred_for_prefetch += 1
+                if self.offload_backend is not None:
+                    self.offload_backend.migration_manager.mark_state(
+                        self.layer_idx,
+                        op.expert_idx,
+                        src=op.src.value,
+                        dst=op.dst.value,
+                        reason=op.reason,
+                        phase=phase,
+                        state=MigrationLifecycle.DEFERRED,
+                    )
                 self._request_prefetch(int(op.expert_idx))
                 continue
 
@@ -361,6 +398,16 @@ class HybridMoE(nn.Module):
                 self._demote_expert_from_gpu(victim_idx, victim_dst)
                 self.runtime_evictions += 1
                 applied += 1
+                if self.offload_backend is not None:
+                    self.offload_backend.migration_manager.mark_state(
+                        self.layer_idx,
+                        victim_idx,
+                        src=ExpertResidency.GPU.value,
+                        dst=victim_dst.value,
+                        reason="evict_for_promotion",
+                        phase=phase,
+                        state=MigrationLifecycle.APPLIED,
+                    )
                 self.applied_migration_history.append(
                     {
                         "phase": phase,
@@ -380,6 +427,16 @@ class HybridMoE(nn.Module):
                     applied += 1
                     applied_promotions += 1
                     self.prefetch_materialized += 1
+                    if self.offload_backend is not None:
+                        self.offload_backend.migration_manager.mark_state(
+                            self.layer_idx,
+                            op.expert_idx,
+                            src=op.src.value,
+                            dst=op.dst.value,
+                            reason=op.reason,
+                            phase=phase,
+                            state=MigrationLifecycle.APPLIED,
+                        )
                     self.applied_migration_history.append(
                         {
                             "phase": phase,

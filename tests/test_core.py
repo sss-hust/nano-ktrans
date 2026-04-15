@@ -633,6 +633,11 @@ class TestDynamicScheduler:
         assert summary["migration_total_deduped_ops"] == 3
         assert summary["migration_total_drained_ops"] == 6
         assert summary["migration_pending_ops"] == 1
+        assert summary["migration_prefetching_events"] == 0
+        assert summary["migration_ready_events"] == 0
+        assert summary["migration_deferred_events"] == 0
+        assert summary["migration_applied_events"] == 0
+        assert summary["migration_lifecycle_counts"]["queued"] == 0
         assert summary["layers_with_pending_migrations"] == 1
         assert summary["prefetch_hit_rate"] == pytest.approx(0.75)
         assert summary["dedupe_ratio"] == pytest.approx(3 / 8)
@@ -753,6 +758,37 @@ class TestDynamicScheduler:
         assert layer_diag["total_enqueued_ops"] == 3
         assert layer_diag["total_deduped_ops"] >= 1
         assert layer_diag["history"][-1]["deduped_plan_size"] == 2
+        assert layer_diag["lifecycle_state_counts"]["queued"] >= 1
+
+    def test_migration_manager_tracks_lifecycle(self):
+        from nano_ktrans.kernels.expert_migration import ExpertMigrationManager, MigrationLifecycle
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency
+
+        manager = ExpertMigrationManager()
+        manager.queue(
+            0,
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=3,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="promote_hot_expert",
+                )
+            ],
+            phase="decode",
+        )
+        manager.mark_state(0, 3, state=MigrationLifecycle.PREFETCHING, phase="decode")
+        manager.mark_state(0, 3, state=MigrationLifecycle.READY, phase="decode")
+        manager.mark_state(0, 3, state=MigrationLifecycle.APPLIED, phase="decode")
+
+        diagnostics = manager.diagnostics()
+        layer_diag = diagnostics["layers"][0]
+        assert layer_diag["total_prefetching_events"] == 1
+        assert layer_diag["total_ready_events"] == 1
+        assert layer_diag["total_applied_events"] == 1
+        assert layer_diag["lifecycle_state_counts"]["applied"] == 1
+        assert layer_diag["lifecycle"][0]["state"] == "applied"
 
     def test_hybrid_moe_applies_decode_migration_plan(self, tmp_path):
         from safetensors.torch import save_file

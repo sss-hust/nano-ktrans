@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 10:58
+updated: 2026-04-15 11:08
 ---
 
 # 🔥 当前工作焦点
@@ -29,6 +29,7 @@ updated: 2026-04-15 10:58
 - [x] migration queue 已接入按 expert 去重和更细的排队诊断
 - [x] scheduler 已支持“无立即迁移也可按热度预取 offloaded experts”
 - [x] scheduler 已支持 profile 预设，benchmark 已输出迁移/预取摘要，便于直接比较 overlap 相关策略
+- [x] migration queue 已接入 lifecycle 状态：`queued / prefetching / ready / deferred / applied`
 
 ## 阻塞项
 
@@ -106,6 +107,10 @@ updated: 2026-04-15 10:58
   - `runtime_deferred_for_prefetch`
   - `dedupe_ratio`
   - 端到端 prefill / decode 延迟
+- 继续把 lifecycle 从“诊断状态”推进到真正的异步执行状态机：
+  - 让后台预取只推进 `queued -> prefetching -> ready`
+  - 让 decode 主路径只消费 `ready`
+  - 为后续 GPU<->PIM 异步迁移 worker 预留事件接口
 
 ## 本轮对话上下文
 
