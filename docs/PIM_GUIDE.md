@@ -50,8 +50,10 @@ The implemented extension today is:
 1. `HybridMoE` remains the scheduler.
 2. `ExpertOffloadBackend` abstracts the offloaded expert path.
 3. `CPUMoEBackend` provides the compatible numerical fallback.
-4. `PIMMoEBackend` currently powers the `pim_shadow` mode for PIM visibility and routing diagnostics.
-5. CPU fallback is still responsible for numerical correctness when a real DPU kernel is unavailable.
+4. `PIMMoEBackend` powers both `pim_shadow` and the new experimental `pim` mode.
+5. In `pim` mode, expert linear projections are executed on DPU through a small host bridge and a generic linear DPU kernel.
+6. The current bridge shards output rows across multiple ranks / DPUs, so one linear projection can fan out over the visible PIM fabric instead of a single DPU.
+7. SiLU / gate fusion still runs on the host, and unsupported batch shapes fall back to CPU.
 
 ## Recommended Runtime Design
 
@@ -166,11 +168,13 @@ To make this guide fully machine-specific, you still need:
 ## Immediate Next Step
 
 The next meaningful step is no longer backend refactoring. That part is already
-done. The remaining gap is a real DPU numerical path:
+done. The repository now has a first real DPU numerical path, but it is still
+not the final form:
 
-- implement a minimal expert kernel on DPU, ideally starting from single-token single-expert GEMV
-- add a reliable host bridge from Python into the UPMEM runtime
-- upgrade `PIMMoEBackend` from `pim_shadow` to a true execution backend
+- keep expanding the real DPU path beyond the current linear-only primitive
+- fuse the three expert projections better so one offloaded expert does not require three separate host↔DPU round trips
+- move more of the expert MLP itself onto DPU instead of leaving SiLU/gating on the host
+- relax the current small-batch constraint so prefill can use PIM too
 - then compare end-to-end latency against `cuda_cpu_offload`
 
 ## Source Notes

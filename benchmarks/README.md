@@ -2,7 +2,7 @@
 
 This directory contains two benchmark entry points:
 
-- `benchmark_inference.py`: benchmarks nano-ktrans inference on `cpu`, `cuda`, `cuda_cpu_offload`, and `cuda_pim_shadow`.
+- `benchmark_inference.py`: benchmarks nano-ktrans inference on `cpu`, `cuda`, `cuda_cpu_offload`, `cuda_pim`, and `cuda_pim_shadow`.
 - `pim_microbench/`: contains a standalone UPMEM microbenchmark for transfer and kernel timing.
 
 ## Inference Benchmark
@@ -13,7 +13,7 @@ Run on the local Qwen3 checkpoint:
 cd /home/yangfu/nano-ktrans
 ./.venv/bin/python benchmarks/benchmark_inference.py \
   --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-Base \
-  --backends cpu cuda cuda_cpu_offload \
+  --backends cpu cuda cuda_cpu_offload cuda_pim \
   --max-new-tokens 2 \
   --repeats 1
 ```
@@ -23,6 +23,7 @@ Notes:
 - `cpu` keeps all experts on CPU.
 - `cuda` keeps all experts on GPU.
 - `cuda_cpu_offload` keeps only `--offload-device-experts` experts on GPU and offloads the rest to the CPU backend.
+- `cuda_pim` routes offloaded experts through the real experimental PIM backend. In the current implementation, expert linear projections run on DPU while SiLU/gating stays on the host, and larger flattened batches still fall back to CPU.
 - `cuda_pim_shadow` uses the same numerically-correct CPU fallback for offloaded experts but exposes PIM visibility and routing counters inside the main inference path.
 - If CUDA is not available in the current session, CUDA backends are reported as `unavailable` instead of crashing.
 

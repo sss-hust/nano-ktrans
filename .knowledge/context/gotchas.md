@@ -13,13 +13,6 @@ tags: [pitfalls, debugging]
 - 根因：`attention.py`、`cpu_infer.py`、`cpu_moe.py` 之前在模块导入时直接强依赖这些包。
 - 修复：改为运行时探测，可用则走加速路径，不可用则退化到纯 PyTorch attention 和 CPU fallback。
 
-<!-- updated: 2026-04-07 20:56 -->
-
-## 本机 pip 会被失效代理拦住
-
-- 现象：`pip install` 持续报 `ProxyError`，目标地址是 `127.0.0.1:7897`。
-- 根因：环境里预设了 `HTTP_PROXY` / `HTTPS_PROXY`，但当前会话没有可用代理服务。
-- 规避：安装依赖时显式 unset 这些变量。
 
 <!-- updated: 2026-04-07 21:18 -->
 

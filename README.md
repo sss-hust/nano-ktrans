@@ -63,12 +63,13 @@ bring the project up before enabling PIM or custom kernels.
 
 ## Current Runtime Status
 
-As of `v0.2.0`, the repository has been validated on the local
+As of `v0.2.0` plus the current untagged PIM runtime work, the repository has been validated on the local
 `Qwen3-30B-A3B-Base` checkpoint with these paths:
 
 - `cpu`: end-to-end inference works.
 - `cuda_cpu_offload`: works on the host machine with a small hot-expert set on GPU.
 - `cuda`: still OOM on the local `47.41 GiB` GPU for this model when all experts stay on device.
+- `pim`: the real experimental PIM backend now executes expert linear projections on DPU and keeps the activation on the host. The native bridge is sharded across multiple ranks / DPUs, and `cuda_pim` has been validated end-to-end on the local Qwen3 checkpoint. By default it is still capped to small flattened batches (`--pim-max-batch-tokens 1`) and falls back to CPU outside that envelope.
 - `cuda_pim_shadow`: integrated into the main inference path and records PIM visibility and routing counters, but the numerical expert compute still falls back to CPU.
 - `benchmarks/pim_microbench`: runs on real UPMEM hardware and reports transfer plus integer-kernel metrics; it is not a floating-point MoE expert benchmark.
 
@@ -94,6 +95,34 @@ If you have a CUDA runtime and want hybrid expert placement later:
 
 ```bash
 python example.py /path/to/local/model/weights --device cuda --num-device-experts 2
+```
+
+To exercise the current real PIM path:
+
+```bash
+source /usr/upmem_env.sh hw
+python example.py /path/to/local/model/weights \
+  --device cuda \
+  --num-device-experts 2 \
+  --offload-backend pim \
+  --pim-rank-count 4 \
+  --pim-max-batch-tokens 1 \
+  --max-new-tokens 2
+```
+
+For a minimal reproducible benchmark on the local Qwen3 checkpoint:
+
+```bash
+source /usr/upmem_env.sh hw
+python benchmarks/benchmark_inference.py \
+  --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-Base \
+  --backends cuda_pim \
+  --prompt Hi \
+  --offload-device-experts 2 \
+  --pim-rank-count 4 \
+  --pim-max-batch-tokens 1 \
+  --max-new-tokens 2 \
+  --json-out benchmarks/results/cuda_pim_2026-04-15.json
 ```
 
 Current status:
