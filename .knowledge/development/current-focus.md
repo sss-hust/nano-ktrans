@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 11:59
+updated: 2026-04-15 12:05
 ---
 
 # 🔥 当前工作焦点
@@ -38,6 +38,7 @@ updated: 2026-04-15 11:59
 - [x] `SimpleEngine` 已抽出统一 offload refresh hook，prefill full/chunked 与 decode 共用同一入口
 - [x] offload refresh 已接入模型级统计，benchmark 可直接看到 refresh 次数与每步 ready 收敛量
 - [x] layer 级 refresh 已加空队列短路，避免无 pending prefetch 时做无意义轮询
+- [x] benchmark 已支持 scheduler profile sweep，可一轮比较多组调度策略
 
 ## 阻塞项
 

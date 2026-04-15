@@ -6,6 +6,7 @@ from .profiles import (
     SCHEDULER_PROFILE_NAMES,
     SCHEDULER_PROFILE_OVERLAP_SAFE,
     apply_scheduler_overrides,
+    normalize_scheduler_profiles,
     resolve_scheduler_profile,
     scheduler_profile_summary,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "SCHEDULER_PROFILE_NAMES",
     "SCHEDULER_PROFILE_OVERLAP_SAFE",
     "apply_scheduler_overrides",
+    "normalize_scheduler_profiles",
     "resolve_scheduler_profile",
     "scheduler_profile_summary",
     "summarize_offload_diagnostics",

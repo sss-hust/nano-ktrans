@@ -153,6 +153,10 @@ tags: [architecture]
     - 如果某层既没有 pending future，也没有 completion queue 中的 ready item
     - `HybridMoE.refresh_offload_state()` 会直接返回
     这避免了在大多数 step 上做无意义的 Python 轮询。
+25. benchmark 现在支持 scheduler profile sweep：
+    - 单次运行可以同时比较 `baseline / overlap_safe / eager`
+    - 每个结果都会带自己的 `scheduler_profile` 和摘要统计
+    这样可以更直接地观察不同调度策略的端到端差异。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

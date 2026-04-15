@@ -168,3 +168,8 @@ tags: [changelog]
 
 - `ExpertMaterializationManager` 新增 `has_pending_or_ready()`。
 - `HybridMoE.refresh_offload_state()` 现在会在无 pending/ready prefetch 时直接短路返回，减少空轮询。
+
+<!-- updated: 2026-04-15 12:05 -->
+
+- benchmark 新增 `--scheduler-profile-sweep`，可在单次运行中依次比较多组 scheduler profile。
+- `normalize_scheduler_profiles()` 会做 profile 归一化与去重，避免 sweep 配置重复。

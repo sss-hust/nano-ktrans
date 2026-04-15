@@ -17,17 +17,35 @@ SCHEDULER_PROFILE_NAMES = (
 )
 
 
+def normalize_scheduler_profiles(
+    profiles: list[str] | tuple[str, ...] | None,
+    *,
+    default_profile: str = SCHEDULER_PROFILE_BASELINE,
+) -> list[str]:
+    requested = list(profiles) if profiles else [default_profile]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for profile in requested:
+        candidate = (profile or default_profile).strip().lower().replace("-", "_")
+        if candidate not in SCHEDULER_PROFILE_NAMES:
+            raise ValueError(
+                f"Unsupported scheduler profile: {profile}. "
+                f"Available profiles: {', '.join(SCHEDULER_PROFILE_NAMES)}"
+            )
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized
+
+
 def resolve_scheduler_profile(
     profile: str | None,
     *,
     base_config: SchedulerConfig,
 ) -> SchedulerConfig:
     normalized = (profile or SCHEDULER_PROFILE_BASELINE).strip().lower().replace("-", "_")
-    if normalized not in SCHEDULER_PROFILE_NAMES:
-        raise ValueError(
-            f"Unsupported scheduler profile: {profile}. "
-            f"Available profiles: {', '.join(SCHEDULER_PROFILE_NAMES)}"
-        )
+    normalized = normalize_scheduler_profiles([normalized])[0]
 
     if normalized == SCHEDULER_PROFILE_BASELINE:
         return replace(

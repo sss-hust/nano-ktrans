@@ -9,7 +9,11 @@ from typing import Any
 import torch
 
 from nano_ktrans.llm import LLM
-from nano_ktrans.scheduler import SCHEDULER_PROFILE_NAMES, summarize_offload_diagnostics
+from nano_ktrans.scheduler import (
+    SCHEDULER_PROFILE_NAMES,
+    normalize_scheduler_profiles,
+    summarize_offload_diagnostics,
+)
 
 
 def synchronize_if_needed(device: str) -> None:
@@ -324,6 +328,12 @@ def parse_args() -> argparse.Namespace:
         choices=list(SCHEDULER_PROFILE_NAMES),
         help="Scheduler preset for dynamic expert migration experiments.",
     )
+    parser.add_argument(
+        "--scheduler-profile-sweep",
+        nargs="+",
+        choices=list(SCHEDULER_PROFILE_NAMES),
+        help="Optional list of scheduler profiles to benchmark in one run.",
+    )
     parser.add_argument("--json-out", help="Optional path to write the benchmark results as JSON.")
     return parser.parse_args()
 
@@ -340,35 +350,43 @@ def main() -> None:
         "results": [],
     }
 
-    for backend in args.backends:
-        result = benchmark_backend(
-            backend=backend,
-            model_path=args.model_path,
-            prompt=args.prompt,
-            max_new_tokens=args.max_new_tokens,
-            warmup=args.warmup,
-            repeats=args.repeats,
-            cpu_device_experts=args.cpu_device_experts,
-            cuda_device_experts=args.cuda_device_experts,
-            offload_device_experts=args.offload_device_experts,
-            pim_rank_count=args.pim_rank_count,
-            pim_profile=args.pim_profile,
-            pim_max_batch_tokens=args.pim_max_batch_tokens,
-            pim_kernel_variant=args.pim_kernel_variant,
-            pim_prefill_policy=args.pim_prefill_policy,
-            pim_prefill_token_threshold=args.pim_prefill_token_threshold,
-            enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
-            scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
-            scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,
-            scheduler_step_stride_prefill=args.scheduler_step_stride_prefill,
-            scheduler_step_stride_decode=args.scheduler_step_stride_decode,
-            scheduler_demotion_idle_steps=args.scheduler_demotion_idle_steps,
-            scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
-            scheduler_decode_require_prefetch_ready=args.scheduler_decode_require_prefetch_ready,
-            scheduler_prefetch_candidate_budget_per_layer=args.scheduler_prefetch_candidate_budget_per_layer,
-            scheduler_profile=args.scheduler_profile,
-        )
-        results["results"].append(result)
+    profile_list = normalize_scheduler_profiles(
+        args.scheduler_profile_sweep,
+        default_profile=args.scheduler_profile,
+    )
+    results["scheduler_profiles"] = profile_list
+
+    for scheduler_profile in profile_list:
+        for backend in args.backends:
+            result = benchmark_backend(
+                backend=backend,
+                model_path=args.model_path,
+                prompt=args.prompt,
+                max_new_tokens=args.max_new_tokens,
+                warmup=args.warmup,
+                repeats=args.repeats,
+                cpu_device_experts=args.cpu_device_experts,
+                cuda_device_experts=args.cuda_device_experts,
+                offload_device_experts=args.offload_device_experts,
+                pim_rank_count=args.pim_rank_count,
+                pim_profile=args.pim_profile,
+                pim_max_batch_tokens=args.pim_max_batch_tokens,
+                pim_kernel_variant=args.pim_kernel_variant,
+                pim_prefill_policy=args.pim_prefill_policy,
+                pim_prefill_token_threshold=args.pim_prefill_token_threshold,
+                enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
+                scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
+                scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,
+                scheduler_step_stride_prefill=args.scheduler_step_stride_prefill,
+                scheduler_step_stride_decode=args.scheduler_step_stride_decode,
+                scheduler_demotion_idle_steps=args.scheduler_demotion_idle_steps,
+                scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
+                scheduler_decode_require_prefetch_ready=args.scheduler_decode_require_prefetch_ready,
+                scheduler_prefetch_candidate_budget_per_layer=args.scheduler_prefetch_candidate_budget_per_layer,
+                scheduler_profile=scheduler_profile,
+            )
+            result["scheduler_profile"] = scheduler_profile
+            results["results"].append(result)
 
     rendered = json.dumps(results, indent=2, ensure_ascii=False)
     print(rendered)

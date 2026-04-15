@@ -583,6 +583,14 @@ class TestDynamicScheduler:
         assert resolved.prefetch_candidate_budget_per_layer == 6
         assert resolved.prefill_collect_only is False
 
+    def test_normalize_scheduler_profiles_dedupes(self):
+        from nano_ktrans.scheduler import normalize_scheduler_profiles
+
+        normalized = normalize_scheduler_profiles(
+            ["baseline", "overlap-safe", "baseline", "eager"],
+        )
+        assert normalized == ["baseline", "overlap_safe", "eager"]
+
     def test_summarize_offload_diagnostics(self):
         from nano_ktrans.scheduler import summarize_offload_diagnostics
 
