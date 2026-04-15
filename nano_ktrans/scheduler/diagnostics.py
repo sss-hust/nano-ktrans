@@ -15,6 +15,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "prefetch_enqueued": 0,
         "prefetch_materialized": 0,
         "prefetch_candidate_scans": 0,
+        "prefetch_polled_ready": 0,
         "decode_prefetch_hits": 0,
         "decode_prefetch_misses": 0,
         "runtime_evictions": 0,
@@ -49,6 +50,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["prefetch_enqueued"] += int(layer.get("prefetch_enqueued", 0))
         summary["prefetch_materialized"] += int(layer.get("prefetch_materialized", 0))
         summary["prefetch_candidate_scans"] += int(layer.get("prefetch_candidate_scans", 0))
+        summary["prefetch_polled_ready"] += int(
+            (layer.get("materialization_manager") or {}).get("prefetch_polled_ready", 0)
+        )
         summary["decode_prefetch_hits"] += int(layer.get("decode_prefetch_hits", 0))
         summary["decode_prefetch_misses"] += int(layer.get("decode_prefetch_misses", 0))
         summary["runtime_evictions"] += int(layer.get("runtime_evictions", 0))

@@ -7,6 +7,8 @@ nano-ktrans 基础测试
 - 路由逻辑
 """
 
+import time
+
 import torch
 import pytest
 
@@ -1361,3 +1363,39 @@ class TestDynamicScheduler:
         diagnostics = hybrid.diagnostics()
         assert diagnostics["prefetch_candidate_scans"] >= 1
         assert diagnostics["prefetch_enqueued"] >= 2
+
+    def test_materialization_manager_poll_ready(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_materialization import ExpertMaterializationManager
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        manager = ExpertMaterializationManager(
+            weight_path=str(weight_path),
+            expert_key_template="model.layers.{layer}.block_sparse_moe.experts.{expert}.{proj}.weight",
+            max_cached_experts=2,
+            prefetch_workers=1,
+        )
+        assert manager.prefetch(0, 1) is True
+
+        ready_keys = []
+        for _ in range(10):
+            ready_keys = manager.poll_ready()
+            if ready_keys:
+                break
+            time.sleep(0.01)
+
+        diagnostics = manager.diagnostics()
+        assert (0, 1) in ready_keys
+        assert diagnostics["prefetch_polled_ready"] >= 1
+        assert manager.has_cached(0, 1) is True

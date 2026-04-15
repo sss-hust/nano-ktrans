@@ -173,6 +173,19 @@ class HybridMoE(nn.Module):
         if submitted:
             self.prefetch_enqueued += 1
 
+    def _poll_ready_prefetches(self) -> None:
+        if self.offload_backend is None:
+            return
+        ready_keys = self.materialization_manager.poll_ready()
+        for layer_idx, expert_idx in ready_keys:
+            if int(layer_idx) != int(self.layer_idx):
+                continue
+            self.offload_backend.migration_manager.mark_state(
+                self.layer_idx,
+                int(expert_idx),
+                state=MigrationLifecycle.READY,
+            )
+
     def _request_prefetch_candidates(self, *, phase: str) -> None:
         if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
             return
@@ -524,6 +537,7 @@ class HybridMoE(nn.Module):
 
         context = get_context()
         phase = "prefill" if context.is_prefill else "decode"
+        self._poll_ready_prefetches()
         active_experts = {int(expert_idx) for expert_idx in torch.unique(topk_ids).tolist()}
         self._apply_queued_migrations(hidden_states, active_experts, phase=phase)
 

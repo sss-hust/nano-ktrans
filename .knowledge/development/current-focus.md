@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 11:20
+updated: 2026-04-15 11:27
 ---
 
 # 🔥 当前工作焦点
@@ -31,6 +31,7 @@ updated: 2026-04-15 11:20
 - [x] scheduler 已支持 profile 预设，benchmark 已输出迁移/预取摘要，便于直接比较 overlap 相关策略
 - [x] migration queue 已接入 lifecycle 状态：`queued / prefetching / ready / deferred / applied`
 - [x] decode 在 `decode_require_prefetch_ready` 模式下已改成 ready-only 消费，不再先 drain 全队列再回退
+- [x] materialization manager 已支持后台 prefetch completion 轮询，ready 状态可在进入层前被主动刷新
 
 ## 阻塞项
 
@@ -115,6 +116,7 @@ updated: 2026-04-15 11:20
 - 把 migration lifecycle 和 materialization worker 真正打通：
   - 让 `ready` 由后台预取完成事件驱动
   - 减少当前 decode 入口的同步 `is_ready()` 轮询
+- 将 ready 轮询从“每层 forward 入口”进一步收敛到独立 runtime hook 或 worker，避免后续层数增多时引入额外 Python 开销
 
 ## 本轮对话上下文
 

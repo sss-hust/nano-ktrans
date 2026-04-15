@@ -51,6 +51,7 @@ class ExpertMaterializationManager:
 
         self.prefetch_submitted = 0
         self.prefetch_resolved = 0
+        self.prefetch_polled_ready = 0
         self.cache_hits = 0
         self.sync_loads = 0
         self.cache_evictions = 0
@@ -125,6 +126,24 @@ class ExpertMaterializationManager:
         self.sync_loads += 1
         return weights
 
+    def poll_ready(self) -> list[ExpertKey]:
+        ready_keys: list[ExpertKey] = []
+        futures: list[tuple[ExpertKey, Future]] = []
+        with self._lock:
+            for key, future in list(self._futures.items()):
+                if future.done():
+                    futures.append((key, future))
+
+        for key, future in futures:
+            weights = future.result()
+            with self._lock:
+                self._futures.pop(key, None)
+                self._store_cache(key, weights)
+            self.prefetch_resolved += 1
+            self.prefetch_polled_ready += 1
+            ready_keys.append(key)
+        return ready_keys
+
     def diagnostics(self) -> dict:
         with self._lock:
             return {
@@ -134,6 +153,7 @@ class ExpertMaterializationManager:
                 "prefetch_workers": self.prefetch_workers,
                 "prefetch_submitted": self.prefetch_submitted,
                 "prefetch_resolved": self.prefetch_resolved,
+                "prefetch_polled_ready": self.prefetch_polled_ready,
                 "cache_hits": self.cache_hits,
                 "sync_loads": self.sync_loads,
                 "cache_evictions": self.cache_evictions,

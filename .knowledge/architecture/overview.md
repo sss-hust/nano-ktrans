@@ -124,6 +124,10 @@ tags: [architecture]
     - 只提取已经在进入本层前就处于 `ready` 的 promotion
     - 未 ready 的 promotion 保持在队列里，并被标成 `deferred`
     这样更接近真正的“只消费已完成迁移”的 overlap 路径，而不是“先同步预热，再同一步立即消费”。
+18. `ExpertMaterializationManager` 现在支持 `poll_ready()`：
+    - 后台 prefetch future 一旦完成，会被主动转成 CPU staging cache 命中
+    - `HybridMoE` 在进入本层前会先轮询 ready 结果，再把对应 migration lifecycle 更新成 `ready`
+    这让 `ready` 不再只依赖 decode 路径上的同步 `is_ready()` 检查，而开始具备更像后台 completion 的语义。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

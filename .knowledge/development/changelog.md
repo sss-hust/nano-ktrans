@@ -131,3 +131,9 @@ tags: [changelog]
 - `decode_require_prefetch_ready` 模式下，decode 入口现在只会消费“进入本层前已经 ready 的 promotion”。
 - migration manager 新增 `take_layer()` / `peek_layer()`，让 decode 可以保留未 ready 的 pending op，而不是先 drain 再重排。
 - 新增对应测试，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `47 passed`。
+
+<!-- updated: 2026-04-15 11:27 -->
+
+- `ExpertMaterializationManager` 新增 `poll_ready()`，可把后台完成的 prefetch future 主动转成 staging cache 命中。
+- `HybridMoE` 现在会在进入本层前先轮询 ready prefetch，再把 migration lifecycle 更新为 `ready`。
+- benchmark 摘要新增 `prefetch_polled_ready`，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `48 passed`。
