@@ -16,6 +16,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_refresh_ready_total", 0)
         ),
         "offload_pipeline_ticks": int((offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_ticks", 0)),
+        "offload_pipeline_prefetch_submitted_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_prefetch_submitted_total", 0)
+        ),
         "offload_pipeline_ready_applied_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_ready_applied_total", 0)
         ),

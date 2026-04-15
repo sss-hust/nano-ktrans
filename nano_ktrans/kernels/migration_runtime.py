@@ -18,6 +18,7 @@ class MigrationPipelineRuntime:
 
     def __init__(self) -> None:
         self.tick_calls = 0
+        self.prefetch_submitted_total = 0
         self.ready_polled_total = 0
         self.ready_applied_total = 0
         self.ready_deferred_total = 0
@@ -28,6 +29,7 @@ class MigrationPipelineRuntime:
         ready_polled = 0
         ready_applied = 0
         ready_deferred = 0
+        prefetch_submitted = 0
         layers_touched = 0
 
         for decoder_layer in decoder_layers:
@@ -51,8 +53,10 @@ class MigrationPipelineRuntime:
             ready_polled += int(stats.get("ready_polled", 0))
             ready_applied += int(stats.get("ready_applied", 0))
             ready_deferred += int(stats.get("ready_deferred", 0))
+            prefetch_submitted += int(stats.get("prefetch_submitted", 0))
 
         self.tick_calls += 1
+        self.prefetch_submitted_total += prefetch_submitted
         self.ready_polled_total += ready_polled
         self.ready_applied_total += ready_applied
         self.ready_deferred_total += ready_deferred
@@ -61,6 +65,7 @@ class MigrationPipelineRuntime:
 
         return {
             "phase": phase,
+            "prefetch_submitted": prefetch_submitted,
             "ready_polled": ready_polled,
             "ready_applied": ready_applied,
             "ready_deferred": ready_deferred,
@@ -72,6 +77,7 @@ class MigrationPipelineRuntime:
             "offload_refresh_calls": int(self.tick_calls),
             "offload_refresh_ready_total": int(self.ready_polled_total),
             "offload_pipeline_ticks": int(self.tick_calls),
+            "offload_pipeline_prefetch_submitted_total": int(self.prefetch_submitted_total),
             "offload_pipeline_ready_applied_total": int(self.ready_applied_total),
             "offload_pipeline_ready_deferred_total": int(self.ready_deferred_total),
             "offload_pipeline_layers_touched_total": int(self.layers_touched_total),

@@ -1408,6 +1408,7 @@ class TestDynamicScheduler:
             def advance_offload_pipeline(self, *, phase, device, dtype):
                 self.advanced.append((phase, str(device), str(dtype)))
                 return {
+                    "prefetch_submitted": 2,
                     "ready_polled": self.ready_count,
                     "ready_applied": 1,
                     "ready_deferred": 0,
@@ -1427,6 +1428,7 @@ class TestDynamicScheduler:
         diagnostics = model.offload_refresh_diagnostics()
         assert diagnostics["offload_refresh_calls"] == 1
         assert diagnostics["offload_refresh_ready_total"] == 5
+        assert diagnostics["offload_pipeline_prefetch_submitted_total"] == 4
         assert diagnostics["offload_pipeline_ready_applied_total"] == 2
         assert diagnostics["offload_pipeline_last_phase"] == "decode"
         assert layer0.hybrid_moe.advanced[0][0] == "decode"
@@ -1555,3 +1557,94 @@ class TestDynamicScheduler:
         assert "1" in hybrid.gpu_experts
         assert diagnostics["pipeline_ready_applied"] == 1
         assert diagnostics["gpu_experts_mask_sum"] == 1
+
+    def test_hybrid_moe_pipeline_primes_pending_prefetch(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+                decode_require_prefetch_ready=True,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=1,
+        ).to(dtype=torch.float32)
+
+        hybrid.offload_backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=1,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="pipeline_prime",
+                )
+            ],
+            phase="decode",
+        )
+        submitted = []
+
+        def fake_prefetch(layer_idx, expert_idx):
+            submitted.append((layer_idx, expert_idx))
+            return True
+
+        hybrid.materialization_manager.prefetch = fake_prefetch
+        hybrid.materialization_manager.is_ready = lambda layer_idx, expert_idx: False
+        hybrid.materialization_manager.has_pending_or_ready = lambda: False
+        hybrid.materialization_manager.poll_ready = lambda: []
+
+        stats = hybrid.advance_offload_pipeline(
+            phase="decode",
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        diagnostics = hybrid.diagnostics()
+        lifecycle = diagnostics["backend"]["migration_manager"]["layers"][0]["lifecycle"][0]
+
+        assert stats["prefetch_submitted"] == 1
+        assert stats["ready_applied"] == 0
+        assert diagnostics["prefetch_enqueued"] == 1
+        assert submitted == [(0, 1)]
+        assert lifecycle["state"] == MigrationLifecycle.DEFERRED.value

@@ -168,6 +168,15 @@ tags: [architecture]
     - 它依旧由 token-step hook 驱动，不是后台线程
     - 但系统已经从“每层 forward 内部边算边处理 ready”推进到“step 进入前统一推进流水线”
     - 这为后续真正引入后台 worker、事件队列和 GPU<->PIM resident 迁移执行器提供了清晰挂点。
+28. pipeline runtime 现在还会在 decode 进入模型前主动 prime pending promotions：
+    - 对 `dst=GPU` 的 pending op，若尚未 ready，会先统一提交 prefetch
+    - 若启用了 `decode_require_prefetch_ready`，则会提前把这些 op 标成 `deferred`
+    - 这样“排队中的热点专家”不必等到层内 forward 才第一次被预热，`queued -> prefetching/deferred` 已开始前移到 token-step runtime
+29. 因此当前流水线已经粗略分成三段：
+    - token-step runtime：prime pending promotion、poll completion queue、推进 ready promotion
+    - layer forward：消费剩余未就绪/未提前应用的迁移，并执行真实 GPU/offload 混合计算
+    - backend/offload tier：继续承担 CPU/PIM 数值计算
+    这比早期“所有迁移控制都塞在 `HybridMoE.forward()` 里”更接近真正的流水线系统。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

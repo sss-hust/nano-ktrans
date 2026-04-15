@@ -135,6 +135,7 @@ class LayerMigrationQueue:
     ) -> None:
         expert_idx = int(expert_idx)
         tracked = self.lifecycle.get(expert_idx)
+        previous_state = tracked.state if tracked is not None else None
         if tracked is None:
             tracked = MigrationLifecycleRecord(
                 expert_idx=expert_idx,
@@ -156,6 +157,9 @@ class LayerMigrationQueue:
                 tracked.phase = phase
             tracked.state = state
 
+        if previous_state == state:
+            return
+
         if state == MigrationLifecycle.PREFETCHING:
             self.total_prefetching_events += 1
         elif state == MigrationLifecycle.READY:
@@ -164,6 +168,10 @@ class LayerMigrationQueue:
             self.total_deferred_events += 1
         elif state == MigrationLifecycle.APPLIED:
             self.total_applied_events += 1
+
+    def state_for(self, expert_idx: int) -> MigrationLifecycle | None:
+        tracked = self.lifecycle.get(int(expert_idx))
+        return None if tracked is None else tracked.state
 
     def lifecycle_state_counts(self) -> Dict[str, int]:
         counts = {state.value: 0 for state in MigrationLifecycle}
@@ -237,6 +245,12 @@ class ExpertMigrationManager:
             phase=phase,
             state=state,
         )
+
+    def state_for(self, layer_idx: int, expert_idx: int) -> MigrationLifecycle | None:
+        queue = self._queues.get(layer_idx)
+        if queue is None:
+            return None
+        return queue.state_for(expert_idx)
 
     def diagnostics(self) -> dict:
         return {
