@@ -249,6 +249,11 @@ tags: [architecture]
     - 每次 deferred/queued 重排若保住了原有 lifecycle，会累加一次
     - 这样 benchmark 就能区分“队列被重排了很多次”与“虽然重排，但流水线进度没有丢”
     这对后续比较 `baseline / overlap_safe / eager` 很关键，因为真正好的 profile 不只是 defer 少，还应当让已准备好的 expert 不回退。
+44. decode 的 ready promotion 现在也改成了“选择性消费”而不是“先全取出再回填”：
+    - migration manager 里 ready 的 pending op 会先被 `peek`
+    - 只有真正 `applied` 的 expert 才会从 queue 中移除
+    - 因预算不足暂时没消费的 ready/warmed/activated expert 会继续留在原队列中
+    这样 pipeline 就少了一次“取出 -> 再放回”的控制面抖动，更接近真正的流水线 buffer。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

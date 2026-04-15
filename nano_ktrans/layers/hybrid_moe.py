@@ -473,12 +473,23 @@ class HybridMoE(nn.Module):
             return 0, 0
 
         max_promotions = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
-        ready_ops = self.offload_backend.migration_manager.take_ready_layer(self.layer_idx)
-        if not ready_ops:
+        queued_ops = self.offload_backend.migration_manager.peek_layer(self.layer_idx)
+        if not queued_ops:
             return 0, 0
 
-        ready_ops = self._coalesce_migration_ops(ready_ops)
-        promotion_ops = [op for op in ready_ops if op.dst == ExpertResidency.GPU]
+        queued_ops = self._coalesce_migration_ops(queued_ops)
+        promotion_ops = []
+        for op in queued_ops:
+            if op.dst != ExpertResidency.GPU:
+                continue
+            lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, int(op.expert_idx))
+            if lifecycle not in {
+                MigrationLifecycle.READY,
+                MigrationLifecycle.WARMED,
+                MigrationLifecycle.ACTIVATED,
+            }:
+                continue
+            promotion_ops.append(op)
         if not promotion_ops:
             return 0, 0
 
@@ -488,6 +499,7 @@ class HybridMoE(nn.Module):
 
         applied = 0
         deferred = 0
+        completed_expert_ids: set[int] = set()
         for op in promotion_ops:
             if applied >= max_promotions:
                 deferred += 1
@@ -504,6 +516,7 @@ class HybridMoE(nn.Module):
                         phase=phase,
                         state=MigrationLifecycle.APPLIED,
                     )
+                completed_expert_ids.add(expert_idx)
                 continue
 
             while gpu_budget > 0 and int(self.gpu_experts_mask.bool().sum().item()) >= gpu_budget:
@@ -558,22 +571,20 @@ class HybridMoE(nn.Module):
                     phase=phase,
                     state=MigrationLifecycle.APPLIED,
                 )
+                completed_expert_ids.add(expert_idx)
                 continue
-
-            self.offload_backend.queue_migration_plan([op], phase=f"{phase}_deferred")
-            self.offload_backend.migration_manager.mark_state(
-                self.layer_idx,
-                expert_idx,
-                src=op.src.value,
-                dst=op.dst.value,
-                reason=op.reason,
-                phase=f"{phase}_deferred",
-                state=MigrationLifecycle.DEFERRED,
-            )
 
         if applied:
             self.last_applied_migration_phase = phase
             self._synchronize_gpu_mask()
+        if completed_expert_ids:
+            self.offload_backend.migration_manager.take_layer(
+                self.layer_idx,
+                lambda op: (
+                    op.dst == ExpertResidency.GPU
+                    and int(op.expert_idx) in completed_expert_ids
+                ),
+            )
         self.applied_migration_history = self.applied_migration_history[-64:]
         return applied, deferred
 
