@@ -1982,8 +1982,10 @@ class TestDynamicScheduler:
         assert stats["warm_prebuilt"] == 1
         assert build_calls == [1]
         assert diagnostics["warm_cache_prebuilt"] == 1
-        assert diagnostics["warm_cache_hits"] == 1
+        assert diagnostics["warm_cache_hits"] == 0
+        assert diagnostics["activated_cache_hits"] == 1
         assert layer_migration["total_warmed_events"] == 1
+        assert layer_migration["total_activated_events"] == 1
         assert diagnostics["backend"]["migration_manager"]["layers"][0]["lifecycle"][0]["state"] == "applied"
         assert diagnostics["warm_cache_device_transfers"] == 1
 
@@ -2079,3 +2081,69 @@ class TestDynamicScheduler:
         assert diagnostics["activation_applied"] == 1
         assert layer_migration["total_activated_events"] == 1
         assert layer_migration["lifecycle"][0]["state"] == MigrationLifecycle.APPLIED.value
+        assert diagnostics["activated_cache_hits"] == 1
+        assert diagnostics["activated_cache_stores"] == 1
+        assert diagnostics["activated_cache_size"] == 0
+
+    def test_hybrid_moe_promotion_prefers_activated_cache(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(enabled=True, gpu_budget_per_layer=1, offload_tier=ExpertResidency.PIM),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=2,
+        ).to(dtype=torch.float32)
+
+        hybrid._promote_expert_to_gpu(1, torch.device("cpu"), torch.float32)
+        hybrid._demote_expert_from_gpu(1, ExpertResidency.PIM)
+        assert "1" in hybrid.warm_expert_cache
+
+        hybrid._activate_warmed_experts = lambda **kwargs: 0
+        hybrid.activated_expert_cache["1"] = hybrid.warm_expert_cache.pop("1")
+        diagnostics_before = hybrid.diagnostics()
+        hybrid._promote_expert_to_gpu(1, torch.device("cpu"), torch.float32)
+        diagnostics = hybrid.diagnostics()
+
+        assert diagnostics_before["activated_cache_size"] == 1
+        assert diagnostics["activated_cache_hits"] == 1
+        assert diagnostics["warm_cache_hits"] == 0
+        assert diagnostics["activated_cache_size"] == 0

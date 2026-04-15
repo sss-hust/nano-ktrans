@@ -43,6 +43,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "activation_submitted": 0,
         "activation_ready": 0,
         "activation_applied": 0,
+        "activated_cache_hits": 0,
+        "activated_cache_stores": 0,
+        "activated_cache_evictions": 0,
+        "activated_cache_size": 0,
         "decode_prefetch_hits": 0,
         "decode_prefetch_misses": 0,
         "runtime_evictions": 0,
@@ -91,6 +95,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["activation_submitted"] += int(layer.get("activation_submitted", 0))
         summary["activation_ready"] += int(layer.get("activation_ready", 0))
         summary["activation_applied"] += int(layer.get("activation_applied", 0))
+        summary["activated_cache_hits"] += int(layer.get("activated_cache_hits", 0))
+        summary["activated_cache_stores"] += int(layer.get("activated_cache_stores", 0))
+        summary["activated_cache_evictions"] += int(layer.get("activated_cache_evictions", 0))
+        summary["activated_cache_size"] += int(layer.get("activated_cache_size", 0))
         summary["decode_prefetch_hits"] += int(layer.get("decode_prefetch_hits", 0))
         summary["decode_prefetch_misses"] += int(layer.get("decode_prefetch_misses", 0))
         summary["runtime_evictions"] += int(layer.get("runtime_evictions", 0))

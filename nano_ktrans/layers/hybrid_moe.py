@@ -116,11 +116,15 @@ class HybridMoE(nn.Module):
         self.pipeline_ticks = 0
         self.expert_warm_cache_size = max(0, int(expert_warm_cache_size))
         self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
+        self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.warm_cache_hits = 0
         self.warm_cache_stores = 0
         self.warm_cache_evictions = 0
         self.warm_cache_prebuilt = 0
         self.warm_cache_device_transfers = 0
+        self.activated_cache_hits = 0
+        self.activated_cache_stores = 0
+        self.activated_cache_evictions = 0
         self.activation_submitted = 0
         self.activation_ready = 0
         self.activation_applied = 0
@@ -286,6 +290,21 @@ class HybridMoE(nn.Module):
             self.warm_expert_cache.popitem(last=False)
             self.warm_cache_evictions += 1
 
+    def _activated_cache_limit(self) -> int:
+        if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
+            return 1
+        return max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+
+    def _store_activated_module(self, expert_idx: int, module: nn.Module) -> None:
+        expert_key = str(expert_idx)
+        self.activated_expert_cache[expert_key] = module
+        self.activated_expert_cache.move_to_end(expert_key)
+        self.activated_cache_stores += 1
+        while len(self.activated_expert_cache) > self._activated_cache_limit():
+            evicted_key, evicted_module = self.activated_expert_cache.popitem(last=False)
+            self._store_warm_module(int(evicted_key), evicted_module, count_store=False)
+            self.activated_cache_evictions += 1
+
     def _activate_warm_module(self, module: nn.Module, device: torch.device, dtype: torch.dtype) -> nn.Module:
         non_blocking = device.type == "cuda"
         self.warm_cache_device_transfers += 1
@@ -310,14 +329,19 @@ class HybridMoE(nn.Module):
             current_state = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
             if current_state != MigrationLifecycle.WARMED:
                 continue
-            if expert_key in self.gpu_experts or expert_key not in self.warm_expert_cache:
+            if (
+                expert_key in self.gpu_experts
+                or expert_key in self.activated_expert_cache
+                or expert_key not in self.warm_expert_cache
+            ):
                 continue
             if bool(self.gpu_experts_mask[expert_idx].item()):
                 continue
 
             self.activation_submitted += 1
             warm_module = self.warm_expert_cache.pop(expert_key)
-            self.warm_expert_cache[expert_key] = self._activate_warm_module(warm_module, device, dtype)
+            activated_module = self._activate_warm_module(warm_module, device, dtype)
+            self._store_activated_module(expert_idx, activated_module)
             self.offload_backend.migration_manager.mark_state(
                 self.layer_idx,
                 expert_idx,
@@ -352,7 +376,11 @@ class HybridMoE(nn.Module):
             }:
                 continue
             expert_key = str(expert_idx)
-            if expert_key in self.gpu_experts or expert_key in self.warm_expert_cache:
+            if (
+                expert_key in self.gpu_experts
+                or expert_key in self.warm_expert_cache
+                or expert_key in self.activated_expert_cache
+            ):
                 continue
             module = self._build_runtime_expert(expert_idx, torch.device("cpu"), dtype)
             self._store_warm_module(expert_idx, module, count_store=False)
@@ -556,16 +584,21 @@ class HybridMoE(nn.Module):
     def _promote_expert_to_gpu(self, expert_idx: int, device: torch.device, dtype: torch.dtype) -> bool:
         expert_key = str(expert_idx)
         if expert_key not in self.gpu_experts:
-            warm_module = self.warm_expert_cache.pop(expert_key, None)
-            if warm_module is not None:
-                self.warm_cache_hits += 1
-                module_device = next(iter(warm_module.parameters())).device
-                if module_device != device:
-                    self.gpu_experts[expert_key] = self._activate_warm_module(warm_module, device, dtype)
-                else:
-                    self.gpu_experts[expert_key] = warm_module.to(dtype=dtype)
+            activated_module = self.activated_expert_cache.pop(expert_key, None)
+            if activated_module is not None:
+                self.activated_cache_hits += 1
+                self.gpu_experts[expert_key] = activated_module.to(dtype=dtype)
             else:
-                self.gpu_experts[expert_key] = self._build_runtime_expert(expert_idx, device, dtype)
+                warm_module = self.warm_expert_cache.pop(expert_key, None)
+                if warm_module is not None:
+                    self.warm_cache_hits += 1
+                    module_device = next(iter(warm_module.parameters())).device
+                    if module_device != device:
+                        self.gpu_experts[expert_key] = self._activate_warm_module(warm_module, device, dtype)
+                    else:
+                        self.gpu_experts[expert_key] = warm_module.to(dtype=dtype)
+                else:
+                    self.gpu_experts[expert_key] = self._build_runtime_expert(expert_idx, device, dtype)
         self.activation_applied += 1
         self.gpu_experts_mask[expert_idx] = True
         self._set_residency(expert_idx, ExpertResidency.GPU)
@@ -966,6 +999,10 @@ class HybridMoE(nn.Module):
             "warm_cache_prebuilt": self.warm_cache_prebuilt,
             "warm_cache_device_transfers": self.warm_cache_device_transfers,
             "warm_cache_size": len(self.warm_expert_cache),
+            "activated_cache_hits": self.activated_cache_hits,
+            "activated_cache_stores": self.activated_cache_stores,
+            "activated_cache_evictions": self.activated_cache_evictions,
+            "activated_cache_size": len(self.activated_expert_cache),
             "activation_submitted": self.activation_submitted,
             "activation_ready": self.activation_ready,
             "activation_applied": self.activation_applied,

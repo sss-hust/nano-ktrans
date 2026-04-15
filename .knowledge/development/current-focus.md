@@ -47,6 +47,7 @@ updated: 2026-04-16 02:40
 - [x] warm cache 的 prebuild 现在固定落在 CPU，再在 promotion 时执行单次 device transfer，避免 prebuild 阶段污染 GPU 关键路径
 - [x] migration lifecycle 现在显式区分 `ready` 和 `warmed`，可以单独观察“数据 ready”和“模块已预构建”这两个阶段
 - [x] token-step pipeline 现在显式区分 `warmed -> activated -> applied`，把 warm cache 上的 device transfer 从最终 promotion 应用里拆出来单独观测
+- [x] token-step pipeline 现在为 activated expert 引入单独 device-side cache，`activated -> applied` 可以优先命中已完成 device transfer 的 module
 
 ## 阻塞项
 
@@ -79,6 +80,7 @@ updated: 2026-04-16 02:40
 - 当前 prebuild 仍由前台 pipeline hook 触发，适合做控制面和缓存层验证；要真正赢过 cpu+gpu，还需要把 prebuild 与 PIM resident 传输变成异步后台执行
 - 当前 warm cache 的 device transfer 仍是同步 `.to(device)`，还没拆成独立 CUDA stream 或后台 copy worker
 - 当前 `activated` 只是“warm module 已搬到目标 device、尚未进入 GPU resident set”的前台状态，不是真正后台 activation worker
+- 当前 activated cache 仍由前台 token-step hook 填充，尚未按 layer batch 或独立 CUDA stream 做真正异步 activation
 - 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`
@@ -143,6 +145,7 @@ updated: 2026-04-16 02:40
   - 让 `prefetching -> ready` 通过 completion/event 推进
   - 让 `warmed -> activated` 脱离当前 token-step 同步 hook，变成独立 activation queue
   - 让 `ready -> applied` 逐步脱离主线程 token-step hook
+  - 让 activated cache 支持按层批量 promotion，减少逐 expert 激活/应用
   - 为真实 GPU<->PIM resident migration 预留单独执行通道
 
 ## 本轮对话上下文

@@ -225,6 +225,16 @@ tags: [architecture]
     - activation 负责最后一次 CPU->device 拷贝
     - applied 负责真正切换执行路径
     当前它们仍然是 token-step hook 中的同步阶段，但系统已经具备把 activation 单独剥离成后台 worker/stream 的结构基础。
+40. 为了减少 `activated -> applied` 的重复开销，当前运行时又加了一层 activated cache：
+    - `warmed` expert 完成 device transfer 后不会立刻插入 `gpu_experts`
+    - 而是先放进 device-side activated cache
+    - promotion 真正发生时优先从 activated cache 命中，再更新 GPU resident set
+    这样当前 decode promotion 的优先级已经逐渐变成：
+    - activated cache hit
+    - warm cache hit
+    - resident staging hit
+    - 冷路径 build/load
+    它更接近一个分层缓存系统，而不是单次迁移动作。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
