@@ -62,6 +62,7 @@ updated: 2026-04-16 02:40
 - [x] ready promotion 批次现在会先统一计算并执行本批次需要的 eviction，减少 batch 内每个 expert 重复做 GPU budget 检查
 - [x] token-step runtime 现在会汇总 apply batch 的批次数、expert 数和批内 eviction 数，便于从 step 级视角观察流水线推进
 - [x] benchmark/profile sweep 现在会自动汇总 decode TPS、overlap 命中、promotion source 和 apply batch 指标，便于直接比较哪组策略最接近目标
+- [x] profile sweep 现在也会带 step 级 runtime apply batch totals，能同时观察 layer 视角和 token-step 视角的批处理推进情况
 
 ## 阻塞项
 
@@ -104,6 +105,7 @@ updated: 2026-04-16 02:40
 - 当前 ready promotion 虽然已经批量算出了 eviction 需求，但 batch 内真正的 warm/activated 命中与 resident set 注入仍是逐 expert 完成
 - 当前 runtime 已能汇总 batch 级推进情况，但 benchmark 还没把这些 step 级 batch 指标纳入 profile sweep 排序
 - 当前 profile sweep 已能自动汇总 batch 指标，但还没有把这些指标和真实 `cuda_pim` 宿主机结果形成持续对照表
+- 当前 profile sweep 已覆盖 runtime batch totals，但还没把这些指标做成跨实验的历史趋势表
 - 当前 strict ready-only 语义已经覆盖 resident staging，但 `prefetching -> ready` 仍然依赖前台 refresh，而不是真 completion event 驱动
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总
 - 当前 prebuild 已做候选裁剪，但 warm cache 还没有独立的“低优先级淘汰”策略，仍然主要依赖容量上限和 LRU

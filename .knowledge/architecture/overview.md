@@ -308,6 +308,12 @@ tags: [architecture]
     - `runtime_deferred_for_prefetch`
     汇总成结构化摘要，并直接给出按 decode TPS 选出的当前最好 profile。
     这让后续调度实验不再只是看原始 JSON，而是能更快回答“哪组策略最接近让 PIM 路径追上甚至超过 `cpu+gpu`”。
+55. 最近这个汇总层又继续往 step 级推进了一步：
+    - `profile_sweep_summary` 现在也会带上 runtime 侧累计的 `offload_pipeline_apply_batch_*_total`
+    - 因此一轮实验可以同时看到：
+      - layer 本地的 apply batch 统计
+      - token-step runtime 汇总的 apply batch totals
+    这有助于判断“某个 profile 是真的让流水线更像 batch system”，还是只是把局部 layer 指标做得好看。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

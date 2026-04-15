@@ -681,7 +681,11 @@ class TestDynamicScheduler:
             {
                 "dynamic_scheduler": {"enabled": True},
                 "layer_count": 1,
-                "offload_refresh": {},
+                "offload_refresh": {
+                    "offload_pipeline_apply_batch_count_total": 3,
+                    "offload_pipeline_apply_batch_experts_total": 7,
+                    "offload_pipeline_apply_batch_evictions_total": 2,
+                },
                 "layers": [
                     {
                         "pipeline_apply_batches": 2,
@@ -696,6 +700,9 @@ class TestDynamicScheduler:
         assert summary["pipeline_apply_batch_experts"] == 5
         assert summary["pipeline_apply_batch_evictions"] == 1
         assert summary["pipeline_apply_batch_size_avg"] == pytest.approx(2.5)
+        assert summary["offload_pipeline_apply_batch_count_total"] == 3
+        assert summary["offload_pipeline_apply_batch_experts_total"] == 7
+        assert summary["offload_pipeline_apply_batch_evictions_total"] == 2
 
     def test_summarize_profile_sweep_results(self):
         from nano_ktrans.scheduler import summarize_profile_sweep_results
@@ -714,6 +721,9 @@ class TestDynamicScheduler:
                         "pipeline_apply_batches": 2,
                         "pipeline_apply_batch_size_avg": 1.5,
                         "pipeline_apply_batch_evictions": 1,
+                        "offload_pipeline_apply_batch_count_total": 2,
+                        "offload_pipeline_apply_batch_experts_total": 3,
+                        "offload_pipeline_apply_batch_evictions_total": 1,
                         "runtime_deferred_for_prefetch": 4,
                     },
                     "runs": [
@@ -736,6 +746,9 @@ class TestDynamicScheduler:
                         "pipeline_apply_batches": 3,
                         "pipeline_apply_batch_size_avg": 2.0,
                         "pipeline_apply_batch_evictions": 2,
+                        "offload_pipeline_apply_batch_count_total": 3,
+                        "offload_pipeline_apply_batch_experts_total": 6,
+                        "offload_pipeline_apply_batch_evictions_total": 2,
                         "runtime_deferred_for_prefetch": 1,
                     },
                     "runs": [
@@ -753,6 +766,7 @@ class TestDynamicScheduler:
         assert summary["best_by_decode_tokens_per_second"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_decode_tokens_per_second"]["decode_tokens_per_second"] == pytest.approx(2.5)
         assert "pipeline_apply_batch_size_avg" in summary["sort_keys"]
+        assert summary["best_by_decode_tokens_per_second"]["runtime_offload_pipeline_apply_batch_count_total"] == 3
 
     def test_migration_pipeline_runtime_tracks_apply_batch_totals(self):
         from nano_ktrans.kernels.migration_runtime import MigrationPipelineRuntime

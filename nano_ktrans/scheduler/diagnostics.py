@@ -9,6 +9,9 @@ PROFILE_SWEEP_SORT_KEYS = (
     "pipeline_promotion_source_activated",
     "pipeline_promotion_source_warm",
     "pipeline_promotion_source_cold",
+    "runtime_offload_pipeline_apply_batch_count_total",
+    "runtime_offload_pipeline_apply_batch_experts_total",
+    "runtime_offload_pipeline_apply_batch_evictions_total",
     "pipeline_apply_batch_size_avg",
     "pipeline_apply_batch_evictions",
     "runtime_deferred_for_prefetch",
@@ -39,6 +42,15 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         ),
         "offload_pipeline_ready_deferred_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_ready_deferred_total", 0)
+        ),
+        "offload_pipeline_apply_batch_count_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_apply_batch_count_total", 0)
+        ),
+        "offload_pipeline_apply_batch_experts_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_apply_batch_experts_total", 0)
+        ),
+        "offload_pipeline_apply_batch_evictions_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_apply_batch_evictions_total", 0)
         ),
         "offload_pipeline_layers_touched_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_layers_touched_total", 0)
@@ -242,6 +254,15 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             ),
             "pipeline_apply_batch_evictions": int(
                 scheduler_summary.get("pipeline_apply_batch_evictions", 0)
+            ),
+            "runtime_offload_pipeline_apply_batch_count_total": int(
+                scheduler_summary.get("offload_pipeline_apply_batch_count_total", 0)
+            ),
+            "runtime_offload_pipeline_apply_batch_experts_total": int(
+                scheduler_summary.get("offload_pipeline_apply_batch_experts_total", 0)
+            ),
+            "runtime_offload_pipeline_apply_batch_evictions_total": int(
+                scheduler_summary.get("offload_pipeline_apply_batch_evictions_total", 0)
             ),
             "runtime_deferred_for_prefetch": int(
                 scheduler_summary.get("runtime_deferred_for_prefetch", 0)

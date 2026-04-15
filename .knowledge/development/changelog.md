@@ -213,3 +213,4 @@ tags: [changelog]
 - <!-- updated: 2026-04-16 06:25 --> **[profile-sweep-summary]** 新增 `summarize_profile_sweep_results()`，benchmark 现在会额外输出 `profile_sweep_summary`，自动汇总各 scheduler profile 的 `decode_tokens_per_second`、overlap 命中、promotion source breakdown、apply batch 指标和 deferred 数。
 - <!-- updated: 2026-04-16 06:25 --> **[example-runtime-totals]** `example.py` 现在会额外打印 step 级 pipeline apply totals，方便快速肉眼查看本次生成是否真的出现批处理式 ready/apply 行为。
 - <!-- updated: 2026-04-16 06:25 --> **[tests]** 新增 profile sweep 摘要测试，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `73 passed, 1 warning`。
+- <!-- updated: 2026-04-16 06:35 --> **[runtime-batch-sweep]** profile sweep 摘要现在也纳入 step 级 runtime apply batch totals，包括 `runtime_offload_pipeline_apply_batch_count_total`、`runtime_offload_pipeline_apply_batch_experts_total` 和 `runtime_offload_pipeline_apply_batch_evictions_total`，benchmark/README 已同步说明这些指标的意义。
