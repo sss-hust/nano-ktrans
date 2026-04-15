@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 08:08
+updated: 2026-04-15 08:16
 ---
 
 # 🔥 当前工作焦点
@@ -27,6 +27,7 @@ updated: 2026-04-15 08:08
 - [x] scheduler 已支持逻辑步长和 prefill collect-only 模式
 - [x] decode 已支持“只消费 prefetch-ready promotion”的保守模式
 - [x] migration queue 已接入按 expert 去重和更细的排队诊断
+- [x] scheduler 已支持“无立即迁移也可按热度预取 offloaded experts”
 
 ## 阻塞项
 
@@ -50,7 +51,9 @@ updated: 2026-04-15 08:08
 - 当前 scheduler 已维护每个 expert 的：
 - 当前 scheduler 已新增两类更接近真实系统的控制旋钮：
 - 当前 scheduler / migration 控制面已经有三类关键开关：
- - 当前 migration queue 已能输出：
+- 当前 migration queue 已能输出：
+ - 当前 scheduler 现在不必等 migration op 产生，已经能按层直接选出 hot offload experts 做候选预取
+- 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`
   - `total_drained_ops`
@@ -88,11 +91,13 @@ updated: 2026-04-15 08:08
 - 下一步可以在不破坏现有行为的前提下，逐步把 cooldown / idle-age 从纯诊断指标提升成可调度约束
 - 后续 benchmark 可以开始扫描：
 - 后续 benchmark 可以开始扫描：
+- 后续 benchmark 可以开始扫描：
  - 后续 benchmark 可以开始扫描：
   - prefill 只收集热度 vs prefill 直接发迁移计划
   - 大步长 prefill vs 小步长 decode
   - decode 立刻 promotion vs decode 只消费 prefetch-ready promotion
   - queue 去重前后 migration submit 量的差异
+  - 纯“候选预取”对后续 decode promotion 命中率的影响
 - 对比 `cpu`、`cuda_cpu_offload`、`pim` 三条链路的 prefill/decode 延迟与 offload 命中分布
 - 继续补充架构说明、依赖说明和版本化文档
 

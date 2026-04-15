@@ -984,6 +984,26 @@ class TestDynamicScheduler:
         assert diagnostics["prefill_collect_only"] is True
         assert diagnostics["residency_plan"]["layers"][0]["logical_step"] == 8
 
+    def test_scheduler_prefetch_candidates_layer(self):
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        masks = [torch.tensor([True, False, False, False], dtype=torch.bool)]
+        plan = ExpertResidencyPlan.from_gpu_masks(masks, default_offload_tier=ExpertResidency.PIM)
+        scheduler = DynamicExpertScheduler(
+            residency_plan=plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                prefetch_candidate_budget_per_layer=2,
+            ),
+        )
+
+        scheduler.observe(0, torch.tensor([[2, 3], [2, 2]]), phase="decode")
+        candidates = scheduler.prefetch_candidates_layer(0, phase="decode")
+        assert candidates == [2, 3]
+
     def test_hybrid_moe_can_defer_decode_promotion_until_prefetch_ready(self, tmp_path):
         from safetensors.torch import save_file
 
@@ -1080,3 +1100,65 @@ class TestDynamicScheduler:
         assert "1" in hybrid.gpu_experts
         diagnostics = hybrid.diagnostics()
         assert diagnostics["runtime_deferred_for_prefetch"] >= 1
+
+    def test_hybrid_moe_prefetches_hot_candidates_without_immediate_migration(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.context import reset_context, set_context
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(4):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                prefetch_candidate_budget_per_layer=2,
+                decode_promote_k=0,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=4,
+            top_k=2,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+        ).to(dtype=torch.float32)
+
+        hidden_states = torch.randn(1, 4)
+        router_logits = torch.tensor([[0.1, 4.0, 3.0, 2.0]], dtype=torch.float32)
+        set_context(is_prefill=False)
+        try:
+            output = hybrid(hidden_states, router_logits)
+        finally:
+            reset_context()
+
+        assert output.shape == (1, 4)
+        diagnostics = hybrid.diagnostics()
+        assert diagnostics["prefetch_candidate_scans"] >= 1
+        assert diagnostics["prefetch_enqueued"] >= 2

@@ -97,6 +97,10 @@ tags: [architecture]
     - 同一 layer / expert 的新 op 会覆盖旧 op
     - 避免同一 expert 在短时间内重复排队
     - 并记录原始提交量与去重量，便于后续评估控制面开销
+13. scheduler 现在还支持“候选预取”路径：
+    - 即使当前 step 没有立即可执行的 migration op
+    - 也可以基于 offloaded experts 的 hotness，提前挑出一批候选 expert 做 staging prefetch
+    - 为后续 decode promotion 提前铺垫数据面准备
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

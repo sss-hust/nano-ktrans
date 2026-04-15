@@ -102,6 +102,7 @@ class HybridMoE(nn.Module):
         self.prefetch_requested = 0
         self.prefetch_enqueued = 0
         self.prefetch_materialized = 0
+        self.prefetch_candidate_scans = 0
         self.runtime_evictions = 0
         self.runtime_skipped_demotion_cooldown = 0
         self.runtime_deferred_for_prefetch = 0
@@ -163,6 +164,17 @@ class HybridMoE(nn.Module):
         self.prefetch_requested += 1
         if self.materialization_manager.prefetch(self.layer_idx, expert_idx):
             self.prefetch_enqueued += 1
+
+    def _request_prefetch_candidates(self, *, phase: str) -> None:
+        if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
+            return
+        candidates = self.dynamic_expert_scheduler.prefetch_candidates_layer(self.layer_idx, phase=phase)
+        if not candidates:
+            return
+        self.prefetch_candidate_scans += 1
+        for expert_idx in candidates:
+            if not self.materialization_manager.has_cached(self.layer_idx, int(expert_idx)):
+                self._request_prefetch(int(expert_idx))
 
     def _set_residency(self, expert_idx: int, residency: ExpertResidency) -> None:
         if self.residency_plan is None:
@@ -421,6 +433,7 @@ class HybridMoE(nn.Module):
 
         if self.dynamic_expert_scheduler is not None and self.dynamic_expert_scheduler.enabled:
             self.dynamic_expert_scheduler.observe(self.layer_idx, topk_ids, phase=phase)
+            self._request_prefetch_candidates(phase=phase)
             planned_ops = self.dynamic_expert_scheduler.plan_layer(self.layer_idx, phase=phase)
             if planned_ops and self.offload_backend is not None:
                 for op in planned_ops:
@@ -517,6 +530,7 @@ class HybridMoE(nn.Module):
             "prefetch_requested": self.prefetch_requested,
             "prefetch_enqueued": self.prefetch_enqueued,
             "prefetch_materialized": self.prefetch_materialized,
+            "prefetch_candidate_scans": self.prefetch_candidate_scans,
             "runtime_evictions": self.runtime_evictions,
             "runtime_skipped_demotion_cooldown": self.runtime_skipped_demotion_cooldown,
             "runtime_deferred_for_prefetch": self.runtime_deferred_for_prefetch,

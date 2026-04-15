@@ -10,6 +10,7 @@ from nano_ktrans.utils.expert_runtime_state import (
     ExpertResidency,
     ExpertResidencyPlan,
     propose_topk_promotions,
+    select_topk_offload_candidates,
     update_hotness,
 )
 
@@ -29,6 +30,7 @@ class SchedulerConfig:
     step_stride_prefill: int = 8
     step_stride_decode: int = 1
     decode_require_prefetch_ready: bool = False
+    prefetch_candidate_budget_per_layer: int = 0
 
 
 class DynamicExpertScheduler:
@@ -116,7 +118,22 @@ class DynamicExpertScheduler:
             "step_stride_prefill": self.config.step_stride_prefill,
             "step_stride_decode": self.config.step_stride_decode,
             "last_phase": self.last_phase,
+            "prefetch_candidate_budget_per_layer": self.config.prefetch_candidate_budget_per_layer,
             "offload_tier": self.config.offload_tier.value,
             "last_plan_size": len(self.last_plan),
             "residency_plan": self.residency_plan.summary(),
         }
+
+    def prefetch_candidates_layer(self, layer_idx: int, *, phase: Optional[str] = None) -> List[int]:
+        if not self.enabled:
+            return []
+        state = self.residency_plan.layer_state(layer_idx)
+        effective_phase = self.last_phase if phase is None else phase
+        budget = int(self.config.prefetch_candidate_budget_per_layer)
+        if effective_phase == "prefill":
+            budget = max(budget, self.config.prefill_force_gpu_budget_per_layer)
+        return select_topk_offload_candidates(
+            state,
+            candidate_budget=budget,
+            offload_source=self.config.offload_tier,
+        )

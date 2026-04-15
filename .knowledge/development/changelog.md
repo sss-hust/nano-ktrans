@@ -102,3 +102,8 @@ tags: [changelog]
 
 - `ExpertMigrationManager` 现在会按 expert 对 pending migration queue 去重。
 - queue 诊断新增 `total_enqueued_ops`、`total_deduped_ops`、`total_drained_ops` 和 per-phase `deduped_plan_size`。
+
+<!-- updated: 2026-04-15 08:16 -->
+
+- scheduler 新增 `prefetch_candidate_budget_per_layer`，可按层从 offloaded experts 中挑选热点候选做预取。
+- `HybridMoE` 新增 `prefetch_candidate_scans` 诊断，用于观察候选预取是否实际发生。

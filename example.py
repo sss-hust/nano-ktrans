@@ -98,6 +98,12 @@ def main():
         action="store_true",
         help="During decode, only promote experts whose staging prefetch is already ready; otherwise defer migration.",
     )
+    parser.add_argument(
+        "--scheduler-prefetch-candidate-budget-per-layer",
+        type=int,
+        default=0,
+        help="Number of offloaded experts per layer to proactively prefetch based on hotness, even without an immediate migration op.",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=256)
     args = parser.parse_args()
 
@@ -126,6 +132,7 @@ def main():
         scheduler_demotion_idle_steps=args.scheduler_demotion_idle_steps,
         scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
         scheduler_decode_require_prefetch_ready=args.scheduler_decode_require_prefetch_ready,
+        scheduler_prefetch_candidate_budget_per_layer=args.scheduler_prefetch_candidate_budget_per_layer,
     )
     
     # Generation test

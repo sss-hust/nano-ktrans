@@ -254,5 +254,25 @@ def propose_topk_promotions(
     return ops
 
 
+def select_topk_offload_candidates(
+    layer_state: LayerExpertState,
+    *,
+    candidate_budget: int,
+    offload_source: ExpertResidency = ExpertResidency.PIM,
+) -> List[int]:
+    if candidate_budget <= 0 or layer_state.hotness.numel() == 0:
+        return []
+
+    offload_mask = layer_state.residency == _residency_to_code(offload_source)
+    candidate_indices = torch.where(offload_mask)[0]
+    if candidate_indices.numel() == 0:
+        return []
+
+    candidate_hotness = layer_state.hotness.index_select(0, candidate_indices)
+    k = min(int(candidate_budget), int(candidate_indices.numel()))
+    _, top_pos = torch.topk(candidate_hotness, k=k)
+    return [int(candidate_indices[idx].item()) for idx in top_pos.tolist()]
+
+
 def residency_codes_to_strings(residency: Iterable[int]) -> List[str]:
     return [_code_to_residency(int(code)).value for code in residency]

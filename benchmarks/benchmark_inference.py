@@ -93,6 +93,7 @@ def benchmark_backend(
     scheduler_demotion_idle_steps: int,
     scheduler_migration_cooldown_steps: int,
     scheduler_decode_require_prefetch_ready: bool,
+    scheduler_prefetch_candidate_budget_per_layer: int,
 ) -> dict[str, Any]:
     llm = None
     offload_backend = "cpu"
@@ -161,6 +162,7 @@ def benchmark_backend(
             scheduler_demotion_idle_steps=scheduler_demotion_idle_steps,
             scheduler_migration_cooldown_steps=scheduler_migration_cooldown_steps,
             scheduler_decode_require_prefetch_ready=scheduler_decode_require_prefetch_ready,
+            scheduler_prefetch_candidate_budget_per_layer=scheduler_prefetch_candidate_budget_per_layer,
         )
         synchronize_if_needed(llm.device)
         load_seconds = time.perf_counter() - load_start
@@ -306,6 +308,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler-demotion-idle-steps", type=int, default=0)
     parser.add_argument("--scheduler-migration-cooldown-steps", type=int, default=0)
     parser.add_argument("--scheduler-decode-require-prefetch-ready", action="store_true")
+    parser.add_argument("--scheduler-prefetch-candidate-budget-per-layer", type=int, default=0)
     parser.add_argument("--json-out", help="Optional path to write the benchmark results as JSON.")
     return parser.parse_args()
 
@@ -347,6 +350,7 @@ def main() -> None:
             scheduler_demotion_idle_steps=args.scheduler_demotion_idle_steps,
             scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
             scheduler_decode_require_prefetch_ready=args.scheduler_decode_require_prefetch_ready,
+            scheduler_prefetch_candidate_budget_per_layer=args.scheduler_prefetch_candidate_budget_per_layer,
         )
         results["results"].append(result)
 
