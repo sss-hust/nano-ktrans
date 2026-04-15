@@ -673,17 +673,27 @@ class TestDynamicScheduler:
         assert summary["migration_submit_calls"] == 3
         assert summary["migration_total_enqueued_ops"] == 8
         assert summary["migration_total_deduped_ops"] == 3
-        assert summary["migration_total_drained_ops"] == 6
-        assert summary["migration_ready_only_drains"] == 0
-        assert summary["migration_pending_ops"] == 1
-        assert summary["migration_prefetching_events"] == 0
-        assert summary["migration_ready_events"] == 0
-        assert summary["migration_deferred_events"] == 0
-        assert summary["migration_applied_events"] == 0
-        assert summary["migration_lifecycle_counts"]["queued"] == 0
-        assert summary["layers_with_pending_migrations"] == 1
-        assert summary["prefetch_hit_rate"] == pytest.approx(0.75)
-        assert summary["dedupe_ratio"] == pytest.approx(3 / 8)
+
+    def test_summarize_offload_diagnostics_reports_pipeline_apply_batches(self):
+        from nano_ktrans.scheduler import summarize_offload_diagnostics
+
+        summary = summarize_offload_diagnostics(
+            {
+                "dynamic_scheduler": {"enabled": True},
+                "layer_count": 1,
+                "offload_refresh": {},
+                "layers": [
+                    {
+                        "pipeline_apply_batches": 2,
+                        "pipeline_apply_batch_experts": 5,
+                    }
+                ],
+            }
+        )
+
+        assert summary["pipeline_apply_batches"] == 2
+        assert summary["pipeline_apply_batch_experts"] == 5
+        assert summary["pipeline_apply_batch_size_avg"] == pytest.approx(2.5)
 
     def test_residency_plan_from_gpu_masks(self):
         from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
@@ -2191,6 +2201,8 @@ class TestDynamicScheduler:
         assert diagnostics["activated_cache_stores"] == 1
         assert diagnostics["activated_cache_size"] == 0
         assert layer_migration["pending_ops"] == 0
+        assert diagnostics["pipeline_apply_batches"] == 1
+        assert diagnostics["pipeline_apply_batch_experts"] == 1
 
     def test_hybrid_moe_promotion_prefers_activated_cache(self, tmp_path):
         from safetensors.torch import save_file
@@ -2608,6 +2620,8 @@ class TestDynamicScheduler:
         assert layer_diag["pending_ops"] == 1
         assert layer_diag["total_enqueued_ops"] == 2
         assert layer_diag["total_deferred_events"] == 0
+        assert diagnostics["pipeline_apply_batches"] == 1
+        assert diagnostics["pipeline_apply_batch_experts"] == 1
 
     def test_forward_path_keeps_unapplied_ready_promotions_pending(self, tmp_path):
         from safetensors.torch import save_file

@@ -118,6 +118,8 @@ class HybridMoE(nn.Module):
         self.pipeline_promotion_source_activated = 0
         self.pipeline_promotion_source_warm = 0
         self.pipeline_promotion_source_cold = 0
+        self.pipeline_apply_batches = 0
+        self.pipeline_apply_batch_experts = 0
         self.expert_warm_cache_size = max(0, int(expert_warm_cache_size))
         self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
@@ -530,16 +532,18 @@ class HybridMoE(nn.Module):
             return 0, 0
 
         promotion_ops.sort(key=lambda op: self._promotion_sort_key(op, set(), phase))
+        promotion_ops, deferred = self._select_ready_promotion_batch(
+            promotion_ops,
+            max_promotions=max_promotions,
+        )
+        if not promotion_ops:
+            return 0, deferred
         gpu_budget = self._runtime_gpu_budget()
         protected_experts = {int(op.expert_idx) for op in promotion_ops}
 
         applied = 0
-        deferred = 0
         completed_expert_ids: set[int] = set()
         for op in promotion_ops:
-            if applied >= max_promotions:
-                deferred += 1
-                continue
             expert_idx = int(op.expert_idx)
             if bool(self.gpu_experts_mask[expert_idx].item()):
                 if self.offload_backend is not None:
@@ -743,6 +747,16 @@ class HybridMoE(nn.Module):
             latest_by_expert[expert_idx] = op
             ordered_expert_ids.append(expert_idx)
         return [latest_by_expert[expert_idx] for expert_idx in ordered_expert_ids]
+
+    def _select_ready_promotion_batch(self, promotion_ops: list, *, max_promotions: int) -> tuple[list, int]:
+        if not promotion_ops:
+            return [], 0
+        selected = promotion_ops[:max_promotions]
+        deferred = max(0, len(promotion_ops) - len(selected))
+        if selected:
+            self.pipeline_apply_batches += 1
+            self.pipeline_apply_batch_experts += len(selected)
+        return selected, deferred
 
     def _pick_eviction_candidate(
         self,
@@ -1132,6 +1146,8 @@ class HybridMoE(nn.Module):
             "pipeline_promotion_source_activated": self.pipeline_promotion_source_activated,
             "pipeline_promotion_source_warm": self.pipeline_promotion_source_warm,
             "pipeline_promotion_source_cold": self.pipeline_promotion_source_cold,
+            "pipeline_apply_batches": self.pipeline_apply_batches,
+            "pipeline_apply_batch_experts": self.pipeline_apply_batch_experts,
             "warm_cache_hits": self.warm_cache_hits,
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,

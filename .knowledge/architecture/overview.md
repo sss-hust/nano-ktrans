@@ -286,6 +286,11 @@ tags: [architecture]
     - layer-forward 只接受 lifecycle 已推进到 `READY/WARMED/ACTIVATED` 的 promotion
     - 即便 materialization cache 当前步已经同步命中，也不会在同一个 forward 中越级把 expert 直接视为 `ready`
     这让 token-step pipeline 和 layer-forward 在“什么叫真正 ready”这个问题上保持一致，避免前台逻辑绕过既有流水线阶段。
+51. 当前 ready promotion 又往前迈了一小步：
+    - promotion candidate 现在会先按 hotness / lifecycle 排序
+    - 然后经由 `_select_ready_promotion_batch()` 做同层批次截断
+    - pipeline 诊断会记录 `pipeline_apply_batches` 和 `pipeline_apply_batch_experts`
+    这还不是最终的“同层真正批量 apply”，但系统已经开始把 decode promotion 从逐 expert 思维转成“先选一批值得应用的 expert，再执行该批次”。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
