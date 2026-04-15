@@ -75,6 +75,10 @@ tags: [architecture]
    - 先在非活跃 resident experts 里按 hotness 选择最冷的 victim
    - 执行 `GPU -> PIM/CPU` 的运行时 eviction
    - 再为新的热点 expert 执行 promotion
+6. promotion 队列会按两级优先级排序：
+   - 当前 step 已活跃的 expert 优先
+   - 同优先级内按 hotness 从高到低
+7. 对没有在本步立刻 promotion 的候选 expert，系统仍会尽早发起预取，为后续 decode step 预热 staging cache。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

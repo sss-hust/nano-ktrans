@@ -65,3 +65,9 @@ tags: [changelog]
 
 - `HybridMoE` 的 decode migration 现在接入了 GPU budget 约束：若 promotion 时 GPU resident set 已满，会先按 hotness 驱逐冷 expert，再执行热点 expert promotion。
 - 新增测试覆盖“为 promotion 驱逐冷 expert”的运行时路径。
+
+<!-- updated: 2026-04-15 07:22 -->
+
+- `HybridMoE` 现在会对 decode 阶段生成的 future promotions 也发起预取，不再仅限于 prefill 预热。
+- decode migration 队列现按“当前活跃优先 + hotness 优先”排序，更接近真实热点 cache 的调度语义。
+- 新增测试覆盖 decode 阶段的 future promotion 预取路径。

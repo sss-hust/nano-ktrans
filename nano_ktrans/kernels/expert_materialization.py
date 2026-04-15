@@ -78,10 +78,13 @@ class ExpertMaterializationManager:
         with self._lock:
             if key in self._cache or key in self._futures:
                 return
+            self.prefetch_submitted += 1
             if self.executor is None:
+                weights = self._load_expert(layer_idx, expert_idx)
+                self._store_cache(key, weights)
+                self.prefetch_resolved += 1
                 return
             self._futures[key] = self.executor.submit(self._load_expert, layer_idx, expert_idx)
-            self.prefetch_submitted += 1
 
     def get_expert(self, layer_idx: int, expert_idx: int) -> ExpertWeights:
         key = self._cache_key(layer_idx, expert_idx)
