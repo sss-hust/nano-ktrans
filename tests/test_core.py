@@ -800,6 +800,110 @@ class TestDynamicScheduler:
         assert diagnostics["offload_pipeline_apply_batch_experts_total"] == 5
         assert diagnostics["offload_pipeline_apply_batch_evictions_total"] == 1
 
+    def test_hybrid_moe_advance_pipeline_reports_incremental_batch_metrics(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import (
+            ExpertMigrationOp,
+            ExpertResidency,
+            ExpertResidencyPlan,
+        )
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(3):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=3,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=4,
+        ).to(dtype=torch.float32)
+
+        for expert_idx in (1, 2):
+            hybrid.offload_backend.queue_migration_plan(
+                [
+                    ExpertMigrationOp(
+                        layer_idx=0,
+                        expert_idx=expert_idx,
+                        src=ExpertResidency.PIM,
+                        dst=ExpertResidency.GPU,
+                        reason="incremental_batch_metrics",
+                    )
+                ],
+                phase="decode",
+            )
+            hybrid.materialization_manager.stage_expert(
+                0,
+                expert_idx,
+                {
+                    "gate": torch.randn(8, 4),
+                    "up": torch.randn(8, 4),
+                    "down": torch.randn(4, 8),
+                },
+            )
+            hybrid.offload_backend.migration_manager.mark_state(
+                0,
+                expert_idx,
+                state=MigrationLifecycle.READY,
+                phase="decode",
+            )
+
+        first = hybrid.advance_offload_pipeline(
+            phase="decode",
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        second = hybrid.advance_offload_pipeline(
+            phase="decode",
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        diagnostics = hybrid.diagnostics()
+
+        assert first["apply_batch_count"] == 1
+        assert first["apply_batch_experts"] == 1
+        assert first["apply_batch_evictions"] == 1
+        assert second["apply_batch_count"] == 1
+        assert second["apply_batch_experts"] == 1
+        assert second["apply_batch_evictions"] == 1
+        assert diagnostics["pipeline_apply_batches"] == 2
+        assert diagnostics["pipeline_apply_batch_experts"] == 2
+        assert diagnostics["pipeline_apply_batch_evictions"] == 2
+
     def test_residency_plan_from_gpu_masks(self):
         from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
 
