@@ -149,6 +149,10 @@ tags: [architecture]
     - `offload_refresh_calls`
     - `offload_refresh_ready_total`
     这样 benchmark 可以直接观察“每个 token step 刷新了多少次、每次收敛了多少 ready expert”。
+24. layer 级 refresh 现在也有空队列短路：
+    - 如果某层既没有 pending future，也没有 completion queue 中的 ready item
+    - `HybridMoE.refresh_offload_state()` 会直接返回
+    这避免了在大多数 step 上做无意义的 Python 轮询。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

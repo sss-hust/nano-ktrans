@@ -163,3 +163,8 @@ tags: [changelog]
 
 - `MixtralModel` 新增 `offload_refresh_calls` 和 `offload_refresh_ready_total` 统计。
 - `LLM.get_offload_diagnostics()` 与 benchmark 摘要现在会带出模型级 offload refresh 指标。
+
+<!-- updated: 2026-04-15 11:59 -->
+
+- `ExpertMaterializationManager` 新增 `has_pending_or_ready()`。
+- `HybridMoE.refresh_offload_state()` 现在会在无 pending/ready prefetch 时直接短路返回，减少空轮询。

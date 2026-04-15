@@ -1444,3 +1444,4 @@ class TestDynamicScheduler:
         assert diagnostics["prefetch_polled_ready"] >= 1
         assert diagnostics["prefetch_completion_events"] >= 1
         assert manager.has_cached(0, 1) is True
+        assert manager.has_pending_or_ready() is False

@@ -176,6 +176,8 @@ class HybridMoE(nn.Module):
     def refresh_offload_state(self) -> int:
         if self.offload_backend is None:
             return 0
+        if not self.materialization_manager.has_pending_or_ready():
+            return 0
         ready_keys = self.materialization_manager.poll_ready()
         for layer_idx, expert_idx in ready_keys:
             if int(layer_idx) != int(self.layer_idx):

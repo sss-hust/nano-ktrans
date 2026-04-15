@@ -67,6 +67,10 @@ class ExpertMaterializationManager:
         with self._lock:
             return key in self._cache
 
+    def has_pending_or_ready(self) -> bool:
+        with self._lock:
+            return bool(self._futures) or bool(self._ready_queue)
+
     def is_ready(self, layer_idx: int, expert_idx: int) -> bool:
         key = self._cache_key(layer_idx, expert_idx)
         with self._lock:
