@@ -588,6 +588,10 @@ class TestDynamicScheduler:
 
         diagnostics = {
             "scheduler_profile": {"profile": "overlap_safe"},
+            "offload_refresh": {
+                "offload_refresh_calls": 3,
+                "offload_refresh_ready_total": 2,
+            },
             "dynamic_scheduler": {"enabled": True},
             "layer_count": 2,
             "layers": [
@@ -649,6 +653,8 @@ class TestDynamicScheduler:
         summary = summarize_offload_diagnostics(diagnostics)
         assert summary["enabled"] is True
         assert summary["layer_count"] == 2
+        assert summary["offload_refresh_calls"] == 3
+        assert summary["offload_refresh_ready_total"] == 2
         assert summary["prefetch_requested"] == 7
         assert summary["prefetch_enqueued"] == 5
         assert summary["decode_prefetch_hits"] == 3
@@ -1397,6 +1403,10 @@ class TestDynamicScheduler:
         model.layers = [layer0, layer1, layer2]
 
         assert model.refresh_offload_state() == 5
+        assert model.offload_refresh_diagnostics() == {
+            "offload_refresh_calls": 1,
+            "offload_refresh_ready_total": 5,
+        }
 
     def test_materialization_manager_poll_ready(self, tmp_path):
         from safetensors.torch import save_file

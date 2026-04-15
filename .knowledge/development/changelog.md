@@ -158,3 +158,8 @@ tags: [changelog]
 
 - `SimpleEngine` 新增统一 `_refresh_offload_state()` helper，full prefill、chunked prefill 和 decode 现在共用同一 refresh 入口。
 - 新增对应测试，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `50 passed`。
+
+<!-- updated: 2026-04-15 11:55 -->
+
+- `MixtralModel` 新增 `offload_refresh_calls` 和 `offload_refresh_ready_total` 统计。
+- `LLM.get_offload_diagnostics()` 与 benchmark 摘要现在会带出模型级 offload refresh 指标。

@@ -236,6 +236,7 @@ class LLM:
                 self.scheduler_profile,
                 self.dynamic_expert_scheduler.config,
             ),
+            "offload_refresh": self.model.model.offload_refresh_diagnostics(),
             "dynamic_scheduler": self.dynamic_expert_scheduler.diagnostics(),
             "layer_count": len(layers),
             "layers": layers,

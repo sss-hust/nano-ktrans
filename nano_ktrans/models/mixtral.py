@@ -229,6 +229,8 @@ class MixtralModel(nn.Module):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
+        self.offload_refresh_calls = 0
+        self.offload_refresh_ready_total = 0
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         
@@ -248,13 +250,25 @@ class MixtralModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def refresh_offload_state(self) -> int:
+        if "offload_refresh_calls" not in self.__dict__:
+            self.offload_refresh_calls = 0
+        if "offload_refresh_ready_total" not in self.__dict__:
+            self.offload_refresh_ready_total = 0
         ready_count = 0
         for decoder_layer in self.layers:
             hybrid_moe = getattr(decoder_layer, "hybrid_moe", None)
             if hybrid_moe is None:
                 continue
             ready_count += int(hybrid_moe.refresh_offload_state())
+        self.offload_refresh_calls += 1
+        self.offload_refresh_ready_total += ready_count
         return ready_count
+
+    def offload_refresh_diagnostics(self) -> dict:
+        return {
+            "offload_refresh_calls": int(self.offload_refresh_calls),
+            "offload_refresh_ready_total": int(self.offload_refresh_ready_total),
+        }
 
     def forward(
         self,

@@ -145,6 +145,10 @@ tags: [architecture]
     - chunked prefill
     - decode
     都通过同一入口触发 runtime ready 刷新，避免三处逻辑继续分叉。
+23. `MixtralModel` 现在还会累计 offload refresh 诊断：
+    - `offload_refresh_calls`
+    - `offload_refresh_ready_total`
+    这样 benchmark 可以直接观察“每个 token step 刷新了多少次、每次收敛了多少 ready expert”。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

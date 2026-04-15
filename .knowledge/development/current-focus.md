@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 11:50
+updated: 2026-04-15 11:55
 ---
 
 # 🔥 当前工作焦点
@@ -36,6 +36,7 @@ updated: 2026-04-15 11:50
 - [x] materialization 预取完成已接入 completion queue，ready 轮询不再扫描全部 future
 - [x] ready 轮询已从 `HybridMoE.forward()` 入口上移到 engine/model 层，避免每层重复轮询
 - [x] `SimpleEngine` 已抽出统一 offload refresh hook，prefill full/chunked 与 decode 共用同一入口
+- [x] offload refresh 已接入模型级统计，benchmark 可直接看到 refresh 次数与每步 ready 收敛量
 
 ## 阻塞项
 
