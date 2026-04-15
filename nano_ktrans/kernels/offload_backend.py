@@ -5,6 +5,7 @@ from glob import glob
 from typing import Any
 
 import torch
+from .expert_migration import ExpertMigrationManager
 
 
 def normalize_offload_backend_name(name: str | None) -> str:
@@ -34,6 +35,7 @@ class ExpertOffloadBackend(ABC):
         self.migration_submit_calls = 0
         self.last_migration_plan_size = 0
         self.last_migration_phase = ""
+        self.migration_manager = ExpertMigrationManager()
 
     @abstractmethod
     def submit_forward(
@@ -56,6 +58,10 @@ class ExpertOffloadBackend(ABC):
         self.migration_submit_calls += 1
         self.last_migration_plan_size = len(ops)
         self.last_migration_phase = phase
+        if ops:
+            layer_idx = getattr(ops[0], "layer_idx", -1)
+            if layer_idx >= 0:
+                self.migration_manager.queue(layer_idx, ops, phase=phase)
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -65,4 +71,5 @@ class ExpertOffloadBackend(ABC):
             "migration_submit_calls": self.migration_submit_calls,
             "last_migration_plan_size": self.last_migration_plan_size,
             "last_migration_phase": self.last_migration_phase,
+            "migration_manager": self.migration_manager.diagnostics(),
         }

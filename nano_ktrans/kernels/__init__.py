@@ -15,15 +15,21 @@ nano-ktrans kernels 包。
 """
 
 from .cpu_infer import CPUInferEngine
+from .expert_migration import ExpertMigrationManager
 from .cpu_moe import CPUMoEBackend
 from .offload_backend import ExpertOffloadBackend, count_visible_pim_ranks, normalize_offload_backend_name
+from .pim_expert_runtime import PIMExpertRuntime
+from .pim_linear_runtime import PIMLinearRuntime
 from .pim_moe import PIMMoEBackend
 from .weight_loader import ExpertWeightLoader
 
 __all__ = [
     "CPUInferEngine",
+    "ExpertMigrationManager",
     "ExpertOffloadBackend",
     "CPUMoEBackend",
+    "PIMExpertRuntime",
+    "PIMLinearRuntime",
     "PIMMoEBackend",
     "ExpertWeightLoader",
     "count_visible_pim_ranks",

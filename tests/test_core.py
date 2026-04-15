@@ -511,5 +511,71 @@ class TestOffloadBackendHelpers:
 
         assert normalize_offload_backend_name(None) == "cpu"
         assert normalize_offload_backend_name("cpu") == "cpu"
-        assert normalize_offload_backend_name("pim") == "pim_shadow"
+        assert normalize_offload_backend_name("pim") == "pim"
         assert normalize_offload_backend_name("pim-shadow") == "pim_shadow"
+
+
+class TestDynamicScheduler:
+    def test_residency_plan_from_gpu_masks(self):
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        masks = [
+            torch.tensor([True, False, False, True], dtype=torch.bool),
+            torch.tensor([False, True, False, False], dtype=torch.bool),
+        ]
+        plan = ExpertResidencyPlan.from_gpu_masks(masks, default_offload_tier=ExpertResidency.PIM)
+        summary = plan.summary()
+        assert summary["layers"][0]["gpu_experts"] == 2
+        assert summary["layers"][0]["pim_experts"] == 2
+        assert summary["layers"][1]["gpu_experts"] == 1
+
+    def test_scheduler_prefill_promotes_to_budget(self):
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        masks = [torch.tensor([True, False, False, False], dtype=torch.bool)]
+        plan = ExpertResidencyPlan.from_gpu_masks(masks, default_offload_tier=ExpertResidency.PIM)
+        scheduler = DynamicExpertScheduler(
+            residency_plan=plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                prefill_force_gpu_budget_per_layer=2,
+                offload_tier=ExpertResidency.PIM,
+            ),
+        )
+        scheduler.observe(0, torch.tensor([[2, 3], [2, 2]]), phase="prefill")
+        ops = scheduler.plan_layer(0, phase="prefill")
+        promoted = [op for op in ops if op.dst == ExpertResidency.GPU]
+        assert len(promoted) >= 1
+
+    def test_migration_manager_records_phase(self):
+        from nano_ktrans.kernels.offload_backend import ExpertOffloadBackend
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency
+
+        class DummyBackend(ExpertOffloadBackend):
+            def submit_forward(self, hidden_states, topk_ids, topk_weights, cuda_stream):
+                return None
+
+            def sync_forward(self, hidden_states, cuda_stream):
+                return hidden_states
+
+            def update_gpu_expert_mask(self, gpu_experts_mask):
+                return None
+
+        backend = DummyBackend()
+        backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=3,
+                    expert_idx=7,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="promote_hot_expert",
+                )
+            ],
+            phase="prefill",
+        )
+        diagnostics = backend.diagnostics()
+        assert diagnostics["migration_submit_calls"] == 1
+        assert diagnostics["migration_manager"]["layers"][0]["history"][0]["phase"] == "prefill"
