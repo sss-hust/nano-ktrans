@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 11:08
+updated: 2026-04-15 11:20
 ---
 
 # 🔥 当前工作焦点
@@ -30,6 +30,7 @@ updated: 2026-04-15 11:08
 - [x] scheduler 已支持“无立即迁移也可按热度预取 offloaded experts”
 - [x] scheduler 已支持 profile 预设，benchmark 已输出迁移/预取摘要，便于直接比较 overlap 相关策略
 - [x] migration queue 已接入 lifecycle 状态：`queued / prefetching / ready / deferred / applied`
+- [x] decode 在 `decode_require_prefetch_ready` 模式下已改成 ready-only 消费，不再先 drain 全队列再回退
 
 ## 阻塞项
 
@@ -111,6 +112,9 @@ updated: 2026-04-15 11:08
   - 让后台预取只推进 `queued -> prefetching -> ready`
   - 让 decode 主路径只消费 `ready`
   - 为后续 GPU<->PIM 异步迁移 worker 预留事件接口
+- 把 migration lifecycle 和 materialization worker 真正打通：
+  - 让 `ready` 由后台预取完成事件驱动
+  - 减少当前 decode 入口的同步 `is_ready()` 轮询
 
 ## 本轮对话上下文
 

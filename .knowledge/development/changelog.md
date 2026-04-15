@@ -125,3 +125,9 @@ tags: [changelog]
 - migration manager 新增 lifecycle 跟踪：`queued / prefetching / ready / deferred / applied`。
 - `HybridMoE` 现在会在预取、ready 命中、defer 和 applied 路径上写回 lifecycle 状态，benchmark 摘要也会同步聚合这些指标。
 - 新增对应测试，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `46 passed`。
+
+<!-- updated: 2026-04-15 11:20 -->
+
+- `decode_require_prefetch_ready` 模式下，decode 入口现在只会消费“进入本层前已经 ready 的 promotion”。
+- migration manager 新增 `take_layer()` / `peek_layer()`，让 decode 可以保留未 ready 的 pending op，而不是先 drain 再重排。
+- 新增对应测试，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `47 passed`。

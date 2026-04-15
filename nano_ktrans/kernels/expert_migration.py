@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Sequence
+from typing import Callable, Dict, List, Sequence
 
 from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp
 
@@ -88,11 +88,24 @@ class LayerMigrationQueue:
             )
 
     def drain(self) -> List[ExpertMigrationOp]:
-        ops = list(self.pending_ops)
-        self.pending_ops.clear()
-        self.total_drained_ops += len(ops)
-        if self.history:
+        return self.take(lambda _op: True)
+
+    def take(self, predicate: Callable[[ExpertMigrationOp], bool]) -> List[ExpertMigrationOp]:
+        selected: List[ExpertMigrationOp] = []
+        remaining: List[ExpertMigrationOp] = []
+        for op in self.pending_ops:
+            if predicate(op):
+                selected.append(op)
+            else:
+                remaining.append(op)
+        self.pending_ops = remaining
+        self.total_drained_ops += len(selected)
+        if self.history and not self.pending_ops:
             self.history[-1].completed = True
+        return selected
+
+    def peek(self) -> List[ExpertMigrationOp]:
+        ops = list(self.pending_ops)
         return ops
 
     def mark_state(
@@ -164,6 +177,22 @@ class ExpertMigrationManager:
         if queue is None:
             return []
         return queue.drain()
+
+    def take_layer(
+        self,
+        layer_idx: int,
+        predicate: Callable[[ExpertMigrationOp], bool],
+    ) -> List[ExpertMigrationOp]:
+        queue = self._queues.get(layer_idx)
+        if queue is None:
+            return []
+        return queue.take(predicate)
+
+    def peek_layer(self, layer_idx: int) -> List[ExpertMigrationOp]:
+        queue = self._queues.get(layer_idx)
+        if queue is None:
+            return []
+        return queue.peek()
 
     def mark_state(
         self,

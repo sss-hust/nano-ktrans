@@ -163,13 +163,14 @@ class HybridMoE(nn.Module):
 
     def _request_prefetch(self, expert_idx: int) -> None:
         self.prefetch_requested += 1
-        if self.offload_backend is not None:
+        submitted = self.materialization_manager.prefetch(self.layer_idx, expert_idx)
+        if self.offload_backend is not None and submitted:
             self.offload_backend.migration_manager.mark_state(
                 self.layer_idx,
                 expert_idx,
                 state=MigrationLifecycle.PREFETCHING,
             )
-        if self.materialization_manager.prefetch(self.layer_idx, expert_idx):
+        if submitted:
             self.prefetch_enqueued += 1
 
     def _request_prefetch_candidates(self, *, phase: str) -> None:
@@ -294,7 +295,50 @@ class HybridMoE(nn.Module):
         ):
             return
 
-        queued_ops = self.offload_backend.migration_manager.drain_layer(self.layer_idx)
+        require_prefetch_ready = (
+            phase == "decode"
+            and self.dynamic_expert_scheduler is not None
+            and self.dynamic_expert_scheduler.config.decode_require_prefetch_ready
+        )
+        if require_prefetch_ready:
+            peeked_ops = self.offload_backend.migration_manager.peek_layer(self.layer_idx)
+            ready_before = set()
+            for op in peeked_ops:
+                if op.dst != ExpertResidency.GPU:
+                    continue
+                is_ready = self.materialization_manager.is_ready(self.layer_idx, int(op.expert_idx))
+                if is_ready:
+                    ready_before.add(int(op.expert_idx))
+                    self.offload_backend.migration_manager.mark_state(
+                        self.layer_idx,
+                        op.expert_idx,
+                        src=op.src.value,
+                        dst=op.dst.value,
+                        reason=op.reason,
+                        phase=phase,
+                        state=MigrationLifecycle.READY,
+                    )
+                    continue
+                self.runtime_deferred_for_prefetch += 1
+                self.offload_backend.migration_manager.mark_state(
+                    self.layer_idx,
+                    op.expert_idx,
+                    src=op.src.value,
+                    dst=op.dst.value,
+                    reason=op.reason,
+                    phase=phase,
+                    state=MigrationLifecycle.DEFERRED,
+                )
+                self._request_prefetch(int(op.expert_idx))
+            queued_ops = self.offload_backend.migration_manager.take_layer(
+                self.layer_idx,
+                lambda op: (
+                    op.dst != ExpertResidency.GPU
+                    or int(op.expert_idx) in ready_before
+                ),
+            )
+        else:
+            queued_ops = self.offload_backend.migration_manager.drain_layer(self.layer_idx)
         if not queued_ops:
             return
 
@@ -352,11 +396,6 @@ class HybridMoE(nn.Module):
             if bool(self.gpu_experts_mask[int(op.expert_idx)].item()):
                 continue
 
-            require_prefetch_ready = (
-                phase == "decode"
-                and self.dynamic_expert_scheduler is not None
-                and self.dynamic_expert_scheduler.config.decode_require_prefetch_ready
-            )
             is_ready = self.materialization_manager.is_ready(self.layer_idx, int(op.expert_idx))
             if is_ready and self.offload_backend is not None:
                 self.offload_backend.migration_manager.mark_state(
