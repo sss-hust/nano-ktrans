@@ -60,3 +60,8 @@ tags: [changelog]
 - 新增 `nano_ktrans/kernels/expert_materialization.py`，提供单 expert 的 CPU staging cache、预取队列和基础诊断。
 - `HybridMoE` 现在会在 `prefill` 阶段对候选 promotion expert 发起预取，并在 `decode` promotion 时优先命中 staging cache。
 - 新增测试覆盖 prefill 阶段的 expert 预取路径。
+
+<!-- updated: 2026-04-15 07:14 -->
+
+- `HybridMoE` 的 decode migration 现在接入了 GPU budget 约束：若 promotion 时 GPU resident set 已满，会先按 hotness 驱逐冷 expert，再执行热点 expert promotion。
+- 新增测试覆盖“为 promotion 驱逐冷 expert”的运行时路径。

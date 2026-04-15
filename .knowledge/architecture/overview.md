@@ -71,6 +71,10 @@ tags: [architecture]
    - 优先命中 staging cache
    - 再构建 GPU expert module
    - 避免在 decode 关键路径上重新扫 safetensors
+5. 如果当前层 GPU resident experts 已达到 budget：
+   - 先在非活跃 resident experts 里按 hotness 选择最冷的 victim
+   - 执行 `GPU -> PIM/CPU` 的运行时 eviction
+   - 再为新的热点 expert 执行 promotion
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

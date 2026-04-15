@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 07:06
+updated: 2026-04-15 07:14
 ---
 
 # 🔥 当前工作焦点
@@ -19,6 +19,7 @@ updated: 2026-04-15 07:06
 - [x] 落第一版 prefill 保护策略，避免 prefill 大批量 token 直接打到 PIM
 - [x] 落第一版 decode 迁移执行数据面：可在运行时 materialize / demote GPU experts
 - [x] 落第一版 prefill expert 预取：prefill 期间可将候选热点专家预热到 CPU staging cache
+- [x] decode 迁移已接上 GPU budget 约束和运行时 eviction
 
 ## 阻塞项
 
@@ -35,6 +36,7 @@ updated: 2026-04-15 07:06
 - 当前迁移管理器已能按层记录 `prefill` / `decode` 迁移计划，但仍未真正执行 GPU<->PIM 权重搬运
 - 当前 decode 阶段已可消费迁移队列，并把单 expert 从 checkpoint 动态 materialize 到 GPU `ModuleDict`；但这仍是同步、逐 expert 的最小实现，还没有异步预取与 overlap
 - 当前已新增 CPU staging cache 和 prefill 预取入口，但 promotion 仍是“CPU staging -> GPU module”的同步 materialize，不是真正的 GPU<->PIM 异步 DMA
+- 当前 decode promotion 已不会无限增长 GPU resident experts；超过 GPU budget 时会按层内 hotness 驱逐冷 expert，再为热点 expert 腾位
 - Python 侧直接驱动 UPMEM 的尝试仍不稳定，当前更可靠的是独立 C host benchmark
 - `HTTP_PROXY` / `HTTPS_PROXY` 指向 `127.0.0.1:7897` 时会阻塞 `pip install`
 
@@ -49,6 +51,7 @@ updated: 2026-04-15 07:06
   - 将当前 prefill 预取 + CPU staging 升级为真正的异步 promotion
   - 为 PIM resident expert 增加常驻句柄与回写
   - 接上迁移和 decode 计算的 overlap 控制
+- 将“按层、按 expert”的迁移粒度继续放大，避免 decode 关键路径上重复的 Python 调度和模块构建
 - 对比 `cpu`、`cuda_cpu_offload`、`pim` 三条链路的 prefill/decode 延迟与 offload 命中分布
 - 继续补充架构说明、依赖说明和版本化文档
 
@@ -65,3 +68,4 @@ updated: 2026-04-15 07:06
 - demotion 路径已能从运行时 `gpu_experts` 中移除对应 expert，并同步更新 offload backend 的 mask。
 - 这意味着系统已经从“只有迁移控制面”推进到“最小可执行 GPU materialization 数据面”，但仍未实现 GPU<->PIM 异步拷贝和 overlap。
 - 现在 prefill 阶段会对计划中的 `PIM/CPU -> GPU` promotion 做 expert 级预取，把单 expert 权重提前拉到 CPU staging cache，减少 decode promotion 时的 checkpoint I/O。
+- `decode` 阶段现在会在应用 promotion 前检查 GPU budget，并按 hotness 驱逐非活跃的冷 resident expert，保证 GPU resident set 始终受控。

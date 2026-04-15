@@ -101,6 +101,7 @@ class HybridMoE(nn.Module):
         self.applied_migration_history: list[dict[str, object]] = []
         self.prefetch_requested = 0
         self.prefetch_materialized = 0
+        self.runtime_evictions = 0
         self.materialization_manager = ExpertMaterializationManager(
             weight_path=weight_path,
             expert_key_template=self.expert_key_template,
@@ -157,6 +158,25 @@ class HybridMoE(nn.Module):
         self.materialization_manager.prefetch(self.layer_idx, expert_idx)
         self.prefetch_requested += 1
 
+    def _set_residency(self, expert_idx: int, residency: ExpertResidency) -> None:
+        if self.residency_plan is None:
+            return
+        state = self.residency_plan.layer_state(self.layer_idx)
+        if residency == ExpertResidency.GPU:
+            state.residency[expert_idx] = 1
+        elif residency == ExpertResidency.PIM:
+            state.residency[expert_idx] = 2
+        else:
+            state.residency[expert_idx] = 3
+
+    def _runtime_gpu_budget(self) -> int:
+        if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
+            return int(self.gpu_experts_mask.bool().sum().item())
+        return max(0, int(self.dynamic_expert_scheduler.config.gpu_budget_per_layer))
+
+    def _runtime_gpu_residents(self) -> list[int]:
+        return [int(expert_idx) for expert_idx in torch.where(self.gpu_experts_mask.bool())[0].tolist()]
+
     def _synchronize_gpu_mask(self) -> None:
         if self.residency_plan is not None:
             layer_state = self.residency_plan.layer_state(self.layer_idx)
@@ -169,8 +189,7 @@ class HybridMoE(nn.Module):
         if expert_key not in self.gpu_experts:
             self.gpu_experts[expert_key] = self._build_runtime_expert(expert_idx, device, dtype)
         self.gpu_experts_mask[expert_idx] = True
-        if self.residency_plan is not None:
-            self.residency_plan.layer_state(self.layer_idx).residency[expert_idx] = 1
+        self._set_residency(expert_idx, ExpertResidency.GPU)
         return True
 
     def _demote_expert_from_gpu(self, expert_idx: int, dst: ExpertResidency) -> bool:
@@ -178,14 +197,44 @@ class HybridMoE(nn.Module):
         if expert_key in self.gpu_experts:
             del self.gpu_experts[expert_key]
         self.gpu_experts_mask[expert_idx] = False
-        if self.residency_plan is not None:
-            state = self.residency_plan.layer_state(self.layer_idx)
-            state.residency[expert_idx] = 2 if dst == ExpertResidency.PIM else 3
+        self._set_residency(expert_idx, dst)
         return True
+
+    def _coalesce_migration_ops(self, queued_ops: list) -> list:
+        latest_by_expert: dict[int, object] = {}
+        ordered_expert_ids: list[int] = []
+        for op in queued_ops:
+            expert_idx = int(op.expert_idx)
+            if expert_idx in latest_by_expert:
+                ordered_expert_ids.remove(expert_idx)
+            latest_by_expert[expert_idx] = op
+            ordered_expert_ids.append(expert_idx)
+        return [latest_by_expert[expert_idx] for expert_idx in ordered_expert_ids]
+
+    def _pick_eviction_candidate(
+        self,
+        protected_experts: set[int],
+        fallback_dst: ExpertResidency,
+    ) -> Optional[tuple[int, ExpertResidency]]:
+        gpu_residents = self._runtime_gpu_residents()
+        candidates = [expert_idx for expert_idx in gpu_residents if expert_idx not in protected_experts]
+        if not candidates:
+            return None
+
+        hotness = None
+        if self.residency_plan is not None:
+            hotness = self.residency_plan.layer_state(self.layer_idx).hotness
+
+        if hotness is not None and hotness.numel() > 0:
+            coldest = min(candidates, key=lambda expert_idx: float(hotness[expert_idx].item()))
+        else:
+            coldest = min(candidates)
+        return coldest, fallback_dst
 
     def _apply_queued_migrations(
         self,
         hidden_states: torch.Tensor,
+        active_experts: set[int],
         *,
         phase: str,
     ) -> None:
@@ -201,28 +250,26 @@ class HybridMoE(nn.Module):
         if not queued_ops:
             return
 
-        max_apply = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+        queued_ops = self._coalesce_migration_ops(queued_ops)
+        max_promotions = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+        gpu_budget = self._runtime_gpu_budget()
         applied = 0
+        applied_promotions = 0
         deferred = []
         device = hidden_states.device
         dtype = hidden_states.dtype
+        promotion_ops = [op for op in queued_ops if op.dst == ExpertResidency.GPU]
+        demotion_ops = [
+            op for op in queued_ops if op.src == ExpertResidency.GPU and op.dst != ExpertResidency.GPU
+        ]
 
-        for op in queued_ops:
-            if applied >= max_apply:
+        for op in demotion_ops:
+            if int(op.expert_idx) in active_experts:
                 deferred.append(op)
                 continue
-
-            if op.dst == ExpertResidency.GPU:
-                applied_ok = self._promote_expert_to_gpu(op.expert_idx, device, dtype)
-            elif op.src == ExpertResidency.GPU:
-                applied_ok = self._demote_expert_from_gpu(op.expert_idx, op.dst)
-            else:
-                applied_ok = False
-
+            applied_ok = self._demote_expert_from_gpu(op.expert_idx, op.dst)
             if applied_ok:
                 applied += 1
-                if op.dst == ExpertResidency.GPU:
-                    self.prefetch_materialized += 1
                 self.applied_migration_history.append(
                     {
                         "phase": phase,
@@ -234,6 +281,63 @@ class HybridMoE(nn.Module):
                 )
             else:
                 deferred.append(op)
+
+        protected_experts = set(active_experts)
+        protected_experts.update(int(op.expert_idx) for op in promotion_ops)
+
+        for op in promotion_ops:
+            if applied_promotions >= max_promotions:
+                deferred.append(op)
+                continue
+
+            if bool(self.gpu_experts_mask[int(op.expert_idx)].item()):
+                continue
+
+            while gpu_budget > 0 and int(self.gpu_experts_mask.bool().sum().item()) >= gpu_budget:
+                fallback_dst = (
+                    self.dynamic_expert_scheduler.config.offload_tier
+                    if self.dynamic_expert_scheduler is not None
+                    else ExpertResidency.PIM
+                )
+                victim = self._pick_eviction_candidate(protected_experts, fallback_dst)
+                if victim is None:
+                    deferred.append(op)
+                    break
+                victim_idx, victim_dst = victim
+                self._demote_expert_from_gpu(victim_idx, victim_dst)
+                self.runtime_evictions += 1
+                applied += 1
+                self.applied_migration_history.append(
+                    {
+                        "phase": phase,
+                        "expert_idx": victim_idx,
+                        "src": ExpertResidency.GPU.value,
+                        "dst": victim_dst.value,
+                        "reason": "evict_for_promotion",
+                    }
+                )
+            else:
+                applied_ok = self._promote_expert_to_gpu(op.expert_idx, device, dtype)
+                if applied_ok:
+                    applied += 1
+                    applied_promotions += 1
+                    self.prefetch_materialized += 1
+                    self.applied_migration_history.append(
+                        {
+                            "phase": phase,
+                            "expert_idx": op.expert_idx,
+                            "src": op.src.value,
+                            "dst": op.dst.value,
+                            "reason": op.reason,
+                        }
+                    )
+                else:
+                    deferred.append(op)
+                continue
+
+            continue
+
+        self.applied_migration_history = self.applied_migration_history[-64:]
 
         if deferred:
             self.offload_backend.queue_migration_plan(deferred, phase=f"{phase}_deferred")
@@ -266,7 +370,8 @@ class HybridMoE(nn.Module):
 
         context = get_context()
         phase = "prefill" if context.is_prefill else "decode"
-        self._apply_queued_migrations(hidden_states, phase=phase)
+        active_experts = {int(expert_idx) for expert_idx in torch.unique(topk_ids).tolist()}
+        self._apply_queued_migrations(hidden_states, active_experts, phase=phase)
 
         if self.dynamic_expert_scheduler is not None and self.dynamic_expert_scheduler.enabled:
             self.dynamic_expert_scheduler.observe(self.layer_idx, topk_ids, phase=phase)
@@ -362,6 +467,7 @@ class HybridMoE(nn.Module):
             "gpu_experts_mask_sum": int(self.gpu_experts_mask.bool().sum().item()),
             "prefetch_requested": self.prefetch_requested,
             "prefetch_materialized": self.prefetch_materialized,
+            "runtime_evictions": self.runtime_evictions,
             "materialization_manager": self.materialization_manager.diagnostics(),
             "layer_residency": layer_residency,
             "pending_migrations": pending_migrations,
