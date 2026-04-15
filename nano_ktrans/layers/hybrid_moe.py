@@ -342,6 +342,31 @@ class HybridMoE(nn.Module):
         )
         return set(ordered[:limit])
 
+    def _prebuild_target_ids(self) -> set[int]:
+        if self.offload_backend is None:
+            return set()
+        limit = max(1, self._activated_cache_limit() * 2)
+        candidates: set[int] = set()
+        for op in self.offload_backend.migration_manager.peek_layer(self.layer_idx):
+            if op.dst != ExpertResidency.GPU:
+                continue
+            expert_idx = int(op.expert_idx)
+            if bool(self.gpu_experts_mask[expert_idx].item()):
+                continue
+            state = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+            if state not in {MigrationLifecycle.READY, MigrationLifecycle.WARMED, MigrationLifecycle.ACTIVATED}:
+                continue
+            candidates.add(expert_idx)
+        ordered = sorted(
+            candidates,
+            key=lambda expert_idx: (
+                -self._migration_state_priority(expert_idx),
+                -self._hotness_score(expert_idx),
+                int(expert_idx),
+            ),
+        )
+        return set(ordered[:limit])
+
     def _store_activated_module(self, expert_idx: int, module: nn.Module) -> None:
         expert_key = str(expert_idx)
         self.activated_expert_cache[expert_key] = module
@@ -427,11 +452,14 @@ class HybridMoE(nn.Module):
             or self.expert_warm_cache_size <= 0
         ):
             return 0
+        target_ids = self._prebuild_target_ids()
         built = 0
         for op in self.offload_backend.migration_manager.peek_layer(self.layer_idx):
             if op.dst != ExpertResidency.GPU:
                 continue
             expert_idx = int(op.expert_idx)
+            if expert_idx not in target_ids:
+                continue
             current_state = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
             if current_state not in {
                 MigrationLifecycle.READY,

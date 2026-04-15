@@ -199,3 +199,4 @@ tags: [changelog]
 - <!-- updated: 2026-04-16 04:07 --> **[ready-queue-drain]** decode 的 ready promotion 路径已改成“peek + selective consume”：只在真正 `applied` 时把 op 从 pending queue 里移除，预算不足导致的未消费 ready op 会保留在原队列中等待下一步，而不再重复 enqueue 成 `*_deferred`。
 - <!-- updated: 2026-04-16 04:18 --> **[strict-ready-only]** `decode_require_prefetch_ready` 语义进一步收紧：即使 resident tier 直接 stage 成功，decode prime 阶段也不会在同一步立刻把它标成 `ready` 并消费，而是等待下一次 refresh/pipeline tick，使“ready-only”真正意味着“前一阶段已完成”。
 - <!-- updated: 2026-04-16 04:30 --> **[per-run-scheduler-summary]** inference benchmark 现在会在每次 generation 前重置 offload/runtime 计数器，并把单次 run 的 `scheduler_summary` 直接挂到 run 结果上；这样 profile 对比时不再被 warmup 或前序 decode 步的累计诊断污染。
+- <!-- updated: 2026-04-16 04:42 --> **[prebuild-target-budget]** `HybridMoE` 的 ready prebuild 现在不再对所有 ready 候选一视同仁，而是按 lifecycle 优先级、hotness 和 decode 预算只保留更有价值的一批 prebuild target，避免较冷 expert 过早占用 warm cache 和构建开销。

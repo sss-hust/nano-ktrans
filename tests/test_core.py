@@ -2246,6 +2246,100 @@ class TestDynamicScheduler:
         assert "2" not in hybrid.activated_expert_cache
         assert layer_migration["total_activated_events"] == 1
 
+    def test_hybrid_moe_prebuild_targets_only_hot_ready_candidates(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(4):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+            ),
+        )
+        state = residency_plan.layer_state(0)
+        state.hotness[1] = 8.0
+        state.hotness[2] = 6.0
+        state.hotness[3] = 1.0
+
+        hybrid = HybridMoE(
+            num_experts=4,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=4,
+        ).to(dtype=torch.float32)
+
+        for expert_idx in (1, 2, 3):
+            hybrid.offload_backend.queue_migration_plan(
+                [
+                    ExpertMigrationOp(
+                        layer_idx=0,
+                        expert_idx=expert_idx,
+                        src=ExpertResidency.PIM,
+                        dst=ExpertResidency.GPU,
+                        reason="prebuild_budget",
+                    )
+                ],
+                phase="decode",
+            )
+            hybrid.materialization_manager.stage_expert(
+                0,
+                expert_idx,
+                {
+                    "gate": torch.randn(8, 4),
+                    "up": torch.randn(8, 4),
+                    "down": torch.randn(4, 8),
+                },
+            )
+            hybrid.offload_backend.migration_manager.mark_state(
+                0,
+                expert_idx,
+                state=MigrationLifecycle.READY,
+                phase="decode",
+            )
+
+        stats = hybrid.advance_offload_pipeline(
+            phase="decode",
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        diagnostics = hybrid.diagnostics()
+
+        assert stats["warm_prebuilt"] == 2
+        assert "1" in hybrid.gpu_experts or "1" in hybrid.warm_expert_cache or "1" in hybrid.activated_expert_cache
+        assert "2" in hybrid.warm_expert_cache or "2" in hybrid.activated_expert_cache
+        assert "3" not in hybrid.warm_expert_cache
+
     def test_migration_queue_preserves_warmed_state_on_deferred_requeue(self):
         from nano_ktrans.kernels.expert_migration import ExpertMigrationManager, MigrationLifecycle
         from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency

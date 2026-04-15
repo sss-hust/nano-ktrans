@@ -264,6 +264,11 @@ tags: [architecture]
     - 每个 run 结果都带自己的 `scheduler_summary`
     - 这样 `baseline / overlap_safe / eager` 的 profile sweep 就可以直接按单次 run 比较 pipeline 行为，而不是读混在一起的累计诊断
     这对后续证明 PIM 路径是否真的开始压过 `cpu+gpu` 很关键，因为我们终于能把一次生成里的 promotion/prefetch/activation 代价独立量出来。
+47. warm cache 的 prebuild 现在也引入了候选预算：
+    - pipeline 不再对所有 `ready/warmed/activated` expert 都尝试预构建
+    - 而是先按 lifecycle 优先级和 hotness 排序，再按 `decode_promote_k` 的倍数截断
+    - 这样 warm cache 开始更像“promotion 的二级候选池”，而不是所有 ready expert 的公共堆积区
+    这有助于把 CPU 侧 module 构建成本也压缩到更接近最终会进入 GPU 的那部分专家上。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

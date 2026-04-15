@@ -54,6 +54,7 @@ updated: 2026-04-16 02:40
 - [x] decode 的 ready promotion 现在不再把“已 ready 但本步预算不够”的 op 重新 enqueue，一部分 ready expert 会直接保留在原队列中等待下一步消费
 - [x] `decode_require_prefetch_ready` 模式下，resident-tier 直接 stage 现在也不会被同一步立即消费，而是等下一次 refresh/pipeline 再推进到 ready
 - [x] benchmark run 现在会在每次生成前重置 offload runtime 计数，单次 run 的 scheduler summary 不再混入前序 warmup / 历史 step 噪音
+- [x] ready expert 的 prebuild 现在也开始按 hotness 和 decode 预算裁剪，只为更有希望进入 activation/applied 的候选构建 module
 
 ## 阻塞项
 
@@ -93,6 +94,7 @@ updated: 2026-04-16 02:40
 - 当前 ready promotion 还没有完全拆成 batch commit；虽然已避免重复 requeue，但 applied/deferred 仍是逐 expert 判定
 - 当前 strict ready-only 语义已经覆盖 resident staging，但 `prefetching -> ready` 仍然依赖前台 refresh，而不是真 completion event 驱动
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总
+- 当前 prebuild 已做候选裁剪，但 warm cache 还没有独立的“低优先级淘汰”策略，仍然主要依赖容量上限和 LRU
 - 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`
