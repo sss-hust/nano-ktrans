@@ -10,9 +10,11 @@ from .profiles import (
     resolve_scheduler_profile,
     scheduler_profile_summary,
 )
+from nano_ktrans.kernels.migration_runtime import MigrationPipelineRuntime
 
 __all__ = [
     "DynamicExpertScheduler",
+    "MigrationPipelineRuntime",
     "SchedulerConfig",
     "SCHEDULER_PROFILE_BASELINE",
     "SCHEDULER_PROFILE_EAGER",

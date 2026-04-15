@@ -15,12 +15,25 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "offload_refresh_ready_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_refresh_ready_total", 0)
         ),
+        "offload_pipeline_ticks": int((offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_ticks", 0)),
+        "offload_pipeline_ready_applied_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_ready_applied_total", 0)
+        ),
+        "offload_pipeline_ready_deferred_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_ready_deferred_total", 0)
+        ),
+        "offload_pipeline_layers_touched_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_layers_touched_total", 0)
+        ),
         "prefetch_requested": 0,
         "prefetch_enqueued": 0,
         "prefetch_materialized": 0,
         "prefetch_candidate_scans": 0,
         "prefetch_polled_ready": 0,
         "prefetch_completion_events": 0,
+        "pipeline_ticks": 0,
+        "pipeline_ready_applied": 0,
+        "pipeline_ready_deferred": 0,
         "decode_prefetch_hits": 0,
         "decode_prefetch_misses": 0,
         "runtime_evictions": 0,
@@ -61,6 +74,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["prefetch_completion_events"] += int(
             (layer.get("materialization_manager") or {}).get("prefetch_completion_events", 0)
         )
+        summary["pipeline_ticks"] += int(layer.get("pipeline_ticks", 0))
+        summary["pipeline_ready_applied"] += int(layer.get("pipeline_ready_applied", 0))
+        summary["pipeline_ready_deferred"] += int(layer.get("pipeline_ready_deferred", 0))
         summary["decode_prefetch_hits"] += int(layer.get("decode_prefetch_hits", 0))
         summary["decode_prefetch_misses"] += int(layer.get("decode_prefetch_misses", 0))
         summary["runtime_evictions"] += int(layer.get("runtime_evictions", 0))

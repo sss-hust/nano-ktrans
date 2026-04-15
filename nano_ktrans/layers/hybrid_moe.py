@@ -109,6 +109,9 @@ class HybridMoE(nn.Module):
         self.runtime_deferred_for_prefetch = 0
         self.decode_prefetch_hits = 0
         self.decode_prefetch_misses = 0
+        self.pipeline_ready_applied = 0
+        self.pipeline_ready_deferred = 0
+        self.pipeline_ticks = 0
         self.materialization_manager = ExpertMaterializationManager(
             weight_path=weight_path,
             expert_key_template=self.expert_key_template,
@@ -188,6 +191,151 @@ class HybridMoE(nn.Module):
                 state=MigrationLifecycle.READY,
             )
         return len(ready_keys)
+
+    def _promote_ready_migrations(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        phase: str,
+    ) -> tuple[int, int]:
+        if (
+            self.offload_backend is None
+            or self.dynamic_expert_scheduler is None
+            or not self.dynamic_expert_scheduler.enabled
+            or phase != "decode"
+        ):
+            return 0, 0
+
+        max_promotions = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+        ready_ops = self.offload_backend.migration_manager.take_ready_layer(self.layer_idx)
+        if not ready_ops:
+            return 0, 0
+
+        ready_ops = self._coalesce_migration_ops(ready_ops)
+        promotion_ops = [op for op in ready_ops if op.dst == ExpertResidency.GPU]
+        if not promotion_ops:
+            return 0, 0
+
+        promotion_ops.sort(key=lambda op: self._promotion_sort_key(op, set(), phase))
+        gpu_budget = self._runtime_gpu_budget()
+        protected_experts = {int(op.expert_idx) for op in promotion_ops}
+
+        applied = 0
+        deferred = 0
+        for op in promotion_ops:
+            if applied >= max_promotions:
+                deferred += 1
+                continue
+            expert_idx = int(op.expert_idx)
+            if bool(self.gpu_experts_mask[expert_idx].item()):
+                if self.offload_backend is not None:
+                    self.offload_backend.migration_manager.mark_state(
+                        self.layer_idx,
+                        expert_idx,
+                        src=op.src.value,
+                        dst=op.dst.value,
+                        reason=op.reason,
+                        phase=phase,
+                        state=MigrationLifecycle.APPLIED,
+                    )
+                continue
+
+            while gpu_budget > 0 and int(self.gpu_experts_mask.bool().sum().item()) >= gpu_budget:
+                fallback_dst = self.dynamic_expert_scheduler.config.offload_tier
+                victim = self._pick_eviction_candidate(protected_experts, fallback_dst)
+                if victim is None:
+                    deferred += 1
+                    break
+                victim_idx, victim_dst = victim
+                self._demote_expert_from_gpu(victim_idx, victim_dst)
+                self.runtime_evictions += 1
+                self.applied_migration_ops += 1
+                self.applied_migration_history.append(
+                    {
+                        "phase": phase,
+                        "expert_idx": victim_idx,
+                        "src": ExpertResidency.GPU.value,
+                        "dst": victim_dst.value,
+                        "reason": "evict_for_ready_promotion",
+                    }
+                )
+                self.offload_backend.migration_manager.mark_state(
+                    self.layer_idx,
+                    victim_idx,
+                    src=ExpertResidency.GPU.value,
+                    dst=victim_dst.value,
+                    reason="evict_for_ready_promotion",
+                    phase=phase,
+                    state=MigrationLifecycle.APPLIED,
+                )
+            else:
+                self._promote_expert_to_gpu(expert_idx, device, dtype)
+                self.decode_prefetch_hits += 1
+                self.prefetch_materialized += 1
+                self.applied_migration_ops += 1
+                applied += 1
+                self.applied_migration_history.append(
+                    {
+                        "phase": phase,
+                        "expert_idx": expert_idx,
+                        "src": op.src.value,
+                        "dst": op.dst.value,
+                        "reason": op.reason,
+                    }
+                )
+                self.offload_backend.migration_manager.mark_state(
+                    self.layer_idx,
+                    expert_idx,
+                    src=op.src.value,
+                    dst=op.dst.value,
+                    reason=op.reason,
+                    phase=phase,
+                    state=MigrationLifecycle.APPLIED,
+                )
+                continue
+
+            self.offload_backend.queue_migration_plan([op], phase=f"{phase}_deferred")
+            self.offload_backend.migration_manager.mark_state(
+                self.layer_idx,
+                expert_idx,
+                src=op.src.value,
+                dst=op.dst.value,
+                reason=op.reason,
+                phase=f"{phase}_deferred",
+                state=MigrationLifecycle.DEFERRED,
+            )
+
+        if applied:
+            self.last_applied_migration_phase = phase
+            self._synchronize_gpu_mask()
+        self.applied_migration_history = self.applied_migration_history[-64:]
+        return applied, deferred
+
+    def advance_offload_pipeline(
+        self,
+        *,
+        phase: str,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> dict[str, int]:
+        ready_polled = self.refresh_offload_state()
+        ready_applied = 0
+        ready_deferred = 0
+        if phase == "decode":
+            ready_applied, ready_deferred = self._promote_ready_migrations(
+                device=device,
+                dtype=dtype,
+                phase=phase,
+            )
+        self.pipeline_ticks += 1
+        self.pipeline_ready_applied += ready_applied
+        self.pipeline_ready_deferred += ready_deferred
+        return {
+            "ready_polled": int(ready_polled),
+            "ready_applied": int(ready_applied),
+            "ready_deferred": int(ready_deferred),
+        }
 
     def _request_prefetch_candidates(self, *, phase: str) -> None:
         if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
@@ -640,6 +788,9 @@ class HybridMoE(nn.Module):
             "runtime_deferred_for_prefetch": self.runtime_deferred_for_prefetch,
             "decode_prefetch_hits": self.decode_prefetch_hits,
             "decode_prefetch_misses": self.decode_prefetch_misses,
+            "pipeline_ticks": self.pipeline_ticks,
+            "pipeline_ready_applied": self.pipeline_ready_applied,
+            "pipeline_ready_deferred": self.pipeline_ready_deferred,
             "materialization_manager": self.materialization_manager.diagnostics(),
             "layer_residency": layer_residency,
             "pending_migrations": pending_migrations,

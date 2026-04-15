@@ -1,6 +1,6 @@
 ---
 created: 2026-04-07
-updated: 2026-04-15
+updated: 2026-04-16
 tags: [architecture]
 ---
 
@@ -157,6 +157,17 @@ tags: [architecture]
     - 单次运行可以同时比较 `baseline / overlap_safe / eager`
     - 每个结果都会带自己的 `scheduler_profile` 和摘要统计
     这样可以更直接地观察不同调度策略的端到端差异。
+26. token-step 级 refresh 现在已经被收敛成 `MigrationPipelineRuntime`：
+    - `SimpleEngine` 在 full prefill、chunked prefill、decode 前统一调用模型级 refresh hook
+    - `MixtralModel.refresh_offload_state(phase=...)` 不再只是简单累加 ready 数，而是通过 runtime 统一推进每层的 offload pipeline
+    - 当前 runtime 会在进入模型前完成两件事：
+      - 将 materialization completion queue 中的 ready prefetch 转成 `READY`
+      - 在 decode 阶段尽量把 `READY -> APPLIED` 的 promotion 提前完成
+    - 这让“迁移准备”和“层内真正计算”进一步解耦，主线程进入 `HybridMoE.forward()` 时，更多热点 expert 已经提前进入 GPU resident set。
+27. 当前 `MigrationPipelineRuntime` 仍然只是最小前台运行时：
+    - 它依旧由 token-step hook 驱动，不是后台线程
+    - 但系统已经从“每层 forward 内部边算边处理 ready”推进到“step 进入前统一推进流水线”
+    - 这为后续真正引入后台 worker、事件队列和 GPU<->PIM resident 迁移执行器提供了清晰挂点。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

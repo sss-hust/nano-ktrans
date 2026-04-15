@@ -14,6 +14,7 @@ from nano_ktrans.layers.expert_mlp import SparseExpertMLP, PackedSparseExpertMLP
 from nano_ktrans.layers.linear import QKVParallelLinear, RowParallelLinear
 from nano_ktrans.layers.rotary_embedding import get_rope
 from nano_ktrans.layers.hybrid_moe import HybridMoE
+from nano_ktrans.kernels.migration_runtime import MigrationPipelineRuntime
 from nano_ktrans.models.config import GenericMoeConfig
 from nano_ktrans.scheduler import DynamicExpertScheduler
 from nano_ktrans.utils.expert_runtime_state import ExpertResidencyPlan
@@ -229,8 +230,7 @@ class MixtralModel(nn.Module):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
-        self.offload_refresh_calls = 0
-        self.offload_refresh_ready_total = 0
+        self.offload_runtime = MigrationPipelineRuntime()
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         
@@ -249,26 +249,16 @@ class MixtralModel(nn.Module):
         
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def refresh_offload_state(self) -> int:
-        if "offload_refresh_calls" not in self.__dict__:
-            self.offload_refresh_calls = 0
-        if "offload_refresh_ready_total" not in self.__dict__:
-            self.offload_refresh_ready_total = 0
-        ready_count = 0
-        for decoder_layer in self.layers:
-            hybrid_moe = getattr(decoder_layer, "hybrid_moe", None)
-            if hybrid_moe is None:
-                continue
-            ready_count += int(hybrid_moe.refresh_offload_state())
-        self.offload_refresh_calls += 1
-        self.offload_refresh_ready_total += ready_count
-        return ready_count
+    def refresh_offload_state(self, *, phase: str = "decode") -> int:
+        if "offload_runtime" not in self.__dict__:
+            self.offload_runtime = MigrationPipelineRuntime()
+        tick = self.offload_runtime.tick_layers(self.layers, phase=phase)
+        return int(tick["ready_polled"])
 
     def offload_refresh_diagnostics(self) -> dict:
-        return {
-            "offload_refresh_calls": int(self.offload_refresh_calls),
-            "offload_refresh_ready_total": int(self.offload_refresh_ready_total),
-        }
+        if "offload_runtime" not in self.__dict__:
+            self.offload_runtime = MigrationPipelineRuntime()
+        return self.offload_runtime.diagnostics()
 
     def forward(
         self,

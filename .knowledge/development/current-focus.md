@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 12:05
+updated: 2026-04-16 00:40
 ---
 
 # 🔥 当前工作焦点
@@ -39,6 +39,7 @@ updated: 2026-04-15 12:05
 - [x] offload refresh 已接入模型级统计，benchmark 可直接看到 refresh 次数与每步 ready 收敛量
 - [x] layer 级 refresh 已加空队列短路，避免无 pending prefetch 时做无意义轮询
 - [x] benchmark 已支持 scheduler profile sweep，可一轮比较多组调度策略
+- [x] token-step 级 offload refresh 已升级为最小 migration pipeline runtime：ready 轮询与 ready promotion 可在进入模型前统一推进
 
 ## 阻塞项
 
@@ -63,7 +64,8 @@ updated: 2026-04-15 12:05
 - 当前 scheduler 已新增两类更接近真实系统的控制旋钮：
 - 当前 scheduler / migration 控制面已经有三类关键开关：
 - 当前 migration queue 已能输出：
- - 当前 scheduler 现在不必等 migration op 产生，已经能按层直接选出 hot offload experts 做候选预取
+- 当前 scheduler 现在不必等 migration op 产生，已经能按层直接选出 hot offload experts 做候选预取
+- 当前 migration pipeline runtime 仍是前台 token-step hook，不是真正独立线程/事件循环；但 ready promotion 已不必等层内 forward 再逐层处理
 - 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`
@@ -124,6 +126,10 @@ updated: 2026-04-15 12:05
   - 让 `ready` 由后台预取完成事件驱动
   - 减少当前 decode 入口的同步 `is_ready()` 轮询
 - 将 ready 轮询从“每层 forward 入口”进一步收敛到独立 runtime hook 或 worker，避免后续层数增多时引入额外 Python 开销
+- 将当前 `MigrationPipelineRuntime` 从前台 tick 升级为真正后台 worker：
+  - 让 `prefetching -> ready` 通过 completion/event 推进
+  - 让 `ready -> applied` 逐步脱离主线程 token-step hook
+  - 为真实 GPU<->PIM resident migration 预留单独执行通道
 
 ## 本轮对话上下文
 

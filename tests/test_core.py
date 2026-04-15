@@ -423,9 +423,11 @@ class TestSimpleEngine:
         class DummyInnerModel:
             def __init__(self):
                 self.calls = 0
+                self.last_phase = None
 
-            def refresh_offload_state(self):
+            def refresh_offload_state(self, *, phase="decode"):
                 self.calls += 1
+                self.last_phase = phase
                 return 7
 
         class DummyOuterModel:
@@ -437,6 +439,7 @@ class TestSimpleEngine:
 
         assert engine._refresh_offload_state() == 7
         assert engine.model.model.calls == 1
+        assert engine.model.model.last_phase == "decode"
 
 
 # ============================================================
@@ -1400,21 +1403,34 @@ class TestDynamicScheduler:
         class DummyHybrid:
             def __init__(self, ready_count):
                 self.ready_count = ready_count
+                self.advanced = []
 
-            def refresh_offload_state(self):
-                return self.ready_count
+            def advance_offload_pipeline(self, *, phase, device, dtype):
+                self.advanced.append((phase, str(device), str(dtype)))
+                return {
+                    "ready_polled": self.ready_count,
+                    "ready_applied": 1,
+                    "ready_deferred": 0,
+                }
 
         model = MixtralModel.__new__(MixtralModel)
         layer0 = type("Layer", (), {"hybrid_moe": DummyHybrid(2)})()
         layer1 = type("Layer", (), {"hybrid_moe": None})()
         layer2 = type("Layer", (), {"hybrid_moe": DummyHybrid(3)})()
+        linear0 = torch.nn.Linear(2, 2, bias=False).to(dtype=torch.float32)
+        linear2 = torch.nn.Linear(2, 2, bias=False).to(dtype=torch.float32)
+        layer0.parameters = linear0.parameters
+        layer2.parameters = linear2.parameters
         model.layers = [layer0, layer1, layer2]
 
-        assert model.refresh_offload_state() == 5
-        assert model.offload_refresh_diagnostics() == {
-            "offload_refresh_calls": 1,
-            "offload_refresh_ready_total": 5,
-        }
+        assert model.refresh_offload_state(phase="decode") == 5
+        diagnostics = model.offload_refresh_diagnostics()
+        assert diagnostics["offload_refresh_calls"] == 1
+        assert diagnostics["offload_refresh_ready_total"] == 5
+        assert diagnostics["offload_pipeline_ready_applied_total"] == 2
+        assert diagnostics["offload_pipeline_last_phase"] == "decode"
+        assert layer0.hybrid_moe.advanced[0][0] == "decode"
+        assert layer2.hybrid_moe.advanced[0][0] == "decode"
 
     def test_materialization_manager_poll_ready(self, tmp_path):
         from safetensors.torch import save_file
@@ -1453,3 +1469,89 @@ class TestDynamicScheduler:
         assert diagnostics["prefetch_completion_events"] >= 1
         assert manager.has_cached(0, 1) is True
         assert manager.has_pending_or_ready() is False
+
+    def test_hybrid_moe_pipeline_applies_ready_promotions(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+        ).to(dtype=torch.float32)
+
+        hybrid.offload_backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=1,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="pipeline_promote",
+                )
+            ],
+            phase="decode",
+        )
+        hybrid.materialization_manager.prefetch(0, 1)
+        hybrid.offload_backend.migration_manager.mark_state(
+            0,
+            1,
+            state=MigrationLifecycle.READY,
+            phase="decode",
+        )
+
+        stats = hybrid.advance_offload_pipeline(
+            phase="decode",
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        diagnostics = hybrid.diagnostics()
+
+        assert stats["ready_applied"] == 1
+        assert stats["ready_deferred"] == 0
+        assert "1" in hybrid.gpu_experts
+        assert diagnostics["pipeline_ready_applied"] == 1
+        assert diagnostics["gpu_experts_mask_sum"] == 1

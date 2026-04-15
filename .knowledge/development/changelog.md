@@ -173,3 +173,9 @@ tags: [changelog]
 
 - benchmark 新增 `--scheduler-profile-sweep`，可在单次运行中依次比较多组 scheduler profile。
 - `normalize_scheduler_profiles()` 会做 profile 归一化与去重，避免 sweep 配置重复。
+
+## 2026-04-16
+
+- <!-- updated: 2026-04-16 00:40 --> **[migration-pipeline-runtime]** 新增 `MigrationPipelineRuntime`，将 token-step 级 offload refresh 提升为最小流水线运行时；ready prefetch 轮询与 ready promotion 现在可在进入模型前统一推进，不再依赖层内 forward 临时收敛。
+- <!-- updated: 2026-04-16 00:40 --> **[pipeline-diagnostics]** `MixtralModel.offload_refresh_diagnostics()` 与调度摘要新增 pipeline 指标，包括 `offload_pipeline_ticks`、`offload_pipeline_ready_applied_total`、`offload_pipeline_ready_deferred_total`，便于观察“ready 到 applied”是否开始形成流水线。
+- <!-- updated: 2026-04-16 00:40 --> **[tests]** 新增 pipeline runtime 覆盖：模型级 refresh 已验证 phase-aware pipeline tick，`HybridMoE` 也新增 ready promotion 在 pipeline hook 中被提前应用的单测；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `52 passed`。

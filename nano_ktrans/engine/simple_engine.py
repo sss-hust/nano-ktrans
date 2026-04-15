@@ -42,11 +42,11 @@ class SimpleEngine:
             self.k_caches.append(k_cache)
             self.v_caches.append(v_cache)
 
-    def _refresh_offload_state(self) -> int:
+    def _refresh_offload_state(self, *, phase: str = "decode") -> int:
         refresh_fn = getattr(self.model.model, "refresh_offload_state", None)
         if refresh_fn is None:
             return 0
-        return int(refresh_fn())
+        return int(refresh_fn(phase=phase))
             
     @torch.no_grad()
     def prefill(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -64,7 +64,7 @@ class SimpleEngine:
     @torch.no_grad()
     def _prefill_full(self, input_ids: torch.Tensor) -> torch.Tensor:
         """标准全量 prefill（短序列，一次处理完）。"""
-        self._refresh_offload_state()
+        self._refresh_offload_state(phase="prefill")
         seq_len = input_ids.shape[1]
         positions = torch.arange(seq_len, device=self.device)
         slot_mapping = positions.clone().to(torch.int32)
@@ -101,7 +101,7 @@ class SimpleEngine:
             chunk_end = min(chunk_start + self.chunk_size, seq_len)
             chunk_ids = input_ids[:, chunk_start:chunk_end]
             
-            self._refresh_offload_state()
+            self._refresh_offload_state(phase="prefill")
             positions = torch.arange(chunk_start, chunk_end, device=self.device)
             cache_seqlens = torch.tensor([chunk_start], dtype=torch.int32, device=self.device)
             
@@ -119,7 +119,7 @@ class SimpleEngine:
     @torch.no_grad()
     def decode_step(self, input_id: torch.Tensor, current_seq_len: int) -> torch.Tensor:
         """Generate a single token."""
-        self._refresh_offload_state()
+        self._refresh_offload_state(phase="decode")
         assert input_id.shape == (1, 1), "Decode step requires input shape (1, 1)"
         assert current_seq_len < self.max_seq_len, "KV Cache exhausted."
         
