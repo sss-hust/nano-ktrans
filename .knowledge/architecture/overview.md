@@ -254,6 +254,11 @@ tags: [architecture]
     - 只有真正 `applied` 的 expert 才会从 queue 中移除
     - 因预算不足暂时没消费的 ready/warmed/activated expert 会继续留在原队列中
     这样 pipeline 就少了一次“取出 -> 再放回”的控制面抖动，更接近真正的流水线 buffer。
+45. `decode_require_prefetch_ready` 的严格语义现在也覆盖 resident staging：
+    - 即使某个 expert 的 resident weights 已能同步 stage 到 CPU cache
+    - decode prime 阶段也不会在同一步把它直接视作 `ready`
+    - 它必须先经过下一次 refresh/pipeline tick，才会真正进入 ready-only 消费路径
+    这样系统里的 `ready` 更接近“上一阶段已经完成”的稳定信号，而不是“本阶段临时凑出来”的同步捷径。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

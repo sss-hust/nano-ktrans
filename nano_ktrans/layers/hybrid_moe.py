@@ -180,7 +180,7 @@ class HybridMoE(nn.Module):
         expert.eval()
         return expert
 
-    def _request_prefetch(self, expert_idx: int) -> None:
+    def _request_prefetch(self, expert_idx: int, *, allow_immediate_ready: bool = True) -> None:
         self.prefetch_requested += 1
         if self.offload_backend is not None:
             resident_weights = self.offload_backend.export_expert_weights(int(expert_idx))
@@ -192,11 +192,12 @@ class HybridMoE(nn.Module):
                 )
                 if submitted:
                     self.prefetch_enqueued += 1
-                    self.offload_backend.migration_manager.mark_state(
-                        self.layer_idx,
-                        expert_idx,
-                        state=MigrationLifecycle.READY,
-                    )
+                    if allow_immediate_ready:
+                        self.offload_backend.migration_manager.mark_state(
+                            self.layer_idx,
+                            expert_idx,
+                            state=MigrationLifecycle.READY,
+                        )
                     return
         submitted = self.materialization_manager.prefetch(self.layer_idx, expert_idx)
         if self.offload_backend is not None and submitted:
@@ -245,7 +246,10 @@ class HybridMoE(nn.Module):
                 continue
             if state != MigrationLifecycle.PREFETCHING:
                 before = self.prefetch_enqueued
-                self._request_prefetch(expert_idx)
+                self._request_prefetch(
+                    expert_idx,
+                    allow_immediate_ready=not require_prefetch_ready,
+                )
                 if self.prefetch_enqueued > before:
                     submitted += 1
             if require_prefetch_ready:

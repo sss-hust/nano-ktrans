@@ -197,3 +197,4 @@ tags: [changelog]
 - <!-- updated: 2026-04-16 03:43 --> **[deferred-state-preservation]** migration queue 重新排入 `*_deferred` op 时，若 expert 已处于 `prefetching/ready/warmed/activated`，现在会保留该中间态，不再把 pipeline 进度重置成 `deferred`，避免已完成一半的 promotion 在控制面上“掉回队尾”。
 - <!-- updated: 2026-04-16 03:55 --> **[requeue-diagnostics]** migration queue 现新增 `total_requeue_preserved_states`，用于统计 deferred/queued 重排时保留了多少个中间 lifecycle；scheduler 摘要也同步输出这一指标，便于衡量流水线是否真的在“只前进不回退”。
 - <!-- updated: 2026-04-16 04:07 --> **[ready-queue-drain]** decode 的 ready promotion 路径已改成“peek + selective consume”：只在真正 `applied` 时把 op 从 pending queue 里移除，预算不足导致的未消费 ready op 会保留在原队列中等待下一步，而不再重复 enqueue 成 `*_deferred`。
+- <!-- updated: 2026-04-16 04:18 --> **[strict-ready-only]** `decode_require_prefetch_ready` 语义进一步收紧：即使 resident tier 直接 stage 成功，decode prime 阶段也不会在同一步立刻把它标成 `ready` 并消费，而是等待下一次 refresh/pipeline tick，使“ready-only”真正意味着“前一阶段已完成”。

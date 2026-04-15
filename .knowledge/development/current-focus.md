@@ -52,6 +52,7 @@ updated: 2026-04-16 02:40
 - [x] deferred requeue 现在会保留 `prefetching/ready/warmed/activated` 等中间态，不会把已经准备到一半的 expert 重新打回 `queued/deferred`
 - [x] migration 诊断现在会显式统计 `requeue_preserved_states`，可以直接看到流水线阶段在 deferred 重排时被保留了多少次
 - [x] decode 的 ready promotion 现在不再把“已 ready 但本步预算不够”的 op 重新 enqueue，一部分 ready expert 会直接保留在原队列中等待下一步消费
+- [x] `decode_require_prefetch_ready` 模式下，resident-tier 直接 stage 现在也不会被同一步立即消费，而是等下一次 refresh/pipeline 再推进到 ready
 
 ## 阻塞项
 
@@ -89,6 +90,7 @@ updated: 2026-04-16 02:40
 - 当前 deferred op 虽然已保留中间 lifecycle，但 migration queue 还没有按“阶段完成度”做真正的分层批处理
 - 当前控制面已经能保住流水线阶段进度，但 benchmark 还没有把“requeue 保留率”纳入 profile 对比摘要
 - 当前 ready promotion 还没有完全拆成 batch commit；虽然已避免重复 requeue，但 applied/deferred 仍是逐 expert 判定
+- 当前 strict ready-only 语义已经覆盖 resident staging，但 `prefetching -> ready` 仍然依赖前台 refresh，而不是真 completion event 驱动
 - 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`
