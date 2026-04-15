@@ -6,7 +6,14 @@ from transformers import AutoConfig, AutoTokenizer
 
 from nano_ktrans.models.mixtral import MixtralForCausalLM
 from nano_ktrans.models.config import GenericMoeConfig, adapt_config_to_checkpoint
-from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+from nano_ktrans.scheduler import (
+    DynamicExpertScheduler,
+    SCHEDULER_PROFILE_BASELINE,
+    SchedulerConfig,
+    apply_scheduler_overrides,
+    resolve_scheduler_profile,
+    scheduler_profile_summary,
+)
 from nano_ktrans.utils.loader import load_model
 from nano_ktrans.utils.expert_selection import (
     generate_gpu_experts_masks,
@@ -40,13 +47,14 @@ class LLM:
         scheduler_prefill_force_gpu_budget_per_layer: Optional[int] = None,
         scheduler_prefill_offload_threshold_tokens: int = 8,
         scheduler_decode_promote_k: int = 2,
-        scheduler_prefill_collect_only: bool = True,
-        scheduler_step_stride_prefill: int = 8,
-        scheduler_step_stride_decode: int = 1,
-        scheduler_demotion_idle_steps: int = 0,
-        scheduler_migration_cooldown_steps: int = 0,
-        scheduler_decode_require_prefetch_ready: bool = False,
-        scheduler_prefetch_candidate_budget_per_layer: int = 0,
+        scheduler_prefill_collect_only: Optional[bool] = None,
+        scheduler_step_stride_prefill: Optional[int] = None,
+        scheduler_step_stride_decode: Optional[int] = None,
+        scheduler_demotion_idle_steps: Optional[int] = None,
+        scheduler_migration_cooldown_steps: Optional[int] = None,
+        scheduler_decode_require_prefetch_ready: Optional[bool] = None,
+        scheduler_prefetch_candidate_budget_per_layer: Optional[int] = None,
+        scheduler_profile: str = SCHEDULER_PROFILE_BASELINE,
     ):
         if device is None or device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -117,28 +125,49 @@ class LLM:
             default_offload_tier=default_offload_tier,
         )
         gpu_budget = effective_num_gpu_experts if scheduler_gpu_budget_per_layer is None else scheduler_gpu_budget_per_layer
+        base_scheduler_config = SchedulerConfig(
+            enabled=enable_dynamic_expert_scheduler,
+            gpu_budget_per_layer=gpu_budget,
+            hotness_decay=scheduler_hotness_decay,
+            offload_tier=default_offload_tier,
+            prefill_force_gpu_budget_per_layer=(
+                gpu_budget
+                if scheduler_prefill_force_gpu_budget_per_layer is None
+                else scheduler_prefill_force_gpu_budget_per_layer
+            ),
+            prefill_offload_threshold_tokens=scheduler_prefill_offload_threshold_tokens,
+            decode_promote_k=scheduler_decode_promote_k,
+            prefill_collect_only=True,
+            step_stride_prefill=8,
+            step_stride_decode=1,
+            demotion_idle_steps=0,
+            migration_cooldown_steps=0,
+            decode_require_prefetch_ready=False,
+            prefetch_candidate_budget_per_layer=0,
+        )
+        normalized_scheduler_profile = (
+            scheduler_profile.strip().lower().replace("-", "_")
+            if scheduler_profile
+            else SCHEDULER_PROFILE_BASELINE
+        )
+        profile_scheduler_config = resolve_scheduler_profile(
+            normalized_scheduler_profile,
+            base_config=base_scheduler_config,
+        )
+        resolved_scheduler_config = apply_scheduler_overrides(
+            profile_scheduler_config,
+            prefill_collect_only=scheduler_prefill_collect_only,
+            step_stride_prefill=scheduler_step_stride_prefill,
+            step_stride_decode=scheduler_step_stride_decode,
+            demotion_idle_steps=scheduler_demotion_idle_steps,
+            migration_cooldown_steps=scheduler_migration_cooldown_steps,
+            decode_require_prefetch_ready=scheduler_decode_require_prefetch_ready,
+            prefetch_candidate_budget_per_layer=scheduler_prefetch_candidate_budget_per_layer,
+        )
+        self.scheduler_profile = normalized_scheduler_profile
         self.dynamic_expert_scheduler = DynamicExpertScheduler(
             residency_plan=residency_plan,
-            config=SchedulerConfig(
-                enabled=enable_dynamic_expert_scheduler,
-                gpu_budget_per_layer=gpu_budget,
-                hotness_decay=scheduler_hotness_decay,
-                offload_tier=default_offload_tier,
-                prefill_force_gpu_budget_per_layer=(
-                    gpu_budget
-                    if scheduler_prefill_force_gpu_budget_per_layer is None
-                    else scheduler_prefill_force_gpu_budget_per_layer
-                ),
-                prefill_offload_threshold_tokens=scheduler_prefill_offload_threshold_tokens,
-                decode_promote_k=scheduler_decode_promote_k,
-                prefill_collect_only=scheduler_prefill_collect_only,
-                step_stride_prefill=scheduler_step_stride_prefill,
-                step_stride_decode=scheduler_step_stride_decode,
-                demotion_idle_steps=scheduler_demotion_idle_steps,
-                migration_cooldown_steps=scheduler_migration_cooldown_steps,
-                decode_require_prefetch_ready=scheduler_decode_require_prefetch_ready,
-                prefetch_candidate_budget_per_layer=scheduler_prefetch_candidate_budget_per_layer,
-            ),
+            config=resolved_scheduler_config,
         )
 
         # DEBUG: 仅测试一层以排查崩溃原因
@@ -203,6 +232,10 @@ class LLM:
             layers.append({"layer_idx": layer_idx, **hybrid_moe.diagnostics()})
         return {
             "offload_backend": self.offload_backend,
+            "scheduler_profile": scheduler_profile_summary(
+                self.scheduler_profile,
+                self.dynamic_expert_scheduler.config,
+            ),
             "dynamic_scheduler": self.dynamic_expert_scheduler.diagnostics(),
             "layer_count": len(layers),
             "layers": layers,

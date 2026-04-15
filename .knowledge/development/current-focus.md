@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 08:16
+updated: 2026-04-15 10:58
 ---
 
 # 🔥 当前工作焦点
@@ -28,6 +28,7 @@ updated: 2026-04-15 08:16
 - [x] decode 已支持“只消费 prefetch-ready promotion”的保守模式
 - [x] migration queue 已接入按 expert 去重和更细的排队诊断
 - [x] scheduler 已支持“无立即迁移也可按热度预取 offloaded experts”
+- [x] scheduler 已支持 profile 预设，benchmark 已输出迁移/预取摘要，便于直接比较 overlap 相关策略
 
 ## 阻塞项
 
@@ -100,6 +101,11 @@ updated: 2026-04-15 08:16
   - 纯“候选预取”对后续 decode promotion 命中率的影响
 - 对比 `cpu`、`cuda_cpu_offload`、`pim` 三条链路的 prefill/decode 延迟与 offload 命中分布
 - 继续补充架构说明、依赖说明和版本化文档
+- 基于 `baseline / overlap_safe / eager` 三组 scheduler profile 跑真实 benchmark，对比：
+  - `prefetch_hit_rate`
+  - `runtime_deferred_for_prefetch`
+  - `dedupe_ratio`
+  - 端到端 prefill / decode 延迟
 
 ## 本轮对话上下文
 

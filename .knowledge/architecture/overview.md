@@ -101,6 +101,17 @@ tags: [architecture]
     - 即使当前 step 没有立即可执行的 migration op
     - 也可以基于 offloaded experts 的 hotness，提前挑出一批候选 expert 做 staging prefetch
     - 为后续 decode promotion 提前铺垫数据面准备
+14. scheduler 控制面现在还支持 profile 预设：
+    - `baseline`: 保持当前默认行为
+    - `overlap_safe`: prefill 只收集/预热，decode 只消费 prefetch-ready promotion
+    - `eager`: 更积极地预热与迁移，便于观察控制面上限
+15. benchmark 现在会在保留原始 `offload_diagnostics` 的同时，再输出一份调度摘要：
+    - `prefetch_requested / enqueued / materialized`
+    - `decode_prefetch_hits / misses`
+    - `runtime_evictions`
+    - `runtime_deferred_for_prefetch`
+    - `migration_total_enqueued_ops / deduped_ops / drained_ops`
+    这样可以直接比较不同调度策略的 overlap 相关效果，而不必人工汇总每层诊断。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

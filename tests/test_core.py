@@ -516,6 +516,127 @@ class TestOffloadBackendHelpers:
 
 
 class TestDynamicScheduler:
+    def test_scheduler_profile_overlap_safe(self):
+        from nano_ktrans.scheduler import (
+            SCHEDULER_PROFILE_OVERLAP_SAFE,
+            SchedulerConfig,
+            resolve_scheduler_profile,
+        )
+
+        resolved = resolve_scheduler_profile(
+            SCHEDULER_PROFILE_OVERLAP_SAFE,
+            base_config=SchedulerConfig(enabled=True),
+        )
+
+        assert resolved.prefill_collect_only is True
+        assert resolved.decode_require_prefetch_ready is True
+        assert resolved.prefetch_candidate_budget_per_layer >= 2
+        assert resolved.demotion_idle_steps >= 2
+        assert resolved.migration_cooldown_steps >= 2
+
+    def test_scheduler_profile_preserves_stronger_explicit_values(self):
+        from nano_ktrans.scheduler import (
+            SCHEDULER_PROFILE_EAGER,
+            SchedulerConfig,
+            resolve_scheduler_profile,
+        )
+
+        resolved = resolve_scheduler_profile(
+            SCHEDULER_PROFILE_EAGER,
+            base_config=SchedulerConfig(
+                enabled=True,
+                step_stride_prefill=2,
+                demotion_idle_steps=3,
+                migration_cooldown_steps=5,
+                prefetch_candidate_budget_per_layer=6,
+            ),
+        )
+
+        assert resolved.step_stride_prefill == 2
+        assert resolved.demotion_idle_steps == 3
+        assert resolved.migration_cooldown_steps == 5
+        assert resolved.prefetch_candidate_budget_per_layer == 6
+        assert resolved.prefill_collect_only is False
+
+    def test_summarize_offload_diagnostics(self):
+        from nano_ktrans.scheduler import summarize_offload_diagnostics
+
+        diagnostics = {
+            "scheduler_profile": {"profile": "overlap_safe"},
+            "dynamic_scheduler": {"enabled": True},
+            "layer_count": 2,
+            "layers": [
+                {
+                    "prefetch_requested": 4,
+                    "prefetch_enqueued": 2,
+                    "prefetch_materialized": 1,
+                    "prefetch_candidate_scans": 1,
+                    "decode_prefetch_hits": 1,
+                    "decode_prefetch_misses": 1,
+                    "runtime_evictions": 1,
+                    "runtime_deferred_for_prefetch": 2,
+                    "runtime_skipped_demotion_cooldown": 3,
+                    "applied_migration_ops": 4,
+                    "pending_migrations": [{"expert_idx": 1}],
+                    "backend": {
+                        "migration_submit_calls": 2,
+                        "migration_manager": {
+                            "layers": [
+                                {
+                                    "total_enqueued_ops": 5,
+                                    "total_deduped_ops": 2,
+                                    "total_drained_ops": 4,
+                                    "pending_ops": 1,
+                                }
+                            ]
+                        },
+                    },
+                },
+                {
+                    "prefetch_requested": 3,
+                    "prefetch_enqueued": 3,
+                    "prefetch_materialized": 2,
+                    "prefetch_candidate_scans": 2,
+                    "decode_prefetch_hits": 2,
+                    "decode_prefetch_misses": 0,
+                    "runtime_evictions": 0,
+                    "runtime_deferred_for_prefetch": 1,
+                    "runtime_skipped_demotion_cooldown": 0,
+                    "applied_migration_ops": 1,
+                    "pending_migrations": [],
+                    "backend": {
+                        "migration_submit_calls": 1,
+                        "migration_manager": {
+                            "layers": [
+                                {
+                                    "total_enqueued_ops": 3,
+                                    "total_deduped_ops": 1,
+                                    "total_drained_ops": 2,
+                                    "pending_ops": 0,
+                                }
+                            ]
+                        },
+                    },
+                },
+            ],
+        }
+
+        summary = summarize_offload_diagnostics(diagnostics)
+        assert summary["enabled"] is True
+        assert summary["layer_count"] == 2
+        assert summary["prefetch_requested"] == 7
+        assert summary["prefetch_enqueued"] == 5
+        assert summary["decode_prefetch_hits"] == 3
+        assert summary["decode_prefetch_misses"] == 1
+        assert summary["migration_submit_calls"] == 3
+        assert summary["migration_total_enqueued_ops"] == 8
+        assert summary["migration_total_deduped_ops"] == 3
+        assert summary["migration_total_drained_ops"] == 6
+        assert summary["migration_pending_ops"] == 1
+        assert summary["layers_with_pending_migrations"] == 1
+        assert summary["prefetch_hit_rate"] == pytest.approx(0.75)
+        assert summary["dedupe_ratio"] == pytest.approx(3 / 8)
+
     def test_residency_plan_from_gpu_masks(self):
         from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
 

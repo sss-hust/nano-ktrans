@@ -107,3 +107,15 @@ tags: [changelog]
 
 - scheduler 新增 `prefetch_candidate_budget_per_layer`，可按层从 offloaded experts 中挑选热点候选做预取。
 - `HybridMoE` 新增 `prefetch_candidate_scans` 诊断，用于观察候选预取是否实际发生。
+
+<!-- updated: 2026-04-15 10:58 -->
+
+- scheduler 新增 profile 预设：`baseline`、`overlap_safe`、`eager`。
+- `LLM`、`example.py`、`benchmark_inference.py` 现在都可直接选择 scheduler profile，而不必手工拼全部调度开关。
+- benchmark 新增调度摘要输出，自动聚合：
+  - `prefetch_requested / enqueued / materialized`
+  - `decode_prefetch_hits / misses`
+  - `runtime_evictions`
+  - `runtime_deferred_for_prefetch`
+  - migration queue 的 `enqueued / deduped / drained`
+- 新增对应测试，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `45 passed`。

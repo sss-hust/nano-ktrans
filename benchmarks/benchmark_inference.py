@@ -9,6 +9,7 @@ from typing import Any
 import torch
 
 from nano_ktrans.llm import LLM
+from nano_ktrans.scheduler import SCHEDULER_PROFILE_NAMES, summarize_offload_diagnostics
 
 
 def synchronize_if_needed(device: str) -> None:
@@ -67,7 +68,6 @@ def run_single_generation(llm: LLM, prompt: str, max_new_tokens: int) -> dict[st
         result["cuda_max_memory_bytes"] = int(torch.cuda.max_memory_allocated())
     return result
 
-
 def benchmark_backend(
     *,
     backend: str,
@@ -87,13 +87,14 @@ def benchmark_backend(
     pim_prefill_token_threshold: int,
     enable_dynamic_expert_scheduler: bool,
     scheduler_prefill_force_gpu_budget_per_layer: int | None,
-    scheduler_prefill_collect_only: bool,
-    scheduler_step_stride_prefill: int,
-    scheduler_step_stride_decode: int,
-    scheduler_demotion_idle_steps: int,
-    scheduler_migration_cooldown_steps: int,
-    scheduler_decode_require_prefetch_ready: bool,
-    scheduler_prefetch_candidate_budget_per_layer: int,
+    scheduler_prefill_collect_only: bool | None,
+    scheduler_step_stride_prefill: int | None,
+    scheduler_step_stride_decode: int | None,
+    scheduler_demotion_idle_steps: int | None,
+    scheduler_migration_cooldown_steps: int | None,
+    scheduler_decode_require_prefetch_ready: bool | None,
+    scheduler_prefetch_candidate_budget_per_layer: int | None,
+    scheduler_profile: str,
 ) -> dict[str, Any]:
     llm = None
     offload_backend = "cpu"
@@ -163,6 +164,7 @@ def benchmark_backend(
             scheduler_migration_cooldown_steps=scheduler_migration_cooldown_steps,
             scheduler_decode_require_prefetch_ready=scheduler_decode_require_prefetch_ready,
             scheduler_prefetch_candidate_budget_per_layer=scheduler_prefetch_candidate_budget_per_layer,
+            scheduler_profile=scheduler_profile,
         )
         synchronize_if_needed(llm.device)
         load_seconds = time.perf_counter() - load_start
@@ -171,6 +173,7 @@ def benchmark_backend(
             run_single_generation(llm, prompt, max_new_tokens=max_new_tokens)
 
         runs = [run_single_generation(llm, prompt, max_new_tokens=max_new_tokens) for _ in range(repeats)]
+        offload_diagnostics = llm.get_offload_diagnostics()
 
         summary = {
             "backend": backend,
@@ -179,7 +182,8 @@ def benchmark_backend(
             "num_device_experts": num_device_experts,
             "offload_backend": offload_backend,
             "load_seconds": load_seconds,
-            "offload_diagnostics": llm.get_offload_diagnostics(),
+            "offload_diagnostics": offload_diagnostics,
+            "scheduler_summary": summarize_offload_diagnostics(offload_diagnostics),
             "runs": runs,
         }
         return summary
@@ -300,15 +304,26 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scheduler-prefill-collect-only",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="During prefill, only collect hotness and prefetch candidates without emitting migrations.",
     )
-    parser.add_argument("--scheduler-step-stride-prefill", type=int, default=8)
-    parser.add_argument("--scheduler-step-stride-decode", type=int, default=1)
-    parser.add_argument("--scheduler-demotion-idle-steps", type=int, default=0)
-    parser.add_argument("--scheduler-migration-cooldown-steps", type=int, default=0)
-    parser.add_argument("--scheduler-decode-require-prefetch-ready", action="store_true")
-    parser.add_argument("--scheduler-prefetch-candidate-budget-per-layer", type=int, default=0)
+    parser.add_argument("--scheduler-step-stride-prefill", type=int, default=None)
+    parser.add_argument("--scheduler-step-stride-decode", type=int, default=None)
+    parser.add_argument("--scheduler-demotion-idle-steps", type=int, default=None)
+    parser.add_argument("--scheduler-migration-cooldown-steps", type=int, default=None)
+    parser.add_argument(
+        "--scheduler-decode-require-prefetch-ready",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    parser.add_argument("--scheduler-prefetch-candidate-budget-per-layer", type=int, default=None)
+    parser.add_argument(
+        "--scheduler-profile",
+        default="baseline",
+        choices=list(SCHEDULER_PROFILE_NAMES),
+        help="Scheduler preset for dynamic expert migration experiments.",
+    )
     parser.add_argument("--json-out", help="Optional path to write the benchmark results as JSON.")
     return parser.parse_args()
 
@@ -351,6 +366,7 @@ def main() -> None:
             scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
             scheduler_decode_require_prefetch_ready=args.scheduler_decode_require_prefetch_ready,
             scheduler_prefetch_candidate_budget_per_layer=args.scheduler_prefetch_candidate_budget_per_layer,
+            scheduler_profile=args.scheduler_profile,
         )
         results["results"].append(result)
 

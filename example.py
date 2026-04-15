@@ -1,6 +1,7 @@
 import argparse
 
 from nano_ktrans.llm import LLM
+from nano_ktrans.scheduler import SCHEDULER_PROFILE_NAMES
 
 def main():
     parser = argparse.ArgumentParser(description="Run nano-ktrans on a local or Hugging Face MoE checkpoint.")
@@ -66,43 +67,51 @@ def main():
     )
     parser.add_argument(
         "--scheduler-prefill-collect-only",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="During prefill, only collect hotness and prefetch candidates without emitting migrations.",
     )
     parser.add_argument(
         "--scheduler-step-stride-prefill",
         type=int,
-        default=8,
+        default=None,
         help="Logical step stride used when updating hotness during prefill.",
     )
     parser.add_argument(
         "--scheduler-step-stride-decode",
         type=int,
-        default=1,
+        default=None,
         help="Logical step stride used when updating hotness during decode.",
     )
     parser.add_argument(
         "--scheduler-demotion-idle-steps",
         type=int,
-        default=0,
+        default=None,
         help="Minimum logical steps since last access before a GPU expert may be demoted.",
     )
     parser.add_argument(
         "--scheduler-migration-cooldown-steps",
         type=int,
-        default=0,
+        default=None,
         help="Minimum logical steps between consecutive residency changes for the same expert.",
     )
     parser.add_argument(
         "--scheduler-decode-require-prefetch-ready",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="During decode, only promote experts whose staging prefetch is already ready; otherwise defer migration.",
     )
     parser.add_argument(
         "--scheduler-prefetch-candidate-budget-per-layer",
         type=int,
-        default=0,
+        default=None,
         help="Number of offloaded experts per layer to proactively prefetch based on hotness, even without an immediate migration op.",
+    )
+    parser.add_argument(
+        "--scheduler-profile",
+        default="baseline",
+        choices=list(SCHEDULER_PROFILE_NAMES),
+        help="Scheduler preset. 'baseline' keeps current behavior, 'overlap_safe' prefers ready-only decode promotions, 'eager' is more aggressive.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=256)
     args = parser.parse_args()
@@ -133,6 +142,7 @@ def main():
         scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
         scheduler_decode_require_prefetch_ready=args.scheduler_decode_require_prefetch_ready,
         scheduler_prefetch_candidate_budget_per_layer=args.scheduler_prefetch_candidate_budget_per_layer,
+        scheduler_profile=args.scheduler_profile,
     )
     
     # Generation test
