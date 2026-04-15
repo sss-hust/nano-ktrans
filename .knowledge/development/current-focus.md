@@ -50,6 +50,7 @@ updated: 2026-04-16 02:40
 - [x] token-step pipeline 现在为 activated expert 引入单独 device-side cache，`activated -> applied` 可以优先命中已完成 device transfer 的 module
 - [x] activated cache 现在会按 hotness 和 lifecycle 优先级保留更热的候选，避免 decode 批量 promotion 时把 device-side 预算浪费在较冷 expert 上
 - [x] deferred requeue 现在会保留 `prefetching/ready/warmed/activated` 等中间态，不会把已经准备到一半的 expert 重新打回 `queued/deferred`
+- [x] migration 诊断现在会显式统计 `requeue_preserved_states`，可以直接看到流水线阶段在 deferred 重排时被保留了多少次
 
 ## 阻塞项
 
@@ -85,6 +86,7 @@ updated: 2026-04-16 02:40
 - 当前 activated cache 仍由前台 token-step hook 填充，尚未按 layer batch 或独立 CUDA stream 做真正异步 activation
 - 当前 activated cache 已开始做预算裁剪，但仍是逐 expert 激活/驱逐，不是按层打包 promotion
 - 当前 deferred op 虽然已保留中间 lifecycle，但 migration queue 还没有按“阶段完成度”做真正的分层批处理
+- 当前控制面已经能保住流水线阶段进度，但 benchmark 还没有把“requeue 保留率”纳入 profile 对比摘要
 - 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`

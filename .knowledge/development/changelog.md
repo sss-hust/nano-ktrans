@@ -195,3 +195,4 @@ tags: [changelog]
 - <!-- updated: 2026-04-16 03:20 --> **[activated-cache]** `HybridMoE` 现在为已完成 device transfer 的 expert 引入独立 activated cache；decode promotion 会优先命中 activated cache，再退到 CPU warm cache 或冷路径，进一步压缩 `activated -> applied` 关键路径。
 - <!-- updated: 2026-04-16 03:32 --> **[activated-cache-priority]** activated cache 现在会按 lifecycle 优先级与 hotness 做预算保留；decode 前只把最值得保留的 warmed experts 提升到 device-side activated cache，避免较冷 expert 抢占有限激活预算。
 - <!-- updated: 2026-04-16 03:43 --> **[deferred-state-preservation]** migration queue 重新排入 `*_deferred` op 时，若 expert 已处于 `prefetching/ready/warmed/activated`，现在会保留该中间态，不再把 pipeline 进度重置成 `deferred`，避免已完成一半的 promotion 在控制面上“掉回队尾”。
+- <!-- updated: 2026-04-16 03:55 --> **[requeue-diagnostics]** migration queue 现新增 `total_requeue_preserved_states`，用于统计 deferred/queued 重排时保留了多少个中间 lifecycle；scheduler 摘要也同步输出这一指标，便于衡量流水线是否真的在“只前进不回退”。

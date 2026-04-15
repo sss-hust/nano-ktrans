@@ -2266,3 +2266,26 @@ class TestDynamicScheduler:
 
         assert lifecycle["state"] == MigrationLifecycle.WARMED.value
         assert diagnostics["total_deferred_events"] == 0
+        assert diagnostics["total_requeue_preserved_states"] == 1
+
+    def test_migration_queue_preserves_deferred_state_on_requeue(self):
+        from nano_ktrans.kernels.expert_migration import ExpertMigrationManager, MigrationLifecycle
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency
+
+        manager = ExpertMigrationManager()
+        op = ExpertMigrationOp(
+            layer_idx=0,
+            expert_idx=4,
+            src=ExpertResidency.PIM,
+            dst=ExpertResidency.GPU,
+            reason="preserve_deferred",
+        )
+        manager.queue(0, [op], phase="decode_deferred")
+        manager.queue(0, [op], phase="decode_deferred")
+
+        diagnostics = manager.diagnostics()["layers"][0]
+        lifecycle = diagnostics["lifecycle"][0]
+
+        assert lifecycle["state"] == MigrationLifecycle.DEFERRED.value
+        assert diagnostics["total_deferred_events"] == 1
+        assert diagnostics["total_requeue_preserved_states"] == 1

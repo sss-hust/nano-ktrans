@@ -245,6 +245,10 @@ tags: [architecture]
     - 现在 queue 会保留这些 expert 已完成的中间 lifecycle，只把“尚未开始”的 op 记成 `queued/deferred`
     - 这保证了 pipeline 是“逐步向前推进”的，而不是遇到 defer 就把已完成的预热/激活进度丢掉
     对想把 PIM 路径真正做成流水线来说，这个语义修正很关键，因为它避免了控制面自身制造回退。
+43. 为了让这件事可测，migration manager 现在还会统计 `requeue_preserved_states`：
+    - 每次 deferred/queued 重排若保住了原有 lifecycle，会累加一次
+    - 这样 benchmark 就能区分“队列被重排了很多次”与“虽然重排，但流水线进度没有丢”
+    这对后续比较 `baseline / overlap_safe / eager` 很关键，因为真正好的 profile 不只是 defer 少，还应当让已准备好的 expert 不回退。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
