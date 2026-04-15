@@ -54,3 +54,9 @@ tags: [changelog]
   - promotion 时动态构建 GPU expert 并注入 `gpu_experts`
   - demotion 时从 `gpu_experts` 移除并更新 mask
 - 新增测试覆盖 decode 阶段 migration queue 被实际执行的路径。
+
+<!-- updated: 2026-04-15 07:06 -->
+
+- 新增 `nano_ktrans/kernels/expert_materialization.py`，提供单 expert 的 CPU staging cache、预取队列和基础诊断。
+- `HybridMoE` 现在会在 `prefill` 阶段对候选 promotion expert 发起预取，并在 `decode` promotion 时优先命中 staging cache。
+- 新增测试覆盖 prefill 阶段的 expert 预取路径。

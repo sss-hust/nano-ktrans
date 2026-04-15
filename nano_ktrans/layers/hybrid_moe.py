@@ -20,9 +20,9 @@ from torch import nn
 from typing import Optional, Dict
 
 from nano_ktrans.kernels.cpu_moe import CPUMoEBackend
+from nano_ktrans.kernels.expert_materialization import ExpertMaterializationManager
 from nano_ktrans.kernels.offload_backend import normalize_offload_backend_name
 from nano_ktrans.kernels.pim_moe import PIMMoEBackend
-from nano_ktrans.kernels.weight_loader import ExpertWeightLoader
 from nano_ktrans.layers.expert_mlp import build_expert_module, load_expert_weights
 from nano_ktrans.scheduler import DynamicExpertScheduler
 from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
@@ -71,6 +71,8 @@ class HybridMoE(nn.Module):
         expert_proj_names: Optional[Dict[str, str]] = None,
         experts_are_packed: bool = False,
         hidden_act: str = "silu",
+        expert_prefetch_cache_size: int = 8,
+        expert_prefetch_workers: int = 1,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -94,10 +96,18 @@ class HybridMoE(nn.Module):
         self.has_cpu_experts = bool((~gpu_experts_mask.bool()).any().item())
         self.offload_backend_name = normalize_offload_backend_name(offload_backend)
         self.offload_backend_kwargs = offload_backend_kwargs or {}
-        self._weight_loader: Optional[ExpertWeightLoader] = None
         self.applied_migration_ops = 0
         self.last_applied_migration_phase = ""
         self.applied_migration_history: list[dict[str, object]] = []
+        self.prefetch_requested = 0
+        self.prefetch_materialized = 0
+        self.materialization_manager = ExpertMaterializationManager(
+            weight_path=weight_path,
+            expert_key_template=self.expert_key_template,
+            expert_proj_names=self.expert_proj_names,
+            max_cached_experts=expert_prefetch_cache_size,
+            prefetch_workers=expert_prefetch_workers,
+        )
 
         # 只有存在离线 CPU 专家时才初始化 CPU backend。
         self.offload_backend = None
@@ -127,11 +137,6 @@ class HybridMoE(nn.Module):
             else:
                 self.offload_backend = CPUMoEBackend(**backend_kwargs)
 
-    def _get_weight_loader(self) -> ExpertWeightLoader:
-        if self._weight_loader is None:
-            self._weight_loader = ExpertWeightLoader(self.weight_path)
-        return self._weight_loader
-
     def _build_runtime_expert(self, expert_idx: int, device: torch.device, dtype: torch.dtype) -> nn.Module:
         expert = build_expert_module(
             hidden_size=self.hidden_size,
@@ -140,15 +145,17 @@ class HybridMoE(nn.Module):
             experts_are_packed=self.experts_are_packed,
         )
         expert = expert.to(device=device, dtype=dtype)
-        weights = self._get_weight_loader().load_expert(
+        weights = self.materialization_manager.get_expert(
             self.layer_idx,
             expert_idx,
-            key_template=self.expert_key_template,
-            proj_name_map=self.expert_proj_names,
         )
         load_expert_weights(expert, weights)
         expert.eval()
         return expert
+
+    def _request_prefetch(self, expert_idx: int) -> None:
+        self.materialization_manager.prefetch(self.layer_idx, expert_idx)
+        self.prefetch_requested += 1
 
     def _synchronize_gpu_mask(self) -> None:
         if self.residency_plan is not None:
@@ -214,6 +221,8 @@ class HybridMoE(nn.Module):
 
             if applied_ok:
                 applied += 1
+                if op.dst == ExpertResidency.GPU:
+                    self.prefetch_materialized += 1
                 self.applied_migration_history.append(
                     {
                         "phase": phase,
@@ -263,6 +272,9 @@ class HybridMoE(nn.Module):
             self.dynamic_expert_scheduler.observe(self.layer_idx, topk_ids, phase=phase)
             planned_ops = self.dynamic_expert_scheduler.plan_layer(self.layer_idx, phase=phase)
             if planned_ops and self.offload_backend is not None:
+                for op in planned_ops:
+                    if phase == "prefill" and op.dst == ExpertResidency.GPU:
+                        self._request_prefetch(op.expert_idx)
                 # 当前系统只有迁移控制面，没有真实 GPU/PIM 权重迁移数据面。
                 # 这里先排队；decode 阶段会消费队列并执行最小 GPU materialize/demote。
                 self.offload_backend.queue_migration_plan(planned_ops, phase=phase)
@@ -348,6 +360,9 @@ class HybridMoE(nn.Module):
             "last_applied_migration_phase": self.last_applied_migration_phase,
             "runtime_gpu_experts": sorted(int(expert_idx) for expert_idx in self.gpu_experts.keys()),
             "gpu_experts_mask_sum": int(self.gpu_experts_mask.bool().sum().item()),
+            "prefetch_requested": self.prefetch_requested,
+            "prefetch_materialized": self.prefetch_materialized,
+            "materialization_manager": self.materialization_manager.diagnostics(),
             "layer_residency": layer_residency,
             "pending_migrations": pending_migrations,
             "backend": None if self.offload_backend is None else self.offload_backend.diagnostics(),

@@ -62,6 +62,18 @@ tags: [architecture]
 
 这一步仍是同步、逐 expert 的最小数据面，尚未包含真实 GPU<->PIM 异步传输，也没有与计算 overlap。
 
+### 当前 prefill 预取链
+
+1. `prefill` 阶段 scheduler 先根据路由热度生成候选 promotion plan。
+2. `HybridMoE` 对其中 `dst=GPU` 的 expert 发起预取请求。
+3. `ExpertMaterializationManager` 将单 expert 权重加载到 CPU staging cache。
+4. 到 `decode` 真的需要 promotion 时：
+   - 优先命中 staging cache
+   - 再构建 GPU expert module
+   - 避免在 decode 关键路径上重新扫 safetensors
+
+这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
+
 ## 目标演进方向
 
 1. 非专家层继续常驻 GPU，包括 embedding、attention、norm、router 和 lm head。

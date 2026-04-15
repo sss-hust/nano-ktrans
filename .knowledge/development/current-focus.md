@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 06:58
+updated: 2026-04-15 07:06
 ---
 
 # 🔥 当前工作焦点
@@ -18,6 +18,7 @@ updated: 2026-04-15 06:58
 - [ ] 将系统目标从静态专家放置切换到 GPU/PIM 动态专家调度
 - [x] 落第一版 prefill 保护策略，避免 prefill 大批量 token 直接打到 PIM
 - [x] 落第一版 decode 迁移执行数据面：可在运行时 materialize / demote GPU experts
+- [x] 落第一版 prefill expert 预取：prefill 期间可将候选热点专家预热到 CPU staging cache
 
 ## 阻塞项
 
@@ -33,6 +34,7 @@ updated: 2026-04-15 06:58
 - 当前动态调度已改成“观察热度 + 生成迁移计划 + 迁移计划排队”，不会再在没有真实数据面的前提下直接篡改有效驻留状态
 - 当前迁移管理器已能按层记录 `prefill` / `decode` 迁移计划，但仍未真正执行 GPU<->PIM 权重搬运
 - 当前 decode 阶段已可消费迁移队列，并把单 expert 从 checkpoint 动态 materialize 到 GPU `ModuleDict`；但这仍是同步、逐 expert 的最小实现，还没有异步预取与 overlap
+- 当前已新增 CPU staging cache 和 prefill 预取入口，但 promotion 仍是“CPU staging -> GPU module”的同步 materialize，不是真正的 GPU<->PIM 异步 DMA
 - Python 侧直接驱动 UPMEM 的尝试仍不稳定，当前更可靠的是独立 C host benchmark
 - `HTTP_PROXY` / `HTTPS_PROXY` 指向 `127.0.0.1:7897` 时会阻塞 `pip install`
 
@@ -44,7 +46,7 @@ updated: 2026-04-15 06:58
 - 设计动态专家调度骨架：专家驻留表、热度统计、promotion/demotion 队列和异步迁移接口
 - 将 `gpu_experts_mask` 从静态初始化参数改成运行时可更新的驻留状态
 - 继续扩展 promotion / demotion 数据面：
-  - 将当前同步的 GPU expert materialization 升级为异步预取
+  - 将当前 prefill 预取 + CPU staging 升级为真正的异步 promotion
   - 为 PIM resident expert 增加常驻句柄与回写
   - 接上迁移和 decode 计算的 overlap 控制
 - 对比 `cpu`、`cuda_cpu_offload`、`pim` 三条链路的 prefill/decode 延迟与 offload 命中分布
@@ -62,3 +64,4 @@ updated: 2026-04-15 06:58
 - promotion 路径已能通过 `ExpertWeightLoader.load_expert()` 从 safetensors 加载单 expert 权重，动态构建 GPU expert module，并更新运行时 `gpu_experts_mask`。
 - demotion 路径已能从运行时 `gpu_experts` 中移除对应 expert，并同步更新 offload backend 的 mask。
 - 这意味着系统已经从“只有迁移控制面”推进到“最小可执行 GPU materialization 数据面”，但仍未实现 GPU<->PIM 异步拷贝和 overlap。
+- 现在 prefill 阶段会对计划中的 `PIM/CPU -> GPU` promotion 做 expert 级预取，把单 expert 权重提前拉到 CPU staging cache，减少 decode promotion 时的 checkpoint I/O。
