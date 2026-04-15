@@ -190,3 +190,5 @@ tags: [changelog]
 - <!-- updated: 2026-04-16 02:25 --> **[cpu-prebuild]** ready expert 的 prebuild 现在固定在 CPU 上进行，promotion 再执行单次 device transfer；这让 token-step pipeline 的 prebuild 更接近“后台准备对象，前台只做激活”。
 - <!-- updated: 2026-04-16 02:25 --> **[warm-transfer-diagnostics]** 新增 `warm_cache_device_transfers` 统计，用于观察 warm cache 命中后实际发生了多少次 CPU->device 激活拷贝。
 - <!-- updated: 2026-04-16 02:40 --> **[warmed-lifecycle]** migration lifecycle 新增 `warmed` 状态，专门表示“expert 数据已 ready 且模块已在 warm cache 中预构建”；这样可以把 `ready -> warmed -> applied` 与简单 `ready -> applied` 区分开来。
+- <!-- updated: 2026-04-16 03:05 --> **[activation-stage]** migration lifecycle 进一步新增 `activated` 状态，表示 warm cache 中的 expert module 已完成 device transfer、尚未正式进入 GPU resident set；`HybridMoE` 的 token-step pipeline 现在会在 decode 前先推进 `warmed -> activated`，再由最终 promotion 完成 `activated -> applied`。
+- <!-- updated: 2026-04-16 03:05 --> **[activation-diagnostics]** pipeline/runtime/scheduler 摘要新增 activation 相关指标，包括 `offload_pipeline_activation_ready_total`、`activation_submitted / ready / applied` 和 `migration_activated_events`，便于区分“模块已预构建”和“设备激活已完成”。

@@ -19,6 +19,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "offload_pipeline_prefetch_submitted_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_prefetch_submitted_total", 0)
         ),
+        "offload_pipeline_activation_ready_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_activation_ready_total", 0)
+        ),
         "offload_pipeline_ready_applied_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_pipeline_ready_applied_total", 0)
         ),
@@ -37,6 +40,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "pipeline_ticks": 0,
         "pipeline_ready_applied": 0,
         "pipeline_ready_deferred": 0,
+        "activation_submitted": 0,
+        "activation_ready": 0,
+        "activation_applied": 0,
         "decode_prefetch_hits": 0,
         "decode_prefetch_misses": 0,
         "runtime_evictions": 0,
@@ -59,6 +65,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
             "prefetching": 0,
             "ready": 0,
             "warmed": 0,
+            "activated": 0,
             "deferred": 0,
             "applied": 0,
         },
@@ -81,6 +88,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["pipeline_ticks"] += int(layer.get("pipeline_ticks", 0))
         summary["pipeline_ready_applied"] += int(layer.get("pipeline_ready_applied", 0))
         summary["pipeline_ready_deferred"] += int(layer.get("pipeline_ready_deferred", 0))
+        summary["activation_submitted"] += int(layer.get("activation_submitted", 0))
+        summary["activation_ready"] += int(layer.get("activation_ready", 0))
+        summary["activation_applied"] += int(layer.get("activation_applied", 0))
         summary["decode_prefetch_hits"] += int(layer.get("decode_prefetch_hits", 0))
         summary["decode_prefetch_misses"] += int(layer.get("decode_prefetch_misses", 0))
         summary["runtime_evictions"] += int(layer.get("runtime_evictions", 0))
@@ -107,6 +117,8 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
             summary["migration_ready_events"] += int(migration_layer.get("total_ready_events", 0))
             summary.setdefault("migration_warmed_events", 0)
             summary["migration_warmed_events"] += int(migration_layer.get("total_warmed_events", 0))
+            summary.setdefault("migration_activated_events", 0)
+            summary["migration_activated_events"] += int(migration_layer.get("total_activated_events", 0))
             summary["migration_deferred_events"] += int(migration_layer.get("total_deferred_events", 0))
             summary["migration_applied_events"] += int(migration_layer.get("total_applied_events", 0))
             for key in summary["migration_lifecycle_counts"]:

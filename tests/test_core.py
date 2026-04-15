@@ -1412,6 +1412,7 @@ class TestDynamicScheduler:
                 return {
                     "prefetch_submitted": 2,
                     "ready_polled": self.ready_count,
+                    "activation_ready": 1,
                     "ready_applied": 1,
                     "ready_deferred": 0,
                 }
@@ -1431,6 +1432,7 @@ class TestDynamicScheduler:
         assert diagnostics["offload_refresh_calls"] == 1
         assert diagnostics["offload_refresh_ready_total"] == 5
         assert diagnostics["offload_pipeline_prefetch_submitted_total"] == 4
+        assert diagnostics["offload_pipeline_activation_ready_total"] == 2
         assert diagnostics["offload_pipeline_ready_applied_total"] == 2
         assert diagnostics["offload_pipeline_last_phase"] == "decode"
         assert layer0.hybrid_moe.advanced[0][0] == "decode"
@@ -1881,7 +1883,8 @@ class TestDynamicScheduler:
 
         assert build_calls == [1]
         assert diagnostics["warm_cache_hits"] == 1
-        assert diagnostics["warm_cache_device_transfers"] == 1
+        assert diagnostics["activation_applied"] == 2
+        assert diagnostics["warm_cache_device_transfers"] == 0
 
     def test_hybrid_moe_pipeline_prebuilds_ready_expert(self, tmp_path):
         from safetensors.torch import save_file
@@ -1983,3 +1986,96 @@ class TestDynamicScheduler:
         assert layer_migration["total_warmed_events"] == 1
         assert diagnostics["backend"]["migration_manager"]["layers"][0]["lifecycle"][0]["state"] == "applied"
         assert diagnostics["warm_cache_device_transfers"] == 1
+
+    def test_hybrid_moe_pipeline_marks_activated_before_apply(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(enabled=True, gpu_budget_per_layer=1, offload_tier=ExpertResidency.PIM),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=2,
+        ).to(dtype=torch.float32)
+
+        hybrid.offload_backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=1,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="activate_then_apply",
+                )
+            ],
+            phase="decode",
+        )
+        hybrid.materialization_manager.stage_expert(
+            0,
+            1,
+            {
+                "gate": torch.randn(8, 4),
+                "up": torch.randn(8, 4),
+                "down": torch.randn(4, 8),
+            },
+        )
+        hybrid.offload_backend.migration_manager.mark_state(
+            0,
+            1,
+            state=MigrationLifecycle.READY,
+            phase="decode",
+        )
+
+        stats = hybrid.advance_offload_pipeline(
+            phase="decode",
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        diagnostics = hybrid.diagnostics()
+        layer_migration = diagnostics["backend"]["migration_manager"]["layers"][0]
+
+        assert stats["activation_ready"] == 1
+        assert stats["ready_applied"] == 1
+        assert diagnostics["activation_submitted"] == 1
+        assert diagnostics["activation_ready"] == 1
+        assert diagnostics["activation_applied"] == 1
+        assert layer_migration["total_activated_events"] == 1
+        assert layer_migration["lifecycle"][0]["state"] == MigrationLifecycle.APPLIED.value

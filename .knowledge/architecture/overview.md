@@ -214,6 +214,17 @@ tags: [architecture]
     - `warmed` 表示对应 expert module 也已经预构建并进入 warm cache
     - `applied` 则表示它已经真正进入 GPU resident set 并可被本步计算消费
     这样后续 benchmark 和诊断就能分辨系统瓶颈到底还卡在“数据到位”，还是已经推进到了“对象构建完成但尚未激活”。
+38. 当前 token-step pipeline 又往前拆出了一层 `activated`：
+    - `warmed` 表示 module 已在 CPU warm cache 里预构建
+    - `activated` 表示该 module 已执行 device transfer，进入目标 device 上的 warm cache
+    - `applied` 才表示它真正被插入 `gpu_experts` 并更新 resident set
+    这样 `HybridMoE.advance_offload_pipeline()` 现在已经可以按 `queued -> prefetching -> ready -> warmed -> activated -> applied` 的顺序推进一次 promotion。
+39. 这也让“前台 pipeline”里的工作边界更清晰了：
+    - resident export / safetensors prefetch 负责准备权重
+    - prebuild 负责准备 module 对象
+    - activation 负责最后一次 CPU->device 拷贝
+    - applied 负责真正切换执行路径
+    当前它们仍然是 token-step hook 中的同步阶段，但系统已经具备把 activation 单独剥离成后台 worker/stream 的结构基础。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

@@ -121,6 +121,9 @@ class HybridMoE(nn.Module):
         self.warm_cache_evictions = 0
         self.warm_cache_prebuilt = 0
         self.warm_cache_device_transfers = 0
+        self.activation_submitted = 0
+        self.activation_ready = 0
+        self.activation_applied = 0
         self.materialization_manager = ExpertMaterializationManager(
             weight_path=weight_path,
             expert_key_template=self.expert_key_template,
@@ -288,6 +291,47 @@ class HybridMoE(nn.Module):
         self.warm_cache_device_transfers += 1
         return module.to(device=device, dtype=dtype, non_blocking=non_blocking)
 
+    def _activate_warmed_experts(
+        self,
+        *,
+        phase: str,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> int:
+        if phase != "decode" or self.offload_backend is None:
+            return 0
+
+        activated = 0
+        for op in self.offload_backend.migration_manager.peek_layer(self.layer_idx):
+            if op.dst != ExpertResidency.GPU:
+                continue
+            expert_idx = int(op.expert_idx)
+            expert_key = str(expert_idx)
+            current_state = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+            if current_state != MigrationLifecycle.WARMED:
+                continue
+            if expert_key in self.gpu_experts or expert_key not in self.warm_expert_cache:
+                continue
+            if bool(self.gpu_experts_mask[expert_idx].item()):
+                continue
+
+            self.activation_submitted += 1
+            warm_module = self.warm_expert_cache.pop(expert_key)
+            self.warm_expert_cache[expert_key] = self._activate_warm_module(warm_module, device, dtype)
+            self.offload_backend.migration_manager.mark_state(
+                self.layer_idx,
+                expert_idx,
+                src=op.src.value,
+                dst=op.dst.value,
+                reason=op.reason,
+                phase=phase,
+                state=MigrationLifecycle.ACTIVATED,
+            )
+            activated += 1
+
+        self.activation_ready += activated
+        return activated
+
     def _prebuild_ready_experts(self, *, phase: str, device: torch.device, dtype: torch.dtype) -> int:
         if (
             phase != "decode"
@@ -301,7 +345,11 @@ class HybridMoE(nn.Module):
                 continue
             expert_idx = int(op.expert_idx)
             current_state = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
-            if current_state not in {MigrationLifecycle.READY, MigrationLifecycle.WARMED}:
+            if current_state not in {
+                MigrationLifecycle.READY,
+                MigrationLifecycle.WARMED,
+                MigrationLifecycle.ACTIVATED,
+            }:
                 continue
             expert_key = str(expert_idx)
             if expert_key in self.gpu_experts or expert_key in self.warm_expert_cache:
@@ -451,6 +499,7 @@ class HybridMoE(nn.Module):
         prefetch_submitted = self._prime_pending_promotions(phase=phase)
         ready_polled = self.refresh_offload_state()
         warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
+        activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
         ready_applied = 0
         ready_deferred = 0
         if phase == "decode":
@@ -468,6 +517,7 @@ class HybridMoE(nn.Module):
             "ready_deferred": int(ready_deferred),
             "prefetch_submitted": int(prefetch_submitted),
             "warm_prebuilt": int(warm_prebuilt),
+            "activation_ready": int(activation_ready),
         }
 
     def _request_prefetch_candidates(self, *, phase: str) -> None:
@@ -509,9 +559,14 @@ class HybridMoE(nn.Module):
             warm_module = self.warm_expert_cache.pop(expert_key, None)
             if warm_module is not None:
                 self.warm_cache_hits += 1
-                self.gpu_experts[expert_key] = self._activate_warm_module(warm_module, device, dtype)
+                module_device = next(iter(warm_module.parameters())).device
+                if module_device != device:
+                    self.gpu_experts[expert_key] = self._activate_warm_module(warm_module, device, dtype)
+                else:
+                    self.gpu_experts[expert_key] = warm_module.to(dtype=dtype)
             else:
                 self.gpu_experts[expert_key] = self._build_runtime_expert(expert_idx, device, dtype)
+        self.activation_applied += 1
         self.gpu_experts_mask[expert_idx] = True
         self._set_residency(expert_idx, ExpertResidency.GPU)
         return True
@@ -911,6 +966,9 @@ class HybridMoE(nn.Module):
             "warm_cache_prebuilt": self.warm_cache_prebuilt,
             "warm_cache_device_transfers": self.warm_cache_device_transfers,
             "warm_cache_size": len(self.warm_expert_cache),
+            "activation_submitted": self.activation_submitted,
+            "activation_ready": self.activation_ready,
+            "activation_applied": self.activation_applied,
             "materialization_manager": self.materialization_manager.diagnostics(),
             "layer_residency": layer_residency,
             "pending_migrations": pending_migrations,
