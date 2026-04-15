@@ -102,6 +102,8 @@ class HybridMoE(nn.Module):
         self.prefetch_requested = 0
         self.prefetch_materialized = 0
         self.runtime_evictions = 0
+        self.decode_prefetch_hits = 0
+        self.decode_prefetch_misses = 0
         self.materialization_manager = ExpertMaterializationManager(
             weight_path=weight_path,
             expert_key_template=self.expert_key_template,
@@ -231,14 +233,15 @@ class HybridMoE(nn.Module):
             coldest = min(candidates)
         return coldest, fallback_dst
 
-    def _promotion_sort_key(self, op, active_experts: set[int]) -> tuple[int, float, int]:
+    def _promotion_sort_key(self, op, active_experts: set[int], phase: str) -> tuple[int, int, float, int]:
         hotness_score = 0.0
         if self.residency_plan is not None:
             state = self.residency_plan.layer_state(self.layer_idx)
             if int(op.expert_idx) < state.hotness.numel():
                 hotness_score = float(state.hotness[int(op.expert_idx)].item())
         is_active = 1 if int(op.expert_idx) in active_experts else 0
-        return (-is_active, -hotness_score, int(op.expert_idx))
+        is_ready = 1 if phase == "decode" and self.materialization_manager.is_ready(self.layer_idx, int(op.expert_idx)) else 0
+        return (-is_ready, -is_active, -hotness_score, int(op.expert_idx))
 
     def _apply_queued_migrations(
         self,
@@ -271,7 +274,7 @@ class HybridMoE(nn.Module):
         demotion_ops = [
             op for op in queued_ops if op.src == ExpertResidency.GPU and op.dst != ExpertResidency.GPU
         ]
-        promotion_ops.sort(key=lambda op: self._promotion_sort_key(op, active_experts))
+        promotion_ops.sort(key=lambda op: self._promotion_sort_key(op, active_experts, phase))
 
         for op in demotion_ops:
             if int(op.expert_idx) in active_experts:
@@ -327,6 +330,10 @@ class HybridMoE(nn.Module):
                     }
                 )
             else:
+                if self.materialization_manager.is_ready(self.layer_idx, int(op.expert_idx)):
+                    self.decode_prefetch_hits += 1
+                else:
+                    self.decode_prefetch_misses += 1
                 applied_ok = self._promote_expert_to_gpu(op.expert_idx, device, dtype)
                 if applied_ok:
                     applied += 1
@@ -388,7 +395,10 @@ class HybridMoE(nn.Module):
             planned_ops = self.dynamic_expert_scheduler.plan_layer(self.layer_idx, phase=phase)
             if planned_ops and self.offload_backend is not None:
                 for op in planned_ops:
-                    if op.dst == ExpertResidency.GPU:
+                    if (
+                        op.dst == ExpertResidency.GPU
+                        and not self.materialization_manager.has_cached(self.layer_idx, int(op.expert_idx))
+                    ):
                         self._request_prefetch(op.expert_idx)
                 # 当前系统只有迁移控制面，没有真实 GPU/PIM 权重迁移数据面。
                 # 这里先排队；decode 阶段会消费队列并执行最小 GPU materialize/demote。
@@ -478,6 +488,8 @@ class HybridMoE(nn.Module):
             "prefetch_requested": self.prefetch_requested,
             "prefetch_materialized": self.prefetch_materialized,
             "runtime_evictions": self.runtime_evictions,
+            "decode_prefetch_hits": self.decode_prefetch_hits,
+            "decode_prefetch_misses": self.decode_prefetch_misses,
             "materialization_manager": self.materialization_manager.diagnostics(),
             "layer_residency": layer_residency,
             "pending_migrations": pending_migrations,

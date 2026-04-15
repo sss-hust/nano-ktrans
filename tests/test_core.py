@@ -863,6 +863,7 @@ class TestDynamicScheduler:
         set_context(is_prefill=False)
         try:
             output = hybrid(hidden_states, router_logits)
+            output = hybrid(hidden_states, router_logits)
         finally:
             reset_context()
 
@@ -871,3 +872,4 @@ class TestDynamicScheduler:
         assert diagnostics["prefetch_requested"] >= 2
         assert diagnostics["materialization_manager"]["prefetch_resolved"] >= 1
         assert diagnostics["materialization_manager"]["cache_size"] >= 1
+        assert diagnostics["decode_prefetch_hits"] >= 1

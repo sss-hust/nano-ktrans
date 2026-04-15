@@ -76,7 +76,8 @@ tags: [architecture]
    - 执行 `GPU -> PIM/CPU` 的运行时 eviction
    - 再为新的热点 expert 执行 promotion
 6. promotion 队列会按两级优先级排序：
-   - 当前 step 已活跃的 expert 优先
+   - staging cache 已就绪的 expert 优先
+   - 其次是当前 step 已活跃的 expert
    - 同优先级内按 hotness 从高到低
 7. 对没有在本步立刻 promotion 的候选 expert，系统仍会尽早发起预取，为后续 decode step 预热 staging cache。
 

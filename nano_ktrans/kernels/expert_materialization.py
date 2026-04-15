@@ -58,6 +58,19 @@ class ExpertMaterializationManager:
     def _cache_key(self, layer_idx: int, expert_idx: int) -> ExpertKey:
         return (int(layer_idx), int(expert_idx))
 
+    def has_cached(self, layer_idx: int, expert_idx: int) -> bool:
+        key = self._cache_key(layer_idx, expert_idx)
+        with self._lock:
+            return key in self._cache
+
+    def is_ready(self, layer_idx: int, expert_idx: int) -> bool:
+        key = self._cache_key(layer_idx, expert_idx)
+        with self._lock:
+            if key in self._cache:
+                return True
+            future = self._futures.get(key)
+            return future is not None and future.done()
+
     def _load_expert(self, layer_idx: int, expert_idx: int) -> ExpertWeights:
         return self.loader.load_expert(
             layer_idx,

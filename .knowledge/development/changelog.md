@@ -71,3 +71,8 @@ tags: [changelog]
 - `HybridMoE` 现在会对 decode 阶段生成的 future promotions 也发起预取，不再仅限于 prefill 预热。
 - decode migration 队列现按“当前活跃优先 + hotness 优先”排序，更接近真实热点 cache 的调度语义。
 - 新增测试覆盖 decode 阶段的 future promotion 预取路径。
+
+<!-- updated: 2026-04-15 07:30 -->
+
+- decode promotion 队列进一步接入 `prefetch ready` 优先级，优先消费 staging cache 已就绪的专家。
+- `HybridMoE` 诊断中新增 `decode_prefetch_hits` / `decode_prefetch_misses`，用于观察预热是否真正命中 decode promotion。
