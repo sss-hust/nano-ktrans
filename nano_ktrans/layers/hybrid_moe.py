@@ -18,6 +18,7 @@ HybridMoE: CPU/GPU 混合专家层。
 import torch
 from torch import nn
 from typing import Optional, Dict
+from collections import OrderedDict
 
 from nano_ktrans.kernels.cpu_moe import CPUMoEBackend
 from nano_ktrans.kernels.expert_materialization import ExpertMaterializationManager
@@ -74,6 +75,7 @@ class HybridMoE(nn.Module):
         hidden_act: str = "silu",
         expert_prefetch_cache_size: int = 8,
         expert_prefetch_workers: int = 1,
+        expert_warm_cache_size: int = 4,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -112,6 +114,11 @@ class HybridMoE(nn.Module):
         self.pipeline_ready_applied = 0
         self.pipeline_ready_deferred = 0
         self.pipeline_ticks = 0
+        self.expert_warm_cache_size = max(0, int(expert_warm_cache_size))
+        self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
+        self.warm_cache_hits = 0
+        self.warm_cache_stores = 0
+        self.warm_cache_evictions = 0
         self.materialization_manager = ExpertMaterializationManager(
             weight_path=weight_path,
             expert_key_template=self.expert_key_template,
@@ -445,7 +452,12 @@ class HybridMoE(nn.Module):
     def _promote_expert_to_gpu(self, expert_idx: int, device: torch.device, dtype: torch.dtype) -> bool:
         expert_key = str(expert_idx)
         if expert_key not in self.gpu_experts:
-            self.gpu_experts[expert_key] = self._build_runtime_expert(expert_idx, device, dtype)
+            warm_module = self.warm_expert_cache.pop(expert_key, None)
+            if warm_module is not None:
+                self.warm_cache_hits += 1
+                self.gpu_experts[expert_key] = warm_module.to(device=device, dtype=dtype)
+            else:
+                self.gpu_experts[expert_key] = self._build_runtime_expert(expert_idx, device, dtype)
         self.gpu_experts_mask[expert_idx] = True
         self._set_residency(expert_idx, ExpertResidency.GPU)
         return True
@@ -453,7 +465,15 @@ class HybridMoE(nn.Module):
     def _demote_expert_from_gpu(self, expert_idx: int, dst: ExpertResidency) -> bool:
         expert_key = str(expert_idx)
         if expert_key in self.gpu_experts:
+            expert_module = self.gpu_experts[expert_key]
             del self.gpu_experts[expert_key]
+            if self.expert_warm_cache_size > 0:
+                self.warm_expert_cache[expert_key] = expert_module.to(device="cpu")
+                self.warm_expert_cache.move_to_end(expert_key)
+                self.warm_cache_stores += 1
+                while len(self.warm_expert_cache) > self.expert_warm_cache_size:
+                    self.warm_expert_cache.popitem(last=False)
+                    self.warm_cache_evictions += 1
         self.gpu_experts_mask[expert_idx] = False
         self._set_residency(expert_idx, dst)
         return True
@@ -837,6 +857,10 @@ class HybridMoE(nn.Module):
             "pipeline_ticks": self.pipeline_ticks,
             "pipeline_ready_applied": self.pipeline_ready_applied,
             "pipeline_ready_deferred": self.pipeline_ready_deferred,
+            "warm_cache_hits": self.warm_cache_hits,
+            "warm_cache_stores": self.warm_cache_stores,
+            "warm_cache_evictions": self.warm_cache_evictions,
+            "warm_cache_size": len(self.warm_expert_cache),
             "materialization_manager": self.materialization_manager.diagnostics(),
             "layer_residency": layer_residency,
             "pending_migrations": pending_migrations,

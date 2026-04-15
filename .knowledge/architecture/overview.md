@@ -186,6 +186,15 @@ tags: [architecture]
     - 对 CPU backend，它避免反复回 safetensors 扫描本来就常驻在 backend 内存里的专家
     - 对 PIM backend，它为后续真正的 “PIM resident -> GPU resident” 数据面留出了统一接口
     - 但现在它仍是同步 CPU staging，不是独立的 PIM->GPU 异步搬运
+32. 运行时现在还新增了一个更短期的缓存层：warm expert cache。
+    - 当某个 GPU resident expert 因 budget 或 eviction 被降回 offload tier 时
+    - 其构建好的 expert module 不会立刻丢弃，而是先保留在 CPU 侧 warm cache
+    - 若后续很快再次被 promote 回 GPU，则可直接复用该 module，而不必重新 build + load weights
+33. 因此当前专家迁移链已经开始呈现三层缓存/驻留结构：
+    - offload resident weights：CPU/PIM backend 内部保存的长期驻留专家权重
+    - CPU staging / warm cache：为 promotion 准备的短期中间层
+    - GPU resident experts：当前 token window 中的热点执行层
+    这虽然还不是最终的异步分层存储系统，但已经更接近真正的缓存层次结构，而不是单纯“现用现建”。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

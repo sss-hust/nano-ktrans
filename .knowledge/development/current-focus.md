@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-16 01:30
+updated: 2026-04-16 01:50
 ---
 
 # 🔥 当前工作焦点
@@ -42,6 +42,7 @@ updated: 2026-04-16 01:30
 - [x] token-step 级 offload refresh 已升级为最小 migration pipeline runtime：ready 轮询与 ready promotion 可在进入模型前统一推进
 - [x] pending promotion 的预取提交已开始收敛到 pipeline runtime，decode 进入层前可先把 `queued -> prefetching/deferred` 往前推进
 - [x] GPU promotion 预热现在可优先直接从 offload resident 权重 staging，不必总是回到 checkpoint/safetensors 扫描
+- [x] GPU demotion 现在支持 warm expert cache，短时间内回迁的热点 expert 可避免重复模块构建
 
 ## 阻塞项
 
@@ -70,6 +71,7 @@ updated: 2026-04-16 01:30
 - 当前 migration pipeline runtime 仍是前台 token-step hook，不是真正独立线程/事件循环；但 ready promotion 已不必等层内 forward 再逐层处理
 - 当前 pipeline runtime 已能在 decode 前主动 prime pending promotions，但 `ready -> applied` 仍在前台 step hook 中完成，还没脱离主线程
 - 当前 resident-tier 预热已先在 CPU/PIM backend 上打通 export 接口，但还只是同步导出到 CPU staging cache，不是 PIM->GPU 真异步搬运
+- 当前 warm expert cache 还只是 CPU 侧 module 复用层，尚未接入 GPU pinned buffer / CUDA graph / 异步拷贝优化
 - 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`
