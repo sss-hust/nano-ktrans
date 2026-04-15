@@ -22,6 +22,9 @@ from typing import Optional, Dict
 from nano_ktrans.kernels.cpu_moe import CPUMoEBackend
 from nano_ktrans.kernels.offload_backend import normalize_offload_backend_name
 from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+from nano_ktrans.scheduler import DynamicExpertScheduler
+from nano_ktrans.utils.expert_runtime_state import ExpertResidencyPlan
+from nano_ktrans.utils.context import get_context
 
 
 class HybridMoE(nn.Module):
@@ -58,6 +61,8 @@ class HybridMoE(nn.Module):
         method: str = "AMXINT4",
         offload_backend: str = "cpu",
         offload_backend_kwargs: Optional[Dict[str, object]] = None,
+        residency_plan: Optional[ExpertResidencyPlan] = None,
+        dynamic_expert_scheduler: Optional[DynamicExpertScheduler] = None,
         router_use_softmax: bool = False,
         normalize_topk_prob: bool = True,
         expert_key_template: Optional[str] = None,
@@ -69,6 +74,9 @@ class HybridMoE(nn.Module):
         self.hidden_size = hidden_size
         self.gpu_experts_mask = gpu_experts_mask
         self.gpu_experts = gpu_experts
+        self.layer_idx = layer_idx
+        self.dynamic_expert_scheduler = dynamic_expert_scheduler
+        self.residency_plan = residency_plan
         self.router_use_softmax = router_use_softmax
         self.normalize_topk_prob = normalize_topk_prob
         self.has_cpu_experts = bool((~gpu_experts_mask.bool()).any().item())
@@ -94,7 +102,11 @@ class HybridMoE(nn.Module):
                 expert_proj_names=expert_proj_names,
             )
             backend_kwargs.update(self.offload_backend_kwargs)
-            if self.offload_backend_name == "pim_shadow":
+            if self.offload_backend_name in {"pim", "pim_shadow"}:
+                backend_kwargs.setdefault(
+                    "pim_execution_mode",
+                    "real" if self.offload_backend_name == "pim" else "shadow",
+                )
                 self.offload_backend = PIMMoEBackend(**backend_kwargs)
             else:
                 self.offload_backend = CPUMoEBackend(**backend_kwargs)
@@ -119,6 +131,19 @@ class HybridMoE(nn.Module):
         else:
             topk_weights, topk_ids = torch.topk(router_logits, self.top_k, dim=-1)
             topk_weights = torch.softmax(topk_weights, dim=-1)
+
+        context = get_context()
+        phase = "prefill" if context.is_prefill else "decode"
+        if self.dynamic_expert_scheduler is not None and self.dynamic_expert_scheduler.enabled:
+            self.dynamic_expert_scheduler.observe(self.layer_idx, topk_ids, phase=phase)
+            if phase == "prefill":
+                planned_ops = self.dynamic_expert_scheduler.plan_layer(self.layer_idx, phase=phase)
+                if planned_ops:
+                    self.dynamic_expert_scheduler.apply_plan(planned_ops)
+                    if self.residency_plan is not None:
+                        self.gpu_experts_mask = self.residency_plan.layer_state(self.layer_idx).gpu_mask()
+                        if self.offload_backend is not None:
+                            self.offload_backend.update_gpu_expert_mask(self.gpu_experts_mask)
 
         batch_seq_len, hidden_dim = hidden_states.shape
 
@@ -174,8 +199,30 @@ class HybridMoE(nn.Module):
         return final_gpu_states + cpu_output
 
     def diagnostics(self) -> dict:
+        layer_residency = None
+        pending_migrations = []
+        if self.residency_plan is not None:
+            state = self.residency_plan.layer_state(self.layer_idx)
+            layer_residency = {
+                "gpu_experts": int(state.gpu_mask().sum().item()),
+                "pim_experts": int(state.pim_mask().sum().item()),
+                "cpu_experts": int(state.cpu_mask().sum().item()),
+                "epoch": state.epoch,
+            }
+            pending_migrations = [
+                {
+                    "expert_idx": op.expert_idx,
+                    "src": op.src.value,
+                    "dst": op.dst.value,
+                    "reason": op.reason,
+                }
+                for op in state.pending_ops
+            ]
         return {
+            "layer_idx": self.layer_idx,
             "offload_backend_name": self.offload_backend_name,
             "has_cpu_experts": self.has_cpu_experts,
+            "layer_residency": layer_residency,
+            "pending_migrations": pending_migrations,
             "backend": None if self.offload_backend is None else self.offload_backend.diagnostics(),
         }

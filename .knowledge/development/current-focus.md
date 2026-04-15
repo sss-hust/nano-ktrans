@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-14 11:30
+updated: 2026-04-15 06:23
 ---
 
 # 🔥 当前工作焦点
@@ -11,23 +11,41 @@ updated: 2026-04-14 11:30
 - [x] 在宿主机上打通 `cuda_cpu_offload` 并拿到真实 Qwen3 benchmark
 - [x] 在真实 UPMEM 硬件上跑通多 rank PIM microbenchmark
 - [x] 将 `pim_shadow` 接入主推理链路并记录 PIM 可见性与路由统计
-- [ ] 为 `PIMMoEBackend` 接入真实 DPU 数值执行
+- [x] 为 `PIMMoEBackend` 接入最小真实 DPU 数值执行
+- [x] 将真实 DPU linear runtime 扩到多 rank / 多 DPU 分片执行，并在主链路上完成 `cuda_pim` 真机验证
+- [x] 为 `PIMMoEBackend` 接入 fused expert DPU kernel 的第一版，并确认主链路可真实触发 fused expert 调用
 - [ ] 为 CPU offload 接入 `kt-kernel` 或等价高性能实现
+- [ ] 将系统目标从静态专家放置切换到 GPU/PIM 动态专家调度
+- [x] 落第一版 prefill 保护策略，避免 prefill 大批量 token 直接打到 PIM
 
 ## 阻塞项
 
 - `Qwen3-30B-A3B` 在本机 `47.41 GiB` GPU 上走全专家纯 `cuda` 路径仍然 OOM
-- 当前 `pim_shadow` 仍由 CPU fallback 负责数值正确性，尚未把专家 MLP 真正放到 DPU 上执行
+- 当前 `pim` backend 已支持 fused expert DPU kernel，但 fused 路径仍明显慢于 linear3 路径，默认仍应保留 `linear`
+- 当前真实 PIM backend 默认只在小 flattened batch 上启用，prefill 大批次仍会回退 CPU
+- 当前 `cuda_pim` 已可端到端运行，但性能明显落后于 `cuda_cpu_offload`，瓶颈在每个 offloaded expert 仍需三次 host↔DPU 线性调用
+- fused expert kernel 已修正为“hidden 先落 WRAM 再复用”的数据流，但当前单 expert microbench 仍约比 `linear3` 慢一个数量级，端到端 benchmark 暂不值得继续长时间盲跑
+- fused expert host bridge 进一步改成了 `hidden_group x row_group` 的二维分片，能让更多 DPU 参与单 expert 计算，但在 Qwen 级别形状上仍未超过 `linear3`
+- 当前系统仍是“静态 GPU expert mask + 其余专家走 offload backend”，还没有专家 promotion / demotion 控制面
+- 当前 PIM 路径每次调用仍是“按次提交输入和权重”，还不是“专家权重常驻 PIM、按需迁移到 GPU”的层级存储模型
+- 当前动态调度还停留在“观察热度 + 生成迁移计划 + 更新驻留表”，真实 GPU/PIM 权重迁移数据面还没接入
 - Python 侧直接驱动 UPMEM 的尝试仍不稳定，当前更可靠的是独立 C host benchmark
 - `HTTP_PROXY` / `HTTPS_PROXY` 指向 `127.0.0.1:7897` 时会阻塞 `pip install`
 
 ## 下一步
 
-- 在 `PIMMoEBackend` 中先落一个最小可验证的单 token / 单 expert DPU kernel
-- 建立 Python -> UPMEM host bridge，把 `pim_shadow` 升级成真正的 `pim` backend
+- 继续优化 fused expert kernel 的计算/访存比，优先压缩 `down_proj` 阶段的 WRAM 读取与 MRAM 访问成本
+- 评估是否需要把 fused expert 改成“多 expert 打包提交”而不是单 expert 单次调用
+- 在保持 `linear` 默认不变的前提下，继续扩大真实 PIM backend 的 prefill batch 支持范围
+- 设计动态专家调度骨架：专家驻留表、热度统计、promotion/demotion 队列和异步迁移接口
+- 将 `gpu_experts_mask` 从静态初始化参数改成运行时可更新的驻留状态
+- 实现真实 promotion / demotion 数据面：
+  - GPU resident expert 的运行时构建与替换
+  - PIM resident expert 的常驻句柄与回写
+  - 迁移和计算的 overlap 控制
 - 对比 `cpu`、`cuda_cpu_offload`、`pim` 三条链路的 prefill/decode 延迟与 offload 命中分布
 - 继续补充架构说明、依赖说明和版本化文档
 
 ## 本轮对话上下文
 
-> 当前 repo 已完成阶段性里程碑：CPU 基线、Qwen3 真实权重适配、`cuda_cpu_offload` 真机验证、`pim_shadow` 主链路接入，以及真实 UPMEM 多 rank benchmark。未完成项是把专家数值计算真正迁移到 DPU。
+> 当前 repo 已完成新阶段：CPU 基线、Qwen3 真实权重适配、`cuda_cpu_offload` 真机验证、`pim_shadow` 主链路接入、真实 UPMEM 多 rank benchmark、最小真实 DPU linear backend、`cuda_pim` 真机端到端验证，以及 fused expert DPU kernel 的第一版。新的主目标已经切换为“GPU 保持主干层，专家在 GPU/PIM 间动态迁移并与传输 overlap”，因此下一阶段重点不再只是单 kernel 优化，而是系统级调度改造。

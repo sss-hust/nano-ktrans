@@ -4,7 +4,7 @@ Supports Mixtral-style sparse MLPs and Qwen2-MoE style sparse layers with
 shared experts, while keeping the original lightweight execution flow.
 """
 
-from typing import List
+from typing import List, Optional
 import torch
 from torch import nn
 
@@ -14,6 +14,8 @@ from nano_ktrans.layers.linear import QKVParallelLinear, RowParallelLinear
 from nano_ktrans.layers.rotary_embedding import get_rope
 from nano_ktrans.layers.hybrid_moe import HybridMoE
 from nano_ktrans.models.config import GenericMoeConfig
+from nano_ktrans.scheduler import DynamicExpertScheduler
+from nano_ktrans.utils.expert_runtime_state import ExpertResidencyPlan
 
 MixtralConfig = GenericMoeConfig
 
@@ -137,6 +139,8 @@ class MixtralDecoderLayer(nn.Module):
         weight_path: str = "",
         offload_backend: str = "cpu",
         offload_backend_kwargs: dict | None = None,
+        residency_plan: Optional[ExpertResidencyPlan] = None,
+        dynamic_expert_scheduler: Optional[DynamicExpertScheduler] = None,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -169,6 +173,8 @@ class MixtralDecoderLayer(nn.Module):
                 weight_path=weight_path,
                 offload_backend=offload_backend,
                 offload_backend_kwargs=offload_backend_kwargs,
+                residency_plan=residency_plan,
+                dynamic_expert_scheduler=dynamic_expert_scheduler,
                 router_use_softmax=config.arch.router_use_softmax,
                 normalize_topk_prob=config.normalize_topk_prob,
                 expert_key_template=config.arch.expert_key_template,
@@ -234,6 +240,8 @@ class MixtralModel(nn.Module):
         weight_path: str = "",
         offload_backend: str = "cpu",
         offload_backend_kwargs: dict | None = None,
+        residency_plan: Optional[ExpertResidencyPlan] = None,
+        dynamic_expert_scheduler: Optional[DynamicExpertScheduler] = None,
     ):
         super().__init__()
         self.config = config
@@ -249,6 +257,8 @@ class MixtralModel(nn.Module):
                 weight_path=weight_path,
                 offload_backend=offload_backend,
                 offload_backend_kwargs=offload_backend_kwargs,
+                residency_plan=residency_plan,
+                dynamic_expert_scheduler=dynamic_expert_scheduler,
             ) for layer_idx in range(config.num_hidden_layers)
         ])
         
@@ -282,6 +292,8 @@ class MixtralForCausalLM(nn.Module):
         weight_path: str = "",
         offload_backend: str = "cpu",
         offload_backend_kwargs: dict | None = None,
+        residency_plan: Optional[ExpertResidencyPlan] = None,
+        dynamic_expert_scheduler: Optional[DynamicExpertScheduler] = None,
     ):
         super().__init__()
         self.model = MixtralModel(
@@ -290,6 +302,8 @@ class MixtralForCausalLM(nn.Module):
             weight_path,
             offload_backend=offload_backend,
             offload_backend_kwargs=offload_backend_kwargs,
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=dynamic_expert_scheduler,
         )
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.packed_modules_mapping = {

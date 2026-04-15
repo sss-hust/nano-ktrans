@@ -48,6 +48,7 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn.functional as F
+from nano_ktrans.utils.context import get_context
 
 from .cpu_infer import CPUInferEngine
 from .offload_backend import ExpertOffloadBackend
@@ -271,6 +272,16 @@ class CPUMoEBackend(ExpertOffloadBackend):
         self._up_proj = self._up_proj.index_select(0, cpu_expert_indices).to(dtype=self.fallback_dtype).contiguous()
         self._down_proj = self._down_proj.index_select(0, cpu_expert_indices).to(dtype=self.fallback_dtype).contiguous()
 
+    def update_gpu_expert_mask(self, gpu_experts_mask: torch.Tensor) -> None:
+        self.gpu_experts_mask = gpu_experts_mask.to(dtype=torch.uint8, device="cpu")
+
+    def _compute_expert_output_cpu(self, states: torch.Tensor, cpu_slot: int) -> torch.Tensor:
+        states = states.to(dtype=self.fallback_dtype)
+        gate = F.linear(states, self._gate_proj[cpu_slot])
+        up = F.linear(states, self._up_proj[cpu_slot])
+        hidden = F.silu(gate) * up
+        return F.linear(hidden, self._down_proj[cpu_slot])
+
     def submit_forward(
         self,
         hidden_states: torch.Tensor,
@@ -290,6 +301,7 @@ class CPUMoEBackend(ExpertOffloadBackend):
         flat = hidden_states.view(-1, hidden_states.shape[-1])
         batch_size = flat.shape[0]
         device = hidden_states.device
+        context = get_context()
 
         if not self.has_cpu_experts:
             self._fallback_output = torch.zeros_like(hidden_states)
@@ -316,11 +328,7 @@ class CPUMoEBackend(ExpertOffloadBackend):
                 if len(token_indices) == 0:
                     continue
 
-                states = flat_cpu[token_indices]
-                gate = F.linear(states, self._gate_proj[cpu_slot])
-                up = F.linear(states, self._up_proj[cpu_slot])
-                hidden = F.silu(gate) * up
-                expert_output = F.linear(hidden, self._down_proj[cpu_slot])
+                expert_output = self._compute_expert_output_cpu(flat_cpu[token_indices], cpu_slot)
 
                 row_idx, col_idx = torch.where(match[token_indices])
                 weights = topk_weights_cpu[token_indices[row_idx], col_idx].to(dtype=expert_output.dtype).unsqueeze(1)
@@ -349,7 +357,7 @@ class CPUMoEBackend(ExpertOffloadBackend):
                 weights_cpu[slot].data_ptr(),
                 input_cpu[slot].data_ptr(),
                 output_cpu[slot].data_ptr(),
-                False,  # incremental
+                not context.is_prefill,  # incremental
             ),
         )
 

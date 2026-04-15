@@ -15,14 +15,54 @@ def main():
     parser.add_argument(
         "--offload-backend",
         default="cpu",
-        choices=["cpu", "pim_shadow"],
+        choices=["cpu", "pim", "pim_shadow"],
         help="Backend used for experts that are not kept on the active device.",
     )
     parser.add_argument(
         "--pim-rank-count",
         type=int,
         default=1,
-        help="Visible PIM ranks to report when using the experimental pim_shadow backend.",
+        help="Visible PIM ranks to report when using experimental PIM backends.",
+    )
+    parser.add_argument(
+        "--pim-profile",
+        default="",
+        help="Optional libdpu allocation profile passed to the real PIM backend.",
+    )
+    parser.add_argument(
+        "--pim-max-batch-tokens",
+        type=int,
+        default=1,
+        help="Maximum token rows routed through the real PIM backend before falling back to CPU.",
+    )
+    parser.add_argument(
+        "--pim-kernel-variant",
+        default="linear",
+        choices=["linear", "fused"],
+        help="Real PIM kernel variant: 'linear' runs three DPU linears with host activation, 'fused' runs the full expert MLP on DPU.",
+    )
+    parser.add_argument(
+        "--pim-prefill-policy",
+        default="cpu",
+        choices=["cpu", "pim"],
+        help="Policy for prefill-routed experts. Recommended: keep prefill on CPU/GPU and reserve PIM mainly for decode.",
+    )
+    parser.add_argument(
+        "--pim-prefill-token-threshold",
+        type=int,
+        default=8,
+        help="Maximum flattened tokens allowed to use real PIM during prefill before forcing fallback.",
+    )
+    parser.add_argument(
+        "--enable-dynamic-expert-scheduler",
+        action="store_true",
+        help="Enable experimental dynamic GPU/PIM expert residency scheduler.",
+    )
+    parser.add_argument(
+        "--scheduler-prefill-force-gpu-budget-per-layer",
+        type=int,
+        default=None,
+        help="During prefill, temporarily target at least this many GPU-resident experts per layer.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=256)
     args = parser.parse_args()
@@ -36,7 +76,16 @@ def main():
         device=args.device,
         num_gpu_experts=args.num_device_experts,
         offload_backend=args.offload_backend,
-        offload_backend_kwargs={"pim_rank_count": args.pim_rank_count},
+        offload_backend_kwargs={
+            "pim_rank_count": args.pim_rank_count,
+            "pim_profile": args.pim_profile,
+            "pim_max_batch_tokens": args.pim_max_batch_tokens,
+            "pim_kernel_variant": args.pim_kernel_variant,
+            "pim_prefill_policy": args.pim_prefill_policy,
+            "pim_prefill_token_threshold": args.pim_prefill_token_threshold,
+        },
+        enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
+        scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
     )
     
     # Generation test

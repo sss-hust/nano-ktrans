@@ -6,11 +6,13 @@ from transformers import AutoConfig, AutoTokenizer
 
 from nano_ktrans.models.mixtral import MixtralForCausalLM
 from nano_ktrans.models.config import GenericMoeConfig, adapt_config_to_checkpoint
+from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
 from nano_ktrans.utils.loader import load_model
 from nano_ktrans.utils.expert_selection import (
     generate_gpu_experts_masks,
     uniform_gpu_experts_masks,
 )
+from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
 from nano_ktrans.engine.simple_engine import SimpleEngine
 
 class LLM:
@@ -31,6 +33,13 @@ class LLM:
         offload_backend: str = "cpu",
         offload_backend_kwargs: Optional[dict] = None,
         activation_freq: Optional[torch.Tensor] = None,
+        enable_dynamic_expert_scheduler: bool = False,
+        scheduler_gpu_budget_per_layer: Optional[int] = None,
+        scheduler_hotness_decay: float = 0.95,
+        scheduler_offload_tier: str = "pim",
+        scheduler_prefill_force_gpu_budget_per_layer: Optional[int] = None,
+        scheduler_prefill_offload_threshold_tokens: int = 8,
+        scheduler_decode_promote_k: int = 2,
     ):
         if device is None or device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -94,7 +103,30 @@ class LLM:
             layer_gpu_expert_masks = [
                 torch.zeros(0, dtype=torch.bool) for _ in range(config.num_hidden_layers)
             ]
-        
+
+        default_offload_tier = ExpertResidency.PIM if scheduler_offload_tier.lower() == "pim" else ExpertResidency.CPU
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            layer_gpu_expert_masks,
+            default_offload_tier=default_offload_tier,
+        )
+        gpu_budget = effective_num_gpu_experts if scheduler_gpu_budget_per_layer is None else scheduler_gpu_budget_per_layer
+        self.dynamic_expert_scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=enable_dynamic_expert_scheduler,
+                gpu_budget_per_layer=gpu_budget,
+                hotness_decay=scheduler_hotness_decay,
+                offload_tier=default_offload_tier,
+                prefill_force_gpu_budget_per_layer=(
+                    gpu_budget
+                    if scheduler_prefill_force_gpu_budget_per_layer is None
+                    else scheduler_prefill_force_gpu_budget_per_layer
+                ),
+                prefill_offload_threshold_tokens=scheduler_prefill_offload_threshold_tokens,
+                decode_promote_k=scheduler_decode_promote_k,
+            ),
+        )
+
         # DEBUG: 仅测试一层以排查崩溃原因
         # config.num_hidden_layers = 1
         
@@ -102,10 +134,12 @@ class LLM:
         model_dtype = torch.bfloat16 if device == "cpu" or device.startswith("cuda") else torch.float32
         self.model = MixtralForCausalLM(
             config,
-            layer_gpu_expert_masks,
+            self.dynamic_expert_scheduler.residency_plan.gpu_masks(),
             weight_path=model_path,
             offload_backend=offload_backend,
             offload_backend_kwargs=self.offload_backend_kwargs,
+            residency_plan=self.dynamic_expert_scheduler.residency_plan,
+            dynamic_expert_scheduler=self.dynamic_expert_scheduler,
         )
         self.model = self.model.to(device=device, dtype=model_dtype)
             
@@ -155,6 +189,7 @@ class LLM:
             layers.append({"layer_idx": layer_idx, **hybrid_moe.diagnostics()})
         return {
             "offload_backend": self.offload_backend,
+            "dynamic_scheduler": self.dynamic_expert_scheduler.diagnostics(),
             "layer_count": len(layers),
             "layers": layers,
         }

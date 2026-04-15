@@ -1,12 +1,12 @@
 ---
 project: nano-ktrans
 created: 2026-04-07
-updated: 2026-04-14
+updated: 2026-04-15
 ---
 
 # nano-ktrans
 
-> 一个面向学习和实验的 Hybrid MoE 推理框架，当前已打通 CPU、`cuda_cpu_offload`、`pim_shadow` 主链路，并具备独立的真实 UPMEM benchmark。
+> 一个面向学习和实验的 Hybrid MoE 推理框架。当前已打通 CPU、`cuda_cpu_offload` 和实验性真实 DPU `pim` backend；新的主目标是让非专家层常驻 GPU，而专家在 GPU/PIM 间动态迁移与调度。
 
 ## 技术栈
 
@@ -17,7 +17,7 @@ updated: 2026-04-14
 
 ## 当前状态
 
-- **阶段**: 🟡 Hybrid offload 已跑通，真实 PIM expert backend 仍待接入
+- **阶段**: 🟡 最小真实 PIM 数值链路已跑通，正在从“静态专家放置”转向“GPU/PIM 动态专家调度”
 - **当前焦点**: → [current-focus.md](development/current-focus.md)
 
 ## 知识库导航

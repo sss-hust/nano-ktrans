@@ -13,7 +13,7 @@ def normalize_offload_backend_name(name: str | None) -> str:
     normalized = name.lower().replace("-", "_")
     aliases = {
         "cpu": "cpu",
-        "pim": "pim_shadow",
+        "pim": "pim",
         "pim_shadow": "pim_shadow",
     }
     if normalized not in aliases:
@@ -44,6 +44,9 @@ class ExpertOffloadBackend(ABC):
 
     @abstractmethod
     def sync_forward(self, hidden_states: torch.Tensor, cuda_stream: int | None) -> torch.Tensor:
+        raise NotImplementedError
+
+    def update_gpu_expert_mask(self, gpu_experts_mask: torch.Tensor) -> None:
         raise NotImplementedError
 
     def diagnostics(self) -> dict[str, Any]:
