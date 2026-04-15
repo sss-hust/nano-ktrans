@@ -132,6 +132,10 @@ tags: [architecture]
     - 直接按 lifecycle=`ready` 抽取当前层可消费的 promotion
     - 其余 pending op 留在队列中
     这样 decode 主路径不再自己实现 ready subset 过滤，控制语义也更集中。
+20. materialization 侧的 ready 轮询也做了收敛：
+    - 预取 future 完成时先进入 completion queue
+    - `poll_ready()` 只消费 completion queue，而不是每次扫描所有 future
+    这让后台 prefetch 的完成路径更接近真正的 completion event。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

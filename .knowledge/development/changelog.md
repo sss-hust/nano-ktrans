@@ -142,3 +142,8 @@ tags: [changelog]
 
 - migration manager 新增 `take_ready_layer()` 和 `total_ready_drains` 统计。
 - decode ready-only 路径已改成直接消费 migration manager 的 ready 子集，而不是由 `HybridMoE` 手写过滤逻辑。
+
+<!-- updated: 2026-04-15 11:39 -->
+
+- `ExpertMaterializationManager` 新增 completion queue；后台 prefetch 完成后会先进入 queue，再由 `poll_ready()` 消费。
+- benchmark 摘要新增 `prefetch_completion_events`，用于区分“future 已完成”和“前台已轮询并入 cache”。

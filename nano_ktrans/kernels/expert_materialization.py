@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
+from collections import deque
 from threading import Lock
 from typing import Dict, Optional, Tuple
 
@@ -47,11 +48,13 @@ class ExpertMaterializationManager:
         )
         self._cache: OrderedDict[ExpertKey, ExpertWeights] = OrderedDict()
         self._futures: Dict[ExpertKey, Future] = {}
+        self._ready_queue = deque()
         self._lock = Lock()
 
         self.prefetch_submitted = 0
         self.prefetch_resolved = 0
         self.prefetch_polled_ready = 0
+        self.prefetch_completion_events = 0
         self.cache_hits = 0
         self.sync_loads = 0
         self.cache_evictions = 0
@@ -87,6 +90,14 @@ class ExpertMaterializationManager:
             self._cache.popitem(last=False)
             self.cache_evictions += 1
 
+    def _on_prefetch_done(self, key: ExpertKey, future: Future) -> None:
+        with self._lock:
+            tracked = self._futures.get(key)
+            if tracked is not future:
+                return
+            self._ready_queue.append(key)
+            self.prefetch_completion_events += 1
+
     def prefetch(self, layer_idx: int, expert_idx: int) -> bool:
         key = self._cache_key(layer_idx, expert_idx)
         with self._lock:
@@ -98,7 +109,9 @@ class ExpertMaterializationManager:
                 self._store_cache(key, weights)
                 self.prefetch_resolved += 1
                 return True
-            self._futures[key] = self.executor.submit(self._load_expert, layer_idx, expert_idx)
+            future = self.executor.submit(self._load_expert, layer_idx, expert_idx)
+            self._futures[key] = future
+            future.add_done_callback(lambda done_future, ready_key=key: self._on_prefetch_done(ready_key, done_future))
             return True
 
     def get_expert(self, layer_idx: int, expert_idx: int) -> ExpertWeights:
@@ -128,13 +141,16 @@ class ExpertMaterializationManager:
 
     def poll_ready(self) -> list[ExpertKey]:
         ready_keys: list[ExpertKey] = []
-        futures: list[tuple[ExpertKey, Future]] = []
         with self._lock:
-            for key, future in list(self._futures.items()):
-                if future.done():
-                    futures.append((key, future))
+            queued_keys = []
+            while self._ready_queue:
+                queued_keys.append(self._ready_queue.popleft())
 
-        for key, future in futures:
+        for key in queued_keys:
+            with self._lock:
+                future = self._futures.get(key)
+            if future is None:
+                continue
             weights = future.result()
             with self._lock:
                 self._futures.pop(key, None)
@@ -154,6 +170,7 @@ class ExpertMaterializationManager:
                 "prefetch_submitted": self.prefetch_submitted,
                 "prefetch_resolved": self.prefetch_resolved,
                 "prefetch_polled_ready": self.prefetch_polled_ready,
+                "prefetch_completion_events": self.prefetch_completion_events,
                 "cache_hits": self.cache_hits,
                 "sync_loads": self.sync_loads,
                 "cache_evictions": self.cache_evictions,

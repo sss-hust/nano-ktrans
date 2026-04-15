@@ -1391,4 +1391,5 @@ class TestDynamicScheduler:
         diagnostics = manager.diagnostics()
         assert (0, 1) in ready_keys
         assert diagnostics["prefetch_polled_ready"] >= 1
+        assert diagnostics["prefetch_completion_events"] >= 1
         assert manager.has_cached(0, 1) is True
