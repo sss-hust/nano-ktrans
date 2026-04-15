@@ -43,3 +43,14 @@ tags: [changelog]
 - <!-- updated: 2026-04-15 06:23 --> **[dynamic-prefill-hook]** `HybridMoE` 现在会在 prefill 阶段基于路由结果更新调度器热度，并允许临时提升 GPU expert budget；当前只更新驻留状态与诊断，真实迁移数据面仍待实现。
 - <!-- updated: 2026-04-15 06:31 --> **[migration-queue-semantics]** 调整动态调度语义：`HybridMoE` 现在只向 backend 排队 migration plan，不再在没有真实 GPU/PIM 数据面的前提下直接修改有效 `gpu_experts_mask`，避免控制面和执行面状态不一致。
 - <!-- updated: 2026-04-15 06:40 --> **[migration-manager]** 新增 `expert_migration.py`，为 backend 提供每层 migration queue 与阶段历史记录；动态调度相关单测已补到 `tests/test_core.py`。
+<!-- updated: 2026-04-15 06:58 -->
+
+## 2026-04-15
+
+- 新增 `nano_ktrans/layers/expert_mlp.py`，把 shared expert module 定义从 `mixtral.py` 抽离，供模型初始化和运行时 expert materialization 共用。
+- `ExpertWeightLoader` 新增单 expert 加载接口，支持 decode 阶段按需从 safetensors 拉起单个 expert 权重。
+- `HybridMoE` 新增最小 decode 迁移执行数据面：
+  - drain 本层 migration queue
+  - promotion 时动态构建 GPU expert 并注入 `gpu_experts`
+  - demotion 时从 `gpu_experts` 移除并更新 mask
+- 新增测试覆盖 decode 阶段 migration queue 被实际执行的路径。

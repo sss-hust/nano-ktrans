@@ -100,6 +100,45 @@ class ExpertWeightLoader:
 
         return result
 
+    def load_expert(
+        self,
+        layer_idx: int,
+        expert_idx: int,
+        key_template: str = "model.layers.{layer}.block_sparse_moe.experts.{expert}.{proj}.weight",
+        proj_name_map: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        加载单个专家的权重。
+
+        Returns:
+            {
+                "gate": Tensor[intermediate, hidden],
+                "up":   Tensor[intermediate, hidden],
+                "down": Tensor[hidden, intermediate],
+            }
+        """
+        proj_map = proj_name_map or {"gate": "w1", "up": "w3", "down": "w2"}
+        result: Dict[str, torch.Tensor] = {}
+
+        for proj_name, w_name in proj_map.items():
+            key = key_template.format(layer=layer_idx, expert=expert_idx, proj=w_name)
+            if key not in self._key_to_file:
+                raise KeyError(
+                    f"Weight key '{key}' not found in safetensors files. "
+                    f"Available keys can be listed with the safetensors CLI."
+                )
+            file_path = self._key_to_file[key]
+            with safe_open(file_path, "pt", "cpu") as sf:
+                tensor = sf.get_tensor(key)
+                if proj_name == "gate_up":
+                    gate, up = tensor.chunk(2, dim=0)
+                    result["gate"] = gate.contiguous()
+                    result["up"] = up.contiguous()
+                else:
+                    result[proj_name] = tensor.contiguous()
+
+        return result
+
     def load_layer_experts_stacked(
         self,
         layer_idx: int,

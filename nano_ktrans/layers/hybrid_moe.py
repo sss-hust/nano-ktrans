@@ -22,8 +22,10 @@ from typing import Optional, Dict
 from nano_ktrans.kernels.cpu_moe import CPUMoEBackend
 from nano_ktrans.kernels.offload_backend import normalize_offload_backend_name
 from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+from nano_ktrans.kernels.weight_loader import ExpertWeightLoader
+from nano_ktrans.layers.expert_mlp import build_expert_module, load_expert_weights
 from nano_ktrans.scheduler import DynamicExpertScheduler
-from nano_ktrans.utils.expert_runtime_state import ExpertResidencyPlan
+from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
 from nano_ktrans.utils.context import get_context
 
 
@@ -67,6 +69,8 @@ class HybridMoE(nn.Module):
         normalize_topk_prob: bool = True,
         expert_key_template: Optional[str] = None,
         expert_proj_names: Optional[Dict[str, str]] = None,
+        experts_are_packed: bool = False,
+        hidden_act: str = "silu",
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -79,9 +83,21 @@ class HybridMoE(nn.Module):
         self.residency_plan = residency_plan
         self.router_use_softmax = router_use_softmax
         self.normalize_topk_prob = normalize_topk_prob
+        self.experts_are_packed = experts_are_packed
+        self.hidden_act = hidden_act
+        self.weight_path = weight_path
+        self.expert_key_template = (
+            expert_key_template
+            or "model.layers.{layer}.block_sparse_moe.experts.{expert}.{proj}.weight"
+        )
+        self.expert_proj_names = expert_proj_names
         self.has_cpu_experts = bool((~gpu_experts_mask.bool()).any().item())
         self.offload_backend_name = normalize_offload_backend_name(offload_backend)
         self.offload_backend_kwargs = offload_backend_kwargs or {}
+        self._weight_loader: Optional[ExpertWeightLoader] = None
+        self.applied_migration_ops = 0
+        self.last_applied_migration_phase = ""
+        self.applied_migration_history: list[dict[str, object]] = []
 
         # 只有存在离线 CPU 专家时才初始化 CPU backend。
         self.offload_backend = None
@@ -111,6 +127,113 @@ class HybridMoE(nn.Module):
             else:
                 self.offload_backend = CPUMoEBackend(**backend_kwargs)
 
+    def _get_weight_loader(self) -> ExpertWeightLoader:
+        if self._weight_loader is None:
+            self._weight_loader = ExpertWeightLoader(self.weight_path)
+        return self._weight_loader
+
+    def _build_runtime_expert(self, expert_idx: int, device: torch.device, dtype: torch.dtype) -> nn.Module:
+        expert = build_expert_module(
+            hidden_size=self.hidden_size,
+            intermediate_size=self.offload_backend.intermediate_size if self.offload_backend is not None else 0,
+            hidden_act=self.hidden_act,
+            experts_are_packed=self.experts_are_packed,
+        )
+        expert = expert.to(device=device, dtype=dtype)
+        weights = self._get_weight_loader().load_expert(
+            self.layer_idx,
+            expert_idx,
+            key_template=self.expert_key_template,
+            proj_name_map=self.expert_proj_names,
+        )
+        load_expert_weights(expert, weights)
+        expert.eval()
+        return expert
+
+    def _synchronize_gpu_mask(self) -> None:
+        if self.residency_plan is not None:
+            layer_state = self.residency_plan.layer_state(self.layer_idx)
+            self.gpu_experts_mask = layer_state.gpu_mask().to(device=self.gpu_experts_mask.device)
+        if self.offload_backend is not None:
+            self.offload_backend.update_gpu_expert_mask(self.gpu_experts_mask)
+
+    def _promote_expert_to_gpu(self, expert_idx: int, device: torch.device, dtype: torch.dtype) -> bool:
+        expert_key = str(expert_idx)
+        if expert_key not in self.gpu_experts:
+            self.gpu_experts[expert_key] = self._build_runtime_expert(expert_idx, device, dtype)
+        self.gpu_experts_mask[expert_idx] = True
+        if self.residency_plan is not None:
+            self.residency_plan.layer_state(self.layer_idx).residency[expert_idx] = 1
+        return True
+
+    def _demote_expert_from_gpu(self, expert_idx: int, dst: ExpertResidency) -> bool:
+        expert_key = str(expert_idx)
+        if expert_key in self.gpu_experts:
+            del self.gpu_experts[expert_key]
+        self.gpu_experts_mask[expert_idx] = False
+        if self.residency_plan is not None:
+            state = self.residency_plan.layer_state(self.layer_idx)
+            state.residency[expert_idx] = 2 if dst == ExpertResidency.PIM else 3
+        return True
+
+    def _apply_queued_migrations(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        phase: str,
+    ) -> None:
+        if (
+            phase != "decode"
+            or self.offload_backend is None
+            or self.dynamic_expert_scheduler is None
+            or not self.dynamic_expert_scheduler.enabled
+        ):
+            return
+
+        queued_ops = self.offload_backend.migration_manager.drain_layer(self.layer_idx)
+        if not queued_ops:
+            return
+
+        max_apply = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+        applied = 0
+        deferred = []
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+
+        for op in queued_ops:
+            if applied >= max_apply:
+                deferred.append(op)
+                continue
+
+            if op.dst == ExpertResidency.GPU:
+                applied_ok = self._promote_expert_to_gpu(op.expert_idx, device, dtype)
+            elif op.src == ExpertResidency.GPU:
+                applied_ok = self._demote_expert_from_gpu(op.expert_idx, op.dst)
+            else:
+                applied_ok = False
+
+            if applied_ok:
+                applied += 1
+                self.applied_migration_history.append(
+                    {
+                        "phase": phase,
+                        "expert_idx": op.expert_idx,
+                        "src": op.src.value,
+                        "dst": op.dst.value,
+                        "reason": op.reason,
+                    }
+                )
+            else:
+                deferred.append(op)
+
+        if deferred:
+            self.offload_backend.queue_migration_plan(deferred, phase=f"{phase}_deferred")
+
+        if applied:
+            self.applied_migration_ops += applied
+            self.last_applied_migration_phase = phase
+            self._synchronize_gpu_mask()
+
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
         """
         前向计算。
@@ -134,12 +257,14 @@ class HybridMoE(nn.Module):
 
         context = get_context()
         phase = "prefill" if context.is_prefill else "decode"
+        self._apply_queued_migrations(hidden_states, phase=phase)
+
         if self.dynamic_expert_scheduler is not None and self.dynamic_expert_scheduler.enabled:
             self.dynamic_expert_scheduler.observe(self.layer_idx, topk_ids, phase=phase)
             planned_ops = self.dynamic_expert_scheduler.plan_layer(self.layer_idx, phase=phase)
             if planned_ops and self.offload_backend is not None:
                 # 当前系统只有迁移控制面，没有真实 GPU/PIM 权重迁移数据面。
-                # 因此这里先只排队迁移计划，避免提前修改有效驻留状态导致计算路径失真。
+                # 这里先排队；decode 阶段会消费队列并执行最小 GPU materialize/demote。
                 self.offload_backend.queue_migration_plan(planned_ops, phase=phase)
 
         batch_seq_len, hidden_dim = hidden_states.shape
@@ -219,6 +344,10 @@ class HybridMoE(nn.Module):
             "layer_idx": self.layer_idx,
             "offload_backend_name": self.offload_backend_name,
             "has_cpu_experts": self.has_cpu_experts,
+            "applied_migration_ops": self.applied_migration_ops,
+            "last_applied_migration_phase": self.last_applied_migration_phase,
+            "runtime_gpu_experts": sorted(int(expert_idx) for expert_idx in self.gpu_experts.keys()),
+            "gpu_experts_mask_sum": int(self.gpu_experts_mask.bool().sum().item()),
             "layer_residency": layer_residency,
             "pending_migrations": pending_migrations,
             "backend": None if self.offload_backend is None else self.offload_backend.diagnostics(),

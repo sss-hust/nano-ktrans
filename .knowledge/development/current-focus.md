@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 06:23
+updated: 2026-04-15 06:58
 ---
 
 # 🔥 当前工作焦点
@@ -17,6 +17,7 @@ updated: 2026-04-15 06:23
 - [ ] 为 CPU offload 接入 `kt-kernel` 或等价高性能实现
 - [ ] 将系统目标从静态专家放置切换到 GPU/PIM 动态专家调度
 - [x] 落第一版 prefill 保护策略，避免 prefill 大批量 token 直接打到 PIM
+- [x] 落第一版 decode 迁移执行数据面：可在运行时 materialize / demote GPU experts
 
 ## 阻塞项
 
@@ -31,6 +32,7 @@ updated: 2026-04-15 06:23
 - 当前动态调度还停留在“观察热度 + 生成迁移计划 + 更新驻留表”，真实 GPU/PIM 权重迁移数据面还没接入
 - 当前动态调度已改成“观察热度 + 生成迁移计划 + 迁移计划排队”，不会再在没有真实数据面的前提下直接篡改有效驻留状态
 - 当前迁移管理器已能按层记录 `prefill` / `decode` 迁移计划，但仍未真正执行 GPU<->PIM 权重搬运
+- 当前 decode 阶段已可消费迁移队列，并把单 expert 从 checkpoint 动态 materialize 到 GPU `ModuleDict`；但这仍是同步、逐 expert 的最小实现，还没有异步预取与 overlap
 - Python 侧直接驱动 UPMEM 的尝试仍不稳定，当前更可靠的是独立 C host benchmark
 - `HTTP_PROXY` / `HTTPS_PROXY` 指向 `127.0.0.1:7897` 时会阻塞 `pip install`
 
@@ -41,13 +43,22 @@ updated: 2026-04-15 06:23
 - 在保持 `linear` 默认不变的前提下，继续扩大真实 PIM backend 的 prefill batch 支持范围
 - 设计动态专家调度骨架：专家驻留表、热度统计、promotion/demotion 队列和异步迁移接口
 - 将 `gpu_experts_mask` 从静态初始化参数改成运行时可更新的驻留状态
-- 实现真实 promotion / demotion 数据面：
-  - GPU resident expert 的运行时构建与替换
-  - PIM resident expert 的常驻句柄与回写
-  - 迁移和计算的 overlap 控制
+- 继续扩展 promotion / demotion 数据面：
+  - 将当前同步的 GPU expert materialization 升级为异步预取
+  - 为 PIM resident expert 增加常驻句柄与回写
+  - 接上迁移和 decode 计算的 overlap 控制
 - 对比 `cpu`、`cuda_cpu_offload`、`pim` 三条链路的 prefill/decode 延迟与 offload 命中分布
 - 继续补充架构说明、依赖说明和版本化文档
 
 ## 本轮对话上下文
 
 > 当前 repo 已完成新阶段：CPU 基线、Qwen3 真实权重适配、`cuda_cpu_offload` 真机验证、`pim_shadow` 主链路接入、真实 UPMEM 多 rank benchmark、最小真实 DPU linear backend、`cuda_pim` 真机端到端验证，以及 fused expert DPU kernel 的第一版。新的主目标已经切换为“GPU 保持主干层，专家在 GPU/PIM 间动态迁移并与传输 overlap”，因此下一阶段重点不再只是单 kernel 优化，而是系统级调度改造。
+
+<!-- updated: 2026-04-15 06:58 -->
+
+## 本轮新增进展
+
+- `HybridMoE` 现在会在 `decode` 阶段优先 drain 本层 migration queue，并按 `decode_promote_k` 应用部分迁移。
+- promotion 路径已能通过 `ExpertWeightLoader.load_expert()` 从 safetensors 加载单 expert 权重，动态构建 GPU expert module，并更新运行时 `gpu_experts_mask`。
+- demotion 路径已能从运行时 `gpu_experts` 中移除对应 expert，并同步更新 offload backend 的 mask。
+- 这意味着系统已经从“只有迁移控制面”推进到“最小可执行 GPU materialization 数据面”，但仍未实现 GPU<->PIM 异步拷贝和 overlap。

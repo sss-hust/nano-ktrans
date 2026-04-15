@@ -91,3 +91,37 @@ tags: [pitfalls, debugging]
 - 现状：`HybridMoE` 已支持选择 `pim_shadow` backend，并会在主推理链路里统计可见 PIM rank、offloaded token/expert pair 等信息。
 - 语义：当前数值结果仍由 CPU fallback 保底，PIM 真实 DPU 计算仍停留在独立 microbenchmark。
 - 影响：现在已经能做“推理主链路 + PIM 可见性/统计”联动，但还不能把它解释成“专家 MLP 已在 DPU 上执行”。
+
+<!-- updated: 2026-04-15 00:35 -->
+
+## Python `dpu.driver` 仍不够稳定，真实 PIM 主链路优先走 C host bridge
+
+- 现象：在当前机器上，`dpu.driver.DpuSet(nr_ranks=1, profile='backend=hw')` 仍会报 `fetch_program: ERROR: cannot find file` 和 `DpuError b'system error'`。
+- 影响：即使真实 `/dev/dpu_rank*` 可见，Python 原生驱动目前仍不适合作为推理主链路的核心桥接层。
+- 规避：当前 repo 新增了 `pim_native/host_bridge.c` + `pim_linear_runtime.py` 方案，通过共享库和 C host bridge 来调用真实 DPU 线性 kernel。
+
+<!-- updated: 2026-04-15 05:22 -->
+
+## fused expert DPU kernel 不能按输出行重复重算 hidden
+
+- 现象：fused expert 第一版虽然数值上可用，但单 expert microbench 需要二十到三十秒，远慢于三次 DPU linear 的几十毫秒。
+- 根因：旧实现把 `hidden = silu(gate) * up` 的计算放在输出行循环内部，导致每个输出行都重复扫描 `gate/up` 权重和输入，算法复杂度被放大。
+- 修复：改成先在 DPU WRAM 中计算完整 hidden 向量，再统一用于 `down_proj`；性能已从秒级降到亚秒级，但当前仍慢于 `linear3`，说明后续瓶颈已转到 `down_proj` 阶段的数据流设计。
+
+<!-- updated: 2026-04-15 05:48 -->
+
+## fused expert 仅按 hidden 分片会浪费大量 DPU
+
+- 现象：即使 fused kernel 已经不再重复重算 hidden，`rank_count=4` 时 `expert_runtime_dpu_count` 很大，但真正参与单 expert 的 DPU 仍然偏少，收益有限。
+- 根因：如果只沿 intermediate 维切分，每个 hidden shard 只对应一个输出全矩阵，`output_dim` 方向没有并行展开，很多 DPU 闲置。
+- 修复：host bridge 改成 `hidden_group x row_group` 二维分片，按部分 hidden 和部分 output row 同时切块，再在 host 端做 partial sum 聚合。
+
+<!-- updated: 2026-04-15 06:58 -->
+
+## 动态调度不能只改驻留表，不改运行时 expert 模块
+
+- 现象：如果只在 scheduler/residency plan 里把某个 expert 标成 `GPU`，但没有真的把对应 expert module 构建并注入 `HybridMoE.gpu_experts`，前向时这个 expert 仍然不会走 GPU 路径。
+- 根因：当前推理执行依赖两套状态同时一致：
+  - `gpu_experts_mask`
+  - `gpu_experts` 中真实存在的模块对象
+- 修复：当前最小可执行数据面已经改成 decode 阶段先 drain migration queue，再同步 materialize / demote GPU experts，并立即调用 backend 的 `update_gpu_expert_mask()`。

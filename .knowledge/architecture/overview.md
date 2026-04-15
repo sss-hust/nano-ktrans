@@ -15,9 +15,13 @@ tags: [architecture]
 - `nano_ktrans/models/mixtral.py`
   主模型骨架。当前用于承载 Mixtral、Qwen2-MoE、Qwen3-MoE 这几类共享的 decoder/MoE 结构。
 - `nano_ktrans/layers/hybrid_moe.py`
-  Hybrid MoE 调度层。当前负责区分 hot experts 和 offloaded experts，并在 GPU 输出和 offload 输出之间合并结果；后续要升级为动态专家驻留与迁移的核心调度层。
+  Hybrid MoE 调度层。当前负责区分 hot experts 和 offloaded experts，并在 GPU 输出和 offload 输出之间合并结果；现已支持在 `decode` 阶段消费迁移计划并动态 materialize / demote GPU experts，是动态专家驻留与迁移的核心调度层。
 - `nano_ktrans/kernels/offload_backend.py`
-  offload 扩展点，定义 `ExpertOffloadBackend` 抽象和 backend 命名规范化逻辑；后续应承载专家驻留状态、迁移计划和异步数据面接口。
+  offload 扩展点，定义 `ExpertOffloadBackend` 抽象和 backend 命名规范化逻辑；当前已承载迁移计划排队与分层 migration manager，后续还需要异步数据面接口。
+- `nano_ktrans/kernels/weight_loader.py`
+  现已支持按层按 expert 加载单个专家权重，供 decode 阶段的动态 GPU promotion 使用。
+- `nano_ktrans/layers/expert_mlp.py`
+  抽出的共享 expert 模块定义，供模型初始化和运行时 expert materialization 复用，避免 `HybridMoE` 与 `mixtral.py` 之间的循环依赖。
 - `nano_ktrans/kernels/cpu_moe.py`
   当前唯一的数值正确 offload backend，实现 CPU fallback expert 计算。
 - `nano_ktrans/kernels/pim_moe.py`
@@ -41,6 +45,22 @@ tags: [architecture]
 4. 冷 expert 请求通过 `ExpertOffloadBackend` 派发。
 5. `CPUMoEBackend`、`PIMMoEBackend(pim_shadow)` 或 `PIMMoEBackend(pim)` 处理 offloaded expert 请求。
 6. offload 输出与 GPU 输出合并，再交还推理引擎继续 decode。
+
+### 当前 decode 迁移执行链
+
+1. `prefill` 或前几步 `decode` 先由 `DynamicExpertScheduler` 观察路由热度并生成迁移计划。
+2. `HybridMoE` 将迁移计划排入 backend 的 `migration_manager`。
+3. 到下一次 `decode` 进入本层时，`HybridMoE` 先 drain 本层队列。
+4. 对 `PIM/CPU -> GPU` 的 promotion：
+   - 使用 `ExpertWeightLoader.load_expert()` 从 checkpoint 读取单 expert 权重
+   - 运行时构建 expert module
+   - 注入 `gpu_experts` 并更新 `gpu_experts_mask`
+5. 对 `GPU -> PIM/CPU` 的 demotion：
+   - 从 `gpu_experts` 移除模块
+   - 更新驻留表与 backend mask
+6. 之后再进入本层正常的 GPU/offload 混合计算。
+
+这一步仍是同步、逐 expert 的最小数据面，尚未包含真实 GPU<->PIM 异步传输，也没有与计算 overlap。
 
 ## 目标演进方向
 

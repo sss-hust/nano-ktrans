@@ -10,6 +10,7 @@ from torch import nn
 
 from nano_ktrans.layers.norm import RMSNorm
 from nano_ktrans.layers.attention import Attention
+from nano_ktrans.layers.expert_mlp import SparseExpertMLP, PackedSparseExpertMLP
 from nano_ktrans.layers.linear import QKVParallelLinear, RowParallelLinear
 from nano_ktrans.layers.rotary_embedding import get_rope
 from nano_ktrans.layers.hybrid_moe import HybridMoE
@@ -20,47 +21,11 @@ from nano_ktrans.utils.expert_runtime_state import ExpertResidencyPlan
 MixtralConfig = GenericMoeConfig
 
 
-class SparseExpertMLP(nn.Module):
-    def __init__(self, config: GenericMoeConfig, intermediate_size: int):
-        super().__init__()
-        self.ffn_dim = intermediate_size
-        self.hidden_dim = config.hidden_size
-
-        self.w1 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)  # gate
-        self.w2 = nn.Linear(self.ffn_dim, self.hidden_dim, bias=False)  # down
-        self.w3 = nn.Linear(self.hidden_dim, self.ffn_dim, bias=False)  # up
-        self.hidden_act = config.hidden_act
-
-    def forward(self, hidden_states):
-        act_fn = getattr(nn.functional, self.hidden_act)
-        current_hidden_states = act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
-        current_hidden_states = self.w2(current_hidden_states)
-        return current_hidden_states
-
-
 class MixtralBlockSparseTop2MLP(SparseExpertMLP):
     """兼容旧测试和旧接口名。"""
 
     def __init__(self, config: GenericMoeConfig):
-        super().__init__(config, config.intermediate_size)
-
-
-class PackedSparseExpertMLP(nn.Module):
-    def __init__(self, config: GenericMoeConfig, intermediate_size: int):
-        super().__init__()
-        self.hidden_dim = config.hidden_size
-        self.intermediate_size = intermediate_size
-        self.gate_up_proj = nn.Parameter(
-            torch.empty(2 * self.intermediate_size, self.hidden_dim)
-        )
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_dim, bias=False)
-        self.hidden_act = config.hidden_act
-
-    def forward(self, hidden_states):
-        act_fn = getattr(nn.functional, self.hidden_act)
-        gate, up = nn.functional.linear(hidden_states, self.gate_up_proj).chunk(2, dim=-1)
-        current_hidden_states = act_fn(gate) * up
-        return self.down_proj(current_hidden_states)
+        super().__init__(config.hidden_size, config.intermediate_size, config.hidden_act)
 
 
 class MixtralAttention(nn.Module):
@@ -158,9 +123,17 @@ class MixtralDecoderLayer(nn.Module):
             for i in range(config.num_local_experts):
                 if gpu_experts_mask is not None and gpu_experts_mask[i]:
                     if config.arch.experts_are_packed:
-                        gpu_experts[str(i)] = PackedSparseExpertMLP(config, config.moe_intermediate_size)
+                        gpu_experts[str(i)] = PackedSparseExpertMLP(
+                            config.hidden_size,
+                            config.moe_intermediate_size,
+                            config.hidden_act,
+                        )
                     else:
-                        gpu_experts[str(i)] = SparseExpertMLP(config, config.moe_intermediate_size)
+                        gpu_experts[str(i)] = SparseExpertMLP(
+                            config.hidden_size,
+                            config.moe_intermediate_size,
+                            config.hidden_act,
+                        )
 
             self.hybrid_moe = HybridMoE(
                 num_experts=config.num_local_experts,
@@ -179,10 +152,16 @@ class MixtralDecoderLayer(nn.Module):
                 normalize_topk_prob=config.normalize_topk_prob,
                 expert_key_template=config.arch.expert_key_template,
                 expert_proj_names=config.arch.expert_proj_names,
+                experts_are_packed=config.arch.experts_are_packed,
+                hidden_act=config.hidden_act,
             )
 
             if config.arch.has_shared_expert and config.shared_expert_intermediate_size:
-                self.shared_expert = SparseExpertMLP(config, config.shared_expert_intermediate_size)
+                self.shared_expert = SparseExpertMLP(
+                    config.hidden_size,
+                    config.shared_expert_intermediate_size,
+                    config.hidden_act,
+                )
                 self.shared_expert_gate = nn.Linear(self.hidden_size, 1, bias=False)
             else:
                 self.shared_expert = None
@@ -192,7 +171,11 @@ class MixtralDecoderLayer(nn.Module):
             self.hybrid_moe = None
             self.shared_expert = None
             self.shared_expert_gate = None
-            self.mlp = SparseExpertMLP(config, config.intermediate_size)
+            self.mlp = SparseExpertMLP(
+                config.hidden_size,
+                config.intermediate_size,
+                config.hidden_act,
+            )
 
     def forward(
         self,
