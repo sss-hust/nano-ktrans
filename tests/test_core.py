@@ -2079,6 +2079,10 @@ class TestDynamicScheduler:
         assert diagnostics["activation_submitted"] == 1
         assert diagnostics["activation_ready"] == 1
         assert diagnostics["activation_applied"] == 1
+        assert diagnostics["pipeline_prefetch_overlap_hits"] == 1
+        assert diagnostics["pipeline_promotion_source_activated"] == 1
+        assert diagnostics["pipeline_promotion_source_warm"] == 0
+        assert diagnostics["pipeline_promotion_source_cold"] == 0
         assert layer_migration["total_activated_events"] == 1
         assert layer_migration["lifecycle"][0]["state"] == MigrationLifecycle.APPLIED.value
         assert diagnostics["activated_cache_hits"] == 1
@@ -2148,6 +2152,7 @@ class TestDynamicScheduler:
         assert diagnostics["activated_cache_hits"] == 1
         assert diagnostics["warm_cache_hits"] == 0
         assert diagnostics["activated_cache_size"] == 0
+        assert diagnostics["activation_applied"] == 2
 
     def test_hybrid_moe_activation_cache_keeps_hottest_candidates(self, tmp_path):
         from safetensors.torch import save_file
@@ -2520,6 +2525,10 @@ class TestDynamicScheduler:
                 self.pipeline_ready_applied = 10
                 self.pipeline_ready_deferred = 11
                 self.pipeline_ticks = 12
+                self.pipeline_prefetch_overlap_hits = 13
+                self.pipeline_promotion_source_activated = 14
+                self.pipeline_promotion_source_warm = 15
+                self.pipeline_promotion_source_cold = 16
                 self.warm_cache_hits = 13
                 self.warm_cache_stores = 14
                 self.warm_cache_evictions = 15
@@ -2541,6 +2550,8 @@ class TestDynamicScheduler:
         assert dummy_hybrid.prefetch_requested == 0
         assert dummy_hybrid.runtime_evictions == 0
         assert dummy_hybrid.pipeline_ticks == 0
+        assert dummy_hybrid.pipeline_prefetch_overlap_hits == 0
+        assert dummy_hybrid.pipeline_promotion_source_activated == 0
         assert dummy_hybrid.warm_cache_prebuilt == 0
         assert dummy_hybrid.activated_cache_hits == 0
         assert dummy_hybrid.activation_applied == 0

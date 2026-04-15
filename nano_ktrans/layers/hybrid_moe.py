@@ -114,6 +114,10 @@ class HybridMoE(nn.Module):
         self.pipeline_ready_applied = 0
         self.pipeline_ready_deferred = 0
         self.pipeline_ticks = 0
+        self.pipeline_prefetch_overlap_hits = 0
+        self.pipeline_promotion_source_activated = 0
+        self.pipeline_promotion_source_warm = 0
+        self.pipeline_promotion_source_cold = 0
         self.expert_warm_cache_size = max(0, int(expert_warm_cache_size))
         self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
@@ -580,11 +584,19 @@ class HybridMoE(nn.Module):
                     state=MigrationLifecycle.APPLIED,
                 )
             else:
-                self._promote_expert_to_gpu(expert_idx, device, dtype)
+                source = self._promote_expert_to_gpu(expert_idx, device, dtype)
+                if source == "activated":
+                    self.pipeline_promotion_source_activated += 1
+                elif source == "warm":
+                    self.pipeline_promotion_source_warm += 1
+                else:
+                    self.pipeline_promotion_source_cold += 1
                 self.decode_prefetch_hits += 1
                 self.prefetch_materialized += 1
                 self.applied_migration_ops += 1
                 applied += 1
+                if source != "cold":
+                    self.pipeline_prefetch_overlap_hits += 1
                 self.applied_migration_history.append(
                     {
                         "phase": phase,
@@ -684,13 +696,15 @@ class HybridMoE(nn.Module):
         if self.offload_backend is not None:
             self.offload_backend.update_gpu_expert_mask(self.gpu_experts_mask)
 
-    def _promote_expert_to_gpu(self, expert_idx: int, device: torch.device, dtype: torch.dtype) -> bool:
+    def _promote_expert_to_gpu(self, expert_idx: int, device: torch.device, dtype: torch.dtype) -> str | None:
         expert_key = str(expert_idx)
+        source = "cold"
         if expert_key not in self.gpu_experts:
             activated_module = self.activated_expert_cache.pop(expert_key, None)
             if activated_module is not None:
                 self.activated_cache_hits += 1
                 self.gpu_experts[expert_key] = activated_module.to(dtype=dtype)
+                source = "activated"
             else:
                 warm_module = self.warm_expert_cache.pop(expert_key, None)
                 if warm_module is not None:
@@ -700,12 +714,14 @@ class HybridMoE(nn.Module):
                         self.gpu_experts[expert_key] = self._activate_warm_module(warm_module, device, dtype)
                     else:
                         self.gpu_experts[expert_key] = warm_module.to(dtype=dtype)
+                    source = "warm"
                 else:
                     self.gpu_experts[expert_key] = self._build_runtime_expert(expert_idx, device, dtype)
+                    source = "cold"
         self.activation_applied += 1
         self.gpu_experts_mask[expert_idx] = True
         self._set_residency(expert_idx, ExpertResidency.GPU)
-        return True
+        return source
 
     def _demote_expert_from_gpu(self, expert_idx: int, dst: ExpertResidency) -> bool:
         expert_key = str(expert_idx)
@@ -1093,6 +1109,10 @@ class HybridMoE(nn.Module):
             "pipeline_ticks": self.pipeline_ticks,
             "pipeline_ready_applied": self.pipeline_ready_applied,
             "pipeline_ready_deferred": self.pipeline_ready_deferred,
+            "pipeline_prefetch_overlap_hits": self.pipeline_prefetch_overlap_hits,
+            "pipeline_promotion_source_activated": self.pipeline_promotion_source_activated,
+            "pipeline_promotion_source_warm": self.pipeline_promotion_source_warm,
+            "pipeline_promotion_source_cold": self.pipeline_promotion_source_cold,
             "warm_cache_hits": self.warm_cache_hits,
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,

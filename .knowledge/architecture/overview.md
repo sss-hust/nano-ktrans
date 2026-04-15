@@ -269,6 +269,11 @@ tags: [architecture]
     - 而是先按 lifecycle 优先级和 hotness 排序，再按 `decode_promote_k` 的倍数截断
     - 这样 warm cache 开始更像“promotion 的二级候选池”，而不是所有 ready expert 的公共堆积区
     这有助于把 CPU 侧 module 构建成本也压缩到更接近最终会进入 GPU 的那部分专家上。
+48. 当前 pipeline 还开始显式区分 promotion source：
+    - `activated`: 已完成 device transfer，只差 resident set 切换
+    - `warm`: 命中 CPU warm cache，但仍需一次 device activation
+    - `cold`: 仍需从 staging/checkpoint 构建 expert module
+    系统现在会把这些 source 汇总成 per-run 指标，后面就可以直接比较“有多少 promotion 已经脱离冷启动”。这对评估 PIM 路径能否追上甚至超过 `cpu+gpu` 非常关键，因为它把真正的流水线收益量化出来了。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

@@ -40,6 +40,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "pipeline_ticks": 0,
         "pipeline_ready_applied": 0,
         "pipeline_ready_deferred": 0,
+        "pipeline_prefetch_overlap_hits": 0,
+        "pipeline_promotion_source_activated": 0,
+        "pipeline_promotion_source_warm": 0,
+        "pipeline_promotion_source_cold": 0,
         "activation_submitted": 0,
         "activation_ready": 0,
         "activation_applied": 0,
@@ -94,6 +98,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["pipeline_ticks"] += int(layer.get("pipeline_ticks", 0))
         summary["pipeline_ready_applied"] += int(layer.get("pipeline_ready_applied", 0))
         summary["pipeline_ready_deferred"] += int(layer.get("pipeline_ready_deferred", 0))
+        summary["pipeline_prefetch_overlap_hits"] += int(layer.get("pipeline_prefetch_overlap_hits", 0))
+        summary["pipeline_promotion_source_activated"] += int(
+            layer.get("pipeline_promotion_source_activated", 0)
+        )
+        summary["pipeline_promotion_source_warm"] += int(layer.get("pipeline_promotion_source_warm", 0))
+        summary["pipeline_promotion_source_cold"] += int(layer.get("pipeline_promotion_source_cold", 0))
         summary["activation_submitted"] += int(layer.get("activation_submitted", 0))
         summary["activation_ready"] += int(layer.get("activation_ready", 0))
         summary["activation_applied"] += int(layer.get("activation_applied", 0))

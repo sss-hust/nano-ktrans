@@ -259,6 +259,10 @@ class LLM:
             hybrid_moe.pipeline_ready_applied = 0
             hybrid_moe.pipeline_ready_deferred = 0
             hybrid_moe.pipeline_ticks = 0
+            hybrid_moe.pipeline_prefetch_overlap_hits = 0
+            hybrid_moe.pipeline_promotion_source_activated = 0
+            hybrid_moe.pipeline_promotion_source_warm = 0
+            hybrid_moe.pipeline_promotion_source_cold = 0
             hybrid_moe.warm_cache_hits = 0
             hybrid_moe.warm_cache_stores = 0
             hybrid_moe.warm_cache_evictions = 0

@@ -55,6 +55,7 @@ updated: 2026-04-16 02:40
 - [x] `decode_require_prefetch_ready` 模式下，resident-tier 直接 stage 现在也不会被同一步立即消费，而是等下一次 refresh/pipeline 再推进到 ready
 - [x] benchmark run 现在会在每次生成前重置 offload runtime 计数，单次 run 的 scheduler summary 不再混入前序 warmup / 历史 step 噪音
 - [x] ready expert 的 prebuild 现在也开始按 hotness 和 decode 预算裁剪，只为更有希望进入 activation/applied 的候选构建 module
+- [x] pipeline 现在会按 promotion source 区分 `activated/warm/cold`，并直接统计“非冷路径命中”次数，便于判断 overlap 是否真的开始生效
 
 ## 阻塞项
 
@@ -95,6 +96,7 @@ updated: 2026-04-16 02:40
 - 当前 strict ready-only 语义已经覆盖 resident staging，但 `prefetching -> ready` 仍然依赖前台 refresh，而不是真 completion event 驱动
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总
 - 当前 prebuild 已做候选裁剪，但 warm cache 还没有独立的“低优先级淘汰”策略，仍然主要依赖容量上限和 LRU
+- 当前已经能量化 promotion source，但 benchmark 还缺少跨 profile 的自动排名/对比表
 - 当前 migration queue 已能输出：
   - `total_enqueued_ops`
   - `total_deduped_ops`
