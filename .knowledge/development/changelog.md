@@ -153,3 +153,8 @@ tags: [changelog]
 - `HybridMoE.forward()` 不再每层自行轮询 ready prefetch。
 - `SimpleEngine` 现在会在每次 `prefill` / `decode_step` 进入模型前统一调用 `MixtralModel.refresh_offload_state()`，将 ready 刷新上移到 token-step 级别。
 - 新增对应测试，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `49 passed`。
+
+<!-- updated: 2026-04-15 11:50 -->
+
+- `SimpleEngine` 新增统一 `_refresh_offload_state()` helper，full prefill、chunked prefill 和 decode 现在共用同一 refresh 入口。
+- 新增对应测试，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `50 passed`。

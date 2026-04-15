@@ -416,6 +416,29 @@ class TestContext:
         assert ctx.cache_seqlens is None
 
 
+class TestSimpleEngine:
+    def test_refresh_offload_state_helper_uses_model_hook(self):
+        from nano_ktrans.engine.simple_engine import SimpleEngine
+
+        class DummyInnerModel:
+            def __init__(self):
+                self.calls = 0
+
+            def refresh_offload_state(self):
+                self.calls += 1
+                return 7
+
+        class DummyOuterModel:
+            def __init__(self):
+                self.model = DummyInnerModel()
+
+        engine = SimpleEngine.__new__(SimpleEngine)
+        engine.model = DummyOuterModel()
+
+        assert engine._refresh_offload_state() == 7
+        assert engine.model.model.calls == 1
+
+
 # ============================================================
 # Test 7: Weight Loader (file-based, no GPU needed)
 # ============================================================

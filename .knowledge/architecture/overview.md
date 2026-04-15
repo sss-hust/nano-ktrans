@@ -140,6 +140,11 @@ tags: [architecture]
     - `SimpleEngine.prefill()` / `decode_step()` 进入模型前先统一刷新一次
     - `MixtralModel.refresh_offload_state()` 再遍历各层 `HybridMoE`
     这样同一个 token step 只做一次全局 ready 刷新，而不是每层重复触发。
+22. `SimpleEngine` 现在还抽出了统一 `_refresh_offload_state()` hook：
+    - full prefill
+    - chunked prefill
+    - decode
+    都通过同一入口触发 runtime ready 刷新，避免三处逻辑继续分叉。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

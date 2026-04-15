@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 11:45
+updated: 2026-04-15 11:50
 ---
 
 # 🔥 当前工作焦点
@@ -35,6 +35,7 @@ updated: 2026-04-15 11:45
 - [x] migration manager 已支持 ready-only drain，decode 不再手写 ready subset 过滤逻辑
 - [x] materialization 预取完成已接入 completion queue，ready 轮询不再扫描全部 future
 - [x] ready 轮询已从 `HybridMoE.forward()` 入口上移到 engine/model 层，避免每层重复轮询
+- [x] `SimpleEngine` 已抽出统一 offload refresh hook，prefill full/chunked 与 decode 共用同一入口
 
 ## 阻塞项
 
