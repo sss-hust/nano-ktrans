@@ -823,12 +823,14 @@ class TestDynamicScheduler:
         )
         manager.mark_state(0, 3, state=MigrationLifecycle.PREFETCHING, phase="decode")
         manager.mark_state(0, 3, state=MigrationLifecycle.READY, phase="decode")
+        manager.mark_state(0, 3, state=MigrationLifecycle.WARMED, phase="decode")
         manager.mark_state(0, 3, state=MigrationLifecycle.APPLIED, phase="decode")
 
         diagnostics = manager.diagnostics()
         layer_diag = diagnostics["layers"][0]
         assert layer_diag["total_prefetching_events"] == 1
         assert layer_diag["total_ready_events"] == 1
+        assert layer_diag["total_warmed_events"] == 1
         assert layer_diag["total_applied_events"] == 1
         assert layer_diag["lifecycle_state_counts"]["applied"] == 1
         assert layer_diag["lifecycle"][0]["state"] == "applied"
@@ -1972,9 +1974,12 @@ class TestDynamicScheduler:
             dtype=torch.float32,
         )
         diagnostics = hybrid.diagnostics()
+        layer_migration = diagnostics["backend"]["migration_manager"]["layers"][0]
 
         assert stats["warm_prebuilt"] == 1
         assert build_calls == [1]
         assert diagnostics["warm_cache_prebuilt"] == 1
         assert diagnostics["warm_cache_hits"] == 1
+        assert layer_migration["total_warmed_events"] == 1
+        assert diagnostics["backend"]["migration_manager"]["layers"][0]["lifecycle"][0]["state"] == "applied"
         assert diagnostics["warm_cache_device_transfers"] == 1

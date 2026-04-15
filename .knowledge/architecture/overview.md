@@ -209,6 +209,11 @@ tags: [architecture]
     - promotion 时才把 warm module 激活到目标 device
     - 因此 pipeline hook 负责“对象准备”，而 decode promotion 更像“最后一跳激活”
     这比一开始直接在 GPU 上 build module 更适合后续接真正的异步拷贝和独立 stream。
+37. 为了把这个阶段描述得更清楚，migration lifecycle 现在显式增加了 `warmed`：
+    - `ready` 表示权重/数据已经可用
+    - `warmed` 表示对应 expert module 也已经预构建并进入 warm cache
+    - `applied` 则表示它已经真正进入 GPU resident set 并可被本步计算消费
+    这样后续 benchmark 和诊断就能分辨系统瓶颈到底还卡在“数据到位”，还是已经推进到了“对象构建完成但尚未激活”。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

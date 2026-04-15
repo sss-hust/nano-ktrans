@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-16 02:25
+updated: 2026-04-16 02:40
 ---
 
 # 🔥 当前工作焦点
@@ -45,6 +45,7 @@ updated: 2026-04-16 02:25
 - [x] GPU demotion 现在支持 warm expert cache，短时间内回迁的热点 expert 可避免重复模块构建
 - [x] ready expert 现在可以在 token-step pipeline 中提前 prebuild 到 warm cache，进一步压缩 applied 时的 build/load 开销
 - [x] warm cache 的 prebuild 现在固定落在 CPU，再在 promotion 时执行单次 device transfer，避免 prebuild 阶段污染 GPU 关键路径
+- [x] migration lifecycle 现在显式区分 `ready` 和 `warmed`，可以单独观察“数据 ready”和“模块已预构建”这两个阶段
 
 ## 阻塞项
 

@@ -189,3 +189,4 @@ tags: [changelog]
 - <!-- updated: 2026-04-16 02:10 --> **[ready-prebuild-tests]** 新增单测覆盖 `READY` expert 在 pipeline hook 中被 prebuild，再由 promotion 直接命中 warm cache 的路径；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `58 passed`。
 - <!-- updated: 2026-04-16 02:25 --> **[cpu-prebuild]** ready expert 的 prebuild 现在固定在 CPU 上进行，promotion 再执行单次 device transfer；这让 token-step pipeline 的 prebuild 更接近“后台准备对象，前台只做激活”。
 - <!-- updated: 2026-04-16 02:25 --> **[warm-transfer-diagnostics]** 新增 `warm_cache_device_transfers` 统计，用于观察 warm cache 命中后实际发生了多少次 CPU->device 激活拷贝。
+- <!-- updated: 2026-04-16 02:40 --> **[warmed-lifecycle]** migration lifecycle 新增 `warmed` 状态，专门表示“expert 数据已 ready 且模块已在 warm cache 中预构建”；这样可以把 `ready -> warmed -> applied` 与简单 `ready -> applied` 区分开来。

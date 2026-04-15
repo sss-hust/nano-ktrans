@@ -300,13 +300,23 @@ class HybridMoE(nn.Module):
             if op.dst != ExpertResidency.GPU:
                 continue
             expert_idx = int(op.expert_idx)
-            if self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx) != MigrationLifecycle.READY:
+            current_state = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+            if current_state not in {MigrationLifecycle.READY, MigrationLifecycle.WARMED}:
                 continue
             expert_key = str(expert_idx)
             if expert_key in self.gpu_experts or expert_key in self.warm_expert_cache:
                 continue
             module = self._build_runtime_expert(expert_idx, torch.device("cpu"), dtype)
             self._store_warm_module(expert_idx, module, count_store=False)
+            self.offload_backend.migration_manager.mark_state(
+                self.layer_idx,
+                expert_idx,
+                src=op.src.value,
+                dst=op.dst.value,
+                reason=op.reason,
+                phase=phase,
+                state=MigrationLifecycle.WARMED,
+            )
             built += 1
         self.warm_cache_prebuilt += built
         return built

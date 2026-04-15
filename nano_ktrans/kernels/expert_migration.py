@@ -11,6 +11,7 @@ class MigrationLifecycle(str, Enum):
     QUEUED = "queued"
     PREFETCHING = "prefetching"
     READY = "ready"
+    WARMED = "warmed"
     DEFERRED = "deferred"
     APPLIED = "applied"
 
@@ -45,6 +46,7 @@ class LayerMigrationQueue:
     total_ready_drains: int = 0
     total_prefetching_events: int = 0
     total_ready_events: int = 0
+    total_warmed_events: int = 0
     total_deferred_events: int = 0
     total_applied_events: int = 0
 
@@ -115,7 +117,7 @@ class LayerMigrationQueue:
                 op.dst != ExpertResidency.GPU
                 or (
                     self.lifecycle.get(int(op.expert_idx)) is not None
-                    and self.lifecycle[int(op.expert_idx)].state == MigrationLifecycle.READY
+                    and self.lifecycle[int(op.expert_idx)].state in {MigrationLifecycle.READY, MigrationLifecycle.WARMED}
                 )
             )
         )
@@ -164,6 +166,8 @@ class LayerMigrationQueue:
             self.total_prefetching_events += 1
         elif state == MigrationLifecycle.READY:
             self.total_ready_events += 1
+        elif state == MigrationLifecycle.WARMED:
+            self.total_warmed_events += 1
         elif state == MigrationLifecycle.DEFERRED:
             self.total_deferred_events += 1
         elif state == MigrationLifecycle.APPLIED:
@@ -273,6 +277,7 @@ class ExpertMigrationManager:
                     "total_ready_drains": queue.total_ready_drains,
                     "total_prefetching_events": queue.total_prefetching_events,
                     "total_ready_events": queue.total_ready_events,
+                    "total_warmed_events": queue.total_warmed_events,
                     "total_deferred_events": queue.total_deferred_events,
                     "total_applied_events": queue.total_applied_events,
                     "lifecycle_state_counts": queue.lifecycle_state_counts(),
