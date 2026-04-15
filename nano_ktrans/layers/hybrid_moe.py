@@ -295,6 +295,49 @@ class HybridMoE(nn.Module):
             return 1
         return max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
 
+    def _hotness_score(self, expert_idx: int) -> float:
+        if self.residency_plan is None:
+            return 0.0
+        state = self.residency_plan.layer_state(self.layer_idx)
+        if int(expert_idx) >= state.hotness.numel():
+            return 0.0
+        return float(state.hotness[int(expert_idx)].item())
+
+    def _migration_state_priority(self, expert_idx: int) -> int:
+        if self.offload_backend is None:
+            return 0
+        state = self.offload_backend.migration_manager.state_for(self.layer_idx, int(expert_idx))
+        priorities = {
+            MigrationLifecycle.ACTIVATED: 3,
+            MigrationLifecycle.WARMED: 2,
+            MigrationLifecycle.READY: 1,
+        }
+        return priorities.get(state, 0)
+
+    def _activation_target_ids(self) -> set[int]:
+        if self.offload_backend is None:
+            return set()
+        limit = self._activated_cache_limit()
+        candidates: set[int] = {int(expert_idx) for expert_idx in self.activated_expert_cache.keys()}
+        for op in self.offload_backend.migration_manager.peek_layer(self.layer_idx):
+            if op.dst != ExpertResidency.GPU:
+                continue
+            state = self.offload_backend.migration_manager.state_for(self.layer_idx, int(op.expert_idx))
+            if state not in {MigrationLifecycle.WARMED, MigrationLifecycle.ACTIVATED}:
+                continue
+            if bool(self.gpu_experts_mask[int(op.expert_idx)].item()):
+                continue
+            candidates.add(int(op.expert_idx))
+        ordered = sorted(
+            candidates,
+            key=lambda expert_idx: (
+                -self._migration_state_priority(expert_idx),
+                -self._hotness_score(expert_idx),
+                int(expert_idx),
+            ),
+        )
+        return set(ordered[:limit])
+
     def _store_activated_module(self, expert_idx: int, module: nn.Module) -> None:
         expert_key = str(expert_idx)
         self.activated_expert_cache[expert_key] = module
@@ -320,6 +363,21 @@ class HybridMoE(nn.Module):
         if phase != "decode" or self.offload_backend is None:
             return 0
 
+        target_ids = self._activation_target_ids()
+        for expert_key in list(self.activated_expert_cache.keys()):
+            expert_idx = int(expert_key)
+            if expert_idx in target_ids:
+                continue
+            module = self.activated_expert_cache.pop(expert_key)
+            self._store_warm_module(expert_idx, module, count_store=False)
+            self.offload_backend.migration_manager.mark_state(
+                self.layer_idx,
+                expert_idx,
+                phase=phase,
+                state=MigrationLifecycle.WARMED,
+            )
+            self.activated_cache_evictions += 1
+
         activated = 0
         for op in self.offload_backend.migration_manager.peek_layer(self.layer_idx):
             if op.dst != ExpertResidency.GPU:
@@ -328,6 +386,8 @@ class HybridMoE(nn.Module):
             expert_key = str(expert_idx)
             current_state = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
             if current_state != MigrationLifecycle.WARMED:
+                continue
+            if expert_idx not in target_ids:
                 continue
             if (
                 expert_key in self.gpu_experts
@@ -663,14 +723,11 @@ class HybridMoE(nn.Module):
         return coldest, fallback_dst
 
     def _promotion_sort_key(self, op, active_experts: set[int], phase: str) -> tuple[int, int, float, int]:
-        hotness_score = 0.0
-        if self.residency_plan is not None:
-            state = self.residency_plan.layer_state(self.layer_idx)
-            if int(op.expert_idx) < state.hotness.numel():
-                hotness_score = float(state.hotness[int(op.expert_idx)].item())
+        hotness_score = self._hotness_score(int(op.expert_idx))
         is_active = 1 if int(op.expert_idx) in active_experts else 0
         is_ready = 1 if phase == "decode" and self.materialization_manager.is_ready(self.layer_idx, int(op.expert_idx)) else 0
-        return (-is_ready, -is_active, -hotness_score, int(op.expert_idx))
+        lifecycle_priority = self._migration_state_priority(int(op.expert_idx))
+        return (-lifecycle_priority, -is_ready, -is_active, -hotness_score, int(op.expert_idx))
 
     def _apply_queued_migrations(
         self,

@@ -235,6 +235,11 @@ tags: [architecture]
     - resident staging hit
     - 冷路径 build/load
     它更接近一个分层缓存系统，而不是单次迁移动作。
+41. activated cache 现在也开始承载预算与优先级语义：
+    - cache 容量默认按 `decode_promote_k` 约束
+    - pipeline 会根据 lifecycle 优先级（`activated > warmed > ready`）和 hotness 只保留更热的候选
+    - 较冷的 activated expert 会被降回 CPU warm cache
+    这让 decode 前的 device-side 准备不再是“谁先到谁上”，而是更接近真正的热点激活预算管理。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
