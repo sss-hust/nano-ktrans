@@ -41,3 +41,4 @@ tags: [changelog]
 - <!-- updated: 2026-04-15 06:04 --> **[dynamic-scheduler-skeleton]** 新增 `expert_runtime_state.py` 与 `scheduler/dynamic_expert_scheduler.py`，把系统目标从“静态 GPU expert mask”提升为“GPU/PIM 动态专家驻留”第一版骨架；`LLM`、`MixtralModel`、`HybridMoE` 已能携带驻留计划与调度器诊断，但真实迁移数据面尚未接入。
 - <!-- updated: 2026-04-15 06:23 --> **[prefill-policy]** 为 `pim` backend 新增 `pim_prefill_policy` 和 `pim_prefill_token_threshold`，默认 prefill 走 CPU/GPU 路径，避免长 prompt 的大批量 token 直接压到 PIM。
 - <!-- updated: 2026-04-15 06:23 --> **[dynamic-prefill-hook]** `HybridMoE` 现在会在 prefill 阶段基于路由结果更新调度器热度，并允许临时提升 GPU expert budget；当前只更新驻留状态与诊断，真实迁移数据面仍待实现。
+- <!-- updated: 2026-04-15 06:31 --> **[migration-queue-semantics]** 调整动态调度语义：`HybridMoE` 现在只向 backend 排队 migration plan，不再在没有真实 GPU/PIM 数据面的前提下直接修改有效 `gpu_experts_mask`，避免控制面和执行面状态不一致。

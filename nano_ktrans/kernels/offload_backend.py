@@ -31,6 +31,9 @@ class ExpertOffloadBackend(ABC):
     def __init__(self) -> None:
         self.submit_calls = 0
         self.sync_calls = 0
+        self.migration_submit_calls = 0
+        self.last_migration_plan_size = 0
+        self.last_migration_phase = ""
 
     @abstractmethod
     def submit_forward(
@@ -49,9 +52,17 @@ class ExpertOffloadBackend(ABC):
     def update_gpu_expert_mask(self, gpu_experts_mask: torch.Tensor) -> None:
         raise NotImplementedError
 
+    def queue_migration_plan(self, ops: list[Any], *, phase: str = "") -> None:
+        self.migration_submit_calls += 1
+        self.last_migration_plan_size = len(ops)
+        self.last_migration_phase = phase
+
     def diagnostics(self) -> dict[str, Any]:
         return {
             "backend_name": self.backend_name,
             "submit_calls": self.submit_calls,
             "sync_calls": self.sync_calls,
+            "migration_submit_calls": self.migration_submit_calls,
+            "last_migration_plan_size": self.last_migration_plan_size,
+            "last_migration_phase": self.last_migration_phase,
         }

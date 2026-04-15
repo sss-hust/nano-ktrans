@@ -136,14 +136,11 @@ class HybridMoE(nn.Module):
         phase = "prefill" if context.is_prefill else "decode"
         if self.dynamic_expert_scheduler is not None and self.dynamic_expert_scheduler.enabled:
             self.dynamic_expert_scheduler.observe(self.layer_idx, topk_ids, phase=phase)
-            if phase == "prefill":
-                planned_ops = self.dynamic_expert_scheduler.plan_layer(self.layer_idx, phase=phase)
-                if planned_ops:
-                    self.dynamic_expert_scheduler.apply_plan(planned_ops)
-                    if self.residency_plan is not None:
-                        self.gpu_experts_mask = self.residency_plan.layer_state(self.layer_idx).gpu_mask()
-                        if self.offload_backend is not None:
-                            self.offload_backend.update_gpu_expert_mask(self.gpu_experts_mask)
+            planned_ops = self.dynamic_expert_scheduler.plan_layer(self.layer_idx, phase=phase)
+            if planned_ops and self.offload_backend is not None:
+                # 当前系统只有迁移控制面，没有真实 GPU/PIM 权重迁移数据面。
+                # 因此这里先只排队迁移计划，避免提前修改有效驻留状态导致计算路径失真。
+                self.offload_backend.queue_migration_plan(planned_ops, phase=phase)
 
         batch_seq_len, hidden_dim = hidden_states.shape
 
