@@ -93,6 +93,10 @@ tags: [architecture]
     - 则只消费 staging cache 已就绪的 promotion
     - 未就绪的 expert 先 defer，并继续预热
     这更接近真正的“迁移未完成时不要阻塞计算”的 overlap 语义。
+12. migration manager 现在会按 expert 做队列去重：
+    - 同一 layer / expert 的新 op 会覆盖旧 op
+    - 避免同一 expert 在短时间内重复排队
+    - 并记录原始提交量与去重量，便于后续评估控制面开销
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

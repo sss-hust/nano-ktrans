@@ -581,6 +581,58 @@ class TestDynamicScheduler:
         assert diagnostics["migration_submit_calls"] == 1
         assert diagnostics["migration_manager"]["layers"][0]["history"][0]["phase"] == "prefill"
 
+    def test_migration_manager_dedupes_by_expert(self):
+        from nano_ktrans.kernels.offload_backend import ExpertOffloadBackend
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency
+
+        class DummyBackend(ExpertOffloadBackend):
+            def submit_forward(self, hidden_states, topk_ids, topk_weights, cuda_stream):
+                return None
+
+            def sync_forward(self, hidden_states, cuda_stream):
+                return hidden_states
+
+            def update_gpu_expert_mask(self, gpu_experts_mask):
+                return None
+
+        backend = DummyBackend()
+        backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=1,
+                    expert_idx=4,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="prefetch_1",
+                )
+            ],
+            phase="prefill",
+        )
+        backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=1,
+                    expert_idx=4,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="prefetch_2",
+                ),
+                ExpertMigrationOp(
+                    layer_idx=1,
+                    expert_idx=5,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="prefetch_3",
+                ),
+            ],
+            phase="decode",
+        )
+        layer_diag = backend.diagnostics()["migration_manager"]["layers"][0]
+        assert layer_diag["pending_ops"] == 2
+        assert layer_diag["total_enqueued_ops"] == 3
+        assert layer_diag["total_deduped_ops"] >= 1
+        assert layer_diag["history"][-1]["deduped_plan_size"] == 2
+
     def test_hybrid_moe_applies_decode_migration_plan(self, tmp_path):
         from safetensors.torch import save_file
 

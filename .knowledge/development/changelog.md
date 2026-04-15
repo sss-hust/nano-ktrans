@@ -97,3 +97,8 @@ tags: [changelog]
 - decode migration 新增 `decode_require_prefetch_ready` 开关。
 - 开启后，未完成 staging prefetch 的 promotion 会先 defer，而不是直接在 decode 关键路径上同步 materialize。
 - 新增测试覆盖“defer until prefetch ready”的 decode migration 路径。
+
+<!-- updated: 2026-04-15 08:08 -->
+
+- `ExpertMigrationManager` 现在会按 expert 对 pending migration queue 去重。
+- queue 诊断新增 `total_enqueued_ops`、`total_deduped_ops`、`total_drained_ops` 和 per-phase `deduped_plan_size`。
