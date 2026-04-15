@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Sequence
 
-from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp
+from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency
 
 
 class MigrationLifecycle(str, Enum):
@@ -42,6 +42,7 @@ class LayerMigrationQueue:
     total_enqueued_ops: int = 0
     total_deduped_ops: int = 0
     total_drained_ops: int = 0
+    total_ready_drains: int = 0
     total_prefetching_events: int = 0
     total_ready_events: int = 0
     total_deferred_events: int = 0
@@ -107,6 +108,20 @@ class LayerMigrationQueue:
     def peek(self) -> List[ExpertMigrationOp]:
         ops = list(self.pending_ops)
         return ops
+
+    def take_ready(self) -> List[ExpertMigrationOp]:
+        selected = self.take(
+            lambda op: (
+                op.dst != ExpertResidency.GPU
+                or (
+                    self.lifecycle.get(int(op.expert_idx)) is not None
+                    and self.lifecycle[int(op.expert_idx)].state == MigrationLifecycle.READY
+                )
+            )
+        )
+        if selected:
+            self.total_ready_drains += 1
+        return selected
 
     def mark_state(
         self,
@@ -194,6 +209,12 @@ class ExpertMigrationManager:
             return []
         return queue.peek()
 
+    def take_ready_layer(self, layer_idx: int) -> List[ExpertMigrationOp]:
+        queue = self._queues.get(layer_idx)
+        if queue is None:
+            return []
+        return queue.take_ready()
+
     def mark_state(
         self,
         layer_idx: int,
@@ -235,6 +256,7 @@ class ExpertMigrationManager:
                     "total_enqueued_ops": queue.total_enqueued_ops,
                     "total_deduped_ops": queue.total_deduped_ops,
                     "total_drained_ops": queue.total_drained_ops,
+                    "total_ready_drains": queue.total_ready_drains,
                     "total_prefetching_events": queue.total_prefetching_events,
                     "total_ready_events": queue.total_ready_events,
                     "total_deferred_events": queue.total_deferred_events,

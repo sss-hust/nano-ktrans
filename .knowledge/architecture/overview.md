@@ -128,6 +128,10 @@ tags: [architecture]
     - 后台 prefetch future 一旦完成，会被主动转成 CPU staging cache 命中
     - `HybridMoE` 在进入本层前会先轮询 ready 结果，再把对应 migration lifecycle 更新成 `ready`
     这让 `ready` 不再只依赖 decode 路径上的同步 `is_ready()` 检查，而开始具备更像后台 completion 的语义。
+19. migration manager 现在还提供了 `take_ready_layer()`：
+    - 直接按 lifecycle=`ready` 抽取当前层可消费的 promotion
+    - 其余 pending op 留在队列中
+    这样 decode 主路径不再自己实现 ready subset 过滤，控制语义也更集中。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

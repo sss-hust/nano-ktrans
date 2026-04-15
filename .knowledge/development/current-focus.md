@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-15 11:27
+updated: 2026-04-15 11:34
 ---
 
 # 🔥 当前工作焦点
@@ -32,6 +32,7 @@ updated: 2026-04-15 11:27
 - [x] migration queue 已接入 lifecycle 状态：`queued / prefetching / ready / deferred / applied`
 - [x] decode 在 `decode_require_prefetch_ready` 模式下已改成 ready-only 消费，不再先 drain 全队列再回退
 - [x] materialization manager 已支持后台 prefetch completion 轮询，ready 状态可在进入层前被主动刷新
+- [x] migration manager 已支持 ready-only drain，decode 不再手写 ready subset 过滤逻辑
 
 ## 阻塞项
 

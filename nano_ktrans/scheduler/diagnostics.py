@@ -70,10 +70,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
             summary["migration_total_enqueued_ops"] += int(migration_layer.get("total_enqueued_ops", 0))
             summary["migration_total_deduped_ops"] += int(migration_layer.get("total_deduped_ops", 0))
             summary["migration_total_drained_ops"] += int(migration_layer.get("total_drained_ops", 0))
+            summary["migration_ready_only_drains"] += int(migration_layer.get("total_ready_drains", 0))
             summary["migration_pending_ops"] += int(migration_layer.get("pending_ops", 0))
             lifecycle_counts = migration_layer.get("lifecycle_state_counts", {})
-            if migration_layer.get("pending_ops", 0) > 0 and lifecycle_counts.get("ready", 0) > 0:
-                summary["migration_ready_only_drains"] += 1
             summary["migration_prefetching_events"] += int(
                 migration_layer.get("total_prefetching_events", 0)
             )

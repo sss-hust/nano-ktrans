@@ -137,3 +137,8 @@ tags: [changelog]
 - `ExpertMaterializationManager` 新增 `poll_ready()`，可把后台完成的 prefetch future 主动转成 staging cache 命中。
 - `HybridMoE` 现在会在进入本层前先轮询 ready prefetch，再把 migration lifecycle 更新为 `ready`。
 - benchmark 摘要新增 `prefetch_polled_ready`，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `48 passed`。
+
+<!-- updated: 2026-04-15 11:34 -->
+
+- migration manager 新增 `take_ready_layer()` 和 `total_ready_drains` 统计。
+- decode ready-only 路径已改成直接消费 migration manager 的 ready 子集，而不是由 `HybridMoE` 手写过滤逻辑。

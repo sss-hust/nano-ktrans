@@ -819,20 +819,13 @@ class TestDynamicScheduler:
             phase="decode",
         )
         manager.mark_state(0, 2, state=MigrationLifecycle.READY, phase="decode")
-        ready_experts = {
-            entry["expert_idx"]
-            for entry in manager.diagnostics()["layers"][0]["lifecycle"]
-            if entry["state"] == "ready"
-        }
-
-        ready_ops = manager.take_layer(
-            0,
-            lambda op: op.expert_idx in ready_experts,
-        )
+        ready_ops = manager.take_ready_layer(0)
         pending_ops = manager.peek_layer(0)
+        layer_diag = manager.diagnostics()["layers"][0]
 
         assert [op.expert_idx for op in ready_ops] == [2]
         assert [op.expert_idx for op in pending_ops] == [1]
+        assert layer_diag["total_ready_drains"] == 1
 
     def test_hybrid_moe_applies_decode_migration_plan(self, tmp_path):
         from safetensors.torch import save_file
