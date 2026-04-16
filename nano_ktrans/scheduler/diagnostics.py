@@ -230,6 +230,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "apply_commit_queue_size": 0,
         "apply_commit_queue_limit": 0,
         "apply_commit_queue_utilization": 0.0,
+        "apply_commit_ready_cache_size": 0,
         "apply_queue_enqueued": 0,
         "apply_queue_committed": 0,
         "apply_queue_pruned": 0,
@@ -239,6 +240,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "apply_commit_queue_enqueued": 0,
         "apply_commit_queue_pruned": 0,
         "apply_commit_queue_evictions": 0,
+        "apply_commit_ready_hits": 0,
+        "apply_commit_ready_stores": 0,
+        "apply_commit_ready_pruned": 0,
+        "background_apply_commit_resolved": 0,
         "apply_queue_pressure": 0.0,
         "apply_queue_pressure_step": 0.0,
         "apply_queue_pressure_ema": 0.0,
@@ -351,6 +356,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["apply_commit_queue_size"] += int(layer.get("apply_commit_queue_size", 0))
         summary["apply_commit_queue_limit"] += int(layer.get("apply_commit_queue_limit", 0))
         summary["apply_commit_queue_utilization"] += float(layer.get("apply_commit_queue_utilization", 0.0))
+        summary["apply_commit_ready_cache_size"] += int(layer.get("apply_commit_ready_cache_size", 0))
         summary["apply_queue_enqueued"] += int(layer.get("apply_queue_enqueued", 0))
         summary["apply_queue_committed"] += int(layer.get("apply_queue_committed", 0))
         summary["apply_queue_pruned"] += int(layer.get("apply_queue_pruned", 0))
@@ -360,6 +366,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["apply_commit_queue_enqueued"] += int(layer.get("apply_commit_queue_enqueued", 0))
         summary["apply_commit_queue_pruned"] += int(layer.get("apply_commit_queue_pruned", 0))
         summary["apply_commit_queue_evictions"] += int(layer.get("apply_commit_queue_evictions", 0))
+        summary["apply_commit_ready_hits"] += int(layer.get("apply_commit_ready_hits", 0))
+        summary["apply_commit_ready_stores"] += int(layer.get("apply_commit_ready_stores", 0))
+        summary["apply_commit_ready_pruned"] += int(layer.get("apply_commit_ready_pruned", 0))
+        summary["background_apply_commit_resolved"] += int(layer.get("background_apply_commit_resolved", 0))
         summary["apply_queue_pressure"] += float(layer.get("apply_queue_pressure", 0.0))
         summary["apply_queue_pressure_step"] += float(layer.get("apply_queue_pressure_step", 0.0))
         summary["apply_queue_pressure_ema"] += float(layer.get("apply_queue_pressure_ema", 0.0))

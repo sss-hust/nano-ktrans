@@ -3223,7 +3223,7 @@ class TestDynamicScheduler:
         assert stats["apply_queue_enqueued"] == 1
         assert stats["activation_applied"] == 0
         assert diagnostics["background_apply_queue_enqueued"] == 1
-        assert diagnostics["background_apply_commit_queue_enqueued"] == 0
+        assert diagnostics["background_apply_commit_queue_enqueued"] == 1
         assert diagnostics["apply_queue_enqueued"] == 1
         assert diagnostics["apply_queue_committed"] == 0
         assert diagnostics["apply_queue_size"] == 1
@@ -3366,6 +3366,11 @@ class TestDynamicScheduler:
         assert summary["apply_commit_queue_enqueued"] == 2
         assert summary["apply_commit_queue_pruned"] == 1
         assert summary["apply_commit_queue_evictions"] == 1
+        assert summary["apply_commit_ready_cache_size"] == 0
+        assert summary["apply_commit_ready_hits"] == 0
+        assert summary["apply_commit_ready_stores"] == 0
+        assert summary["apply_commit_ready_pruned"] == 0
+        assert summary["background_apply_commit_resolved"] == 0
         assert summary["background_apply_queue_enqueued"] == 3
         assert summary["background_apply_commit_queue_enqueued"] == 0
         assert summary["apply_queue_commit_batch_size_avg"] is None
@@ -3465,6 +3470,8 @@ class TestDynamicScheduler:
         assert diagnostics["apply_commit_queue_enqueued"] == 1
         assert diagnostics["apply_commit_queue_size"] == 0
         assert diagnostics["apply_commit_queue_evictions"] == 0
+        assert diagnostics["apply_commit_ready_hits"] == 1
+        assert diagnostics["apply_commit_ready_stores"] == 1
         assert diagnostics["background_apply_commit_batches"] == 1
         assert diagnostics["background_apply_commit_experts"] == 1
         assert diagnostics["apply_queue_commit_batches"] == 1
@@ -3488,6 +3495,7 @@ class TestDynamicScheduler:
         assert diagnostics["apply_queue_commit_experts"] == 2
         assert diagnostics["apply_commit_queue_enqueued"] >= 2
         assert diagnostics["apply_commit_queue_utilization"] >= 0.0
+        assert diagnostics["apply_commit_ready_cache_size"] == 0
 
     def test_apply_commit_queue_rebalance_prefers_hotter_commit_candidates(self, tmp_path):
         from safetensors.torch import save_file
@@ -4883,6 +4891,93 @@ class TestDynamicScheduler:
         assert hybrid._adaptive_prebuild_limit() < base_prebuild
         assert hybrid._adaptive_prefetch_pending_limit(phase="decode") < base_prefetch_pending
         assert hybrid._adaptive_prefetch_candidate_budget(phase="decode") < base_prefetch_budget
+
+    def test_background_pipeline_resolves_apply_commit_queue_before_commit(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(3):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+            ),
+        )
+        hybrid = HybridMoE(
+            num_experts=3,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=4,
+            prepared_controller_aggressiveness=0.5,
+        ).to(dtype=torch.float32)
+
+        hybrid.offload_backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=1,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="background_commit_resolve",
+                )
+            ],
+            phase="decode",
+        )
+        hybrid.offload_backend.migration_manager.mark_state(
+            0,
+            1,
+            state=MigrationLifecycle.ACTIVATED,
+            phase="decode",
+        )
+        hybrid.activated_expert_cache["1"] = hybrid._build_runtime_expert(
+            1,
+            torch.device("cpu"),
+            torch.float32,
+        )
+
+        stats = hybrid.background_advance_offload_pipeline(
+            phase="decode",
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        diagnostics = hybrid.diagnostics()
+
+        assert stats["apply_queue_enqueued"] == 1
+        assert stats["activation_applied"] == 0
+        assert stats["apply_commit_queue_enqueued"] == 1
+        assert diagnostics["background_apply_commit_resolved"] == 1
+        assert diagnostics["apply_commit_ready_stores"] == 1
+        assert diagnostics["apply_commit_ready_hits"] == 0
 
     def test_warm_cache_eviction_downgrades_lifecycle_to_ready(self, tmp_path):
         from safetensors.torch import save_file

@@ -146,6 +146,7 @@ class HybridMoE(nn.Module):
         self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.apply_candidate_queue: "OrderedDict[str, object]" = OrderedDict()
         self.apply_commit_queue: "OrderedDict[str, object]" = OrderedDict()
+        self.apply_commit_ready_cache: "OrderedDict[str, dict[str, object]]" = OrderedDict()
         self.warm_cache_hits = 0
         self.warm_cache_stores = 0
         self.warm_cache_evictions = 0
@@ -166,6 +167,10 @@ class HybridMoE(nn.Module):
         self.apply_commit_queue_enqueued = 0
         self.apply_commit_queue_pruned = 0
         self.background_apply_commit_queue_enqueued = 0
+        self.apply_commit_ready_hits = 0
+        self.apply_commit_ready_stores = 0
+        self.apply_commit_ready_pruned = 0
+        self.background_apply_commit_resolved = 0
         self.apply_queue_commit_batches = 0
         self.apply_queue_commit_experts = 0
         self.background_apply_commit_batches = 0
@@ -367,23 +372,33 @@ class HybridMoE(nn.Module):
             apply_queue_enqueued = 0
             prev_background_apply_commit_queue_enqueued = self.background_apply_commit_queue_enqueued
             if phase == "decode":
-                preexisting_apply_candidate_ids = {
-                    int(expert_idx) for expert_idx in self.apply_candidate_queue.keys()
+                preexisting_apply_commit_ids = {
+                    int(expert_idx) for expert_idx in self.apply_commit_queue.keys()
                 }
                 warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
                 activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
                 apply_queue_enqueued = self._enqueue_activated_apply_candidates(phase=phase)
                 self.background_apply_queue_enqueued += apply_queue_enqueued
+                eligible_apply_candidate_ids = {
+                    int(expert_idx) for expert_idx in self.apply_candidate_queue.keys()
+                }
                 self._stage_apply_commit_batch(
                     phase=phase,
                     active_experts=set(),
-                    eligible_expert_ids=preexisting_apply_candidate_ids,
+                    eligible_expert_ids=eligible_apply_candidate_ids,
                     max_commits=self._adaptive_apply_commit_limit(background=True),
+                    background=True,
+                )
+                self._resolve_apply_commit_queue(
+                    device=device,
+                    dtype=dtype,
+                    eligible_expert_ids=eligible_apply_candidate_ids,
+                    max_resolves=self._adaptive_apply_commit_limit(background=True),
                     background=True,
                 )
                 activation_applied = self._background_apply_activated_experts(
                     phase=phase,
-                    eligible_expert_ids=preexisting_apply_candidate_ids,
+                    eligible_expert_ids=preexisting_apply_commit_ids,
                 )
             return {
                 "ready_polled": int(ready_polled),
@@ -685,6 +700,60 @@ class HybridMoE(nn.Module):
             else:
                 self.apply_commit_queue.pop(evicted_key, None)
             self.apply_commit_queue_evictions += 1
+            self.apply_commit_ready_cache.pop(evicted_key, None)
+
+    def _prune_apply_commit_ready_cache(self) -> int:
+        stale_keys: list[str] = []
+        for expert_key in list(self.apply_commit_ready_cache.keys()):
+            expert_idx = int(expert_key)
+            lifecycle = None
+            if self.offload_backend is not None:
+                lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+            if (
+                expert_key not in self.apply_commit_queue
+                or bool(self.gpu_experts_mask[expert_idx].item())
+                or lifecycle not in {MigrationLifecycle.ACTIVATED, MigrationLifecycle.APPLIED}
+            ):
+                stale_keys.append(expert_key)
+
+        for expert_key in stale_keys:
+            self.apply_commit_ready_cache.pop(expert_key, None)
+        self.apply_commit_ready_pruned += len(stale_keys)
+        return len(stale_keys)
+
+    def _resolve_apply_commit_queue(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        eligible_expert_ids: Optional[set[int]] = None,
+        max_resolves: Optional[int],
+        background: bool,
+    ) -> int:
+        if not self.apply_commit_queue:
+            return 0
+
+        resolve_limit = max_resolves if max_resolves is not None else self._adaptive_apply_commit_limit(background=background)
+        resolve_limit = max(1, int(resolve_limit))
+        resolved = 0
+        for expert_key, op in list(self.apply_commit_queue.items()):
+            if expert_key in self.apply_commit_ready_cache:
+                continue
+            expert_idx = int(expert_key)
+            if eligible_expert_ids is not None and expert_idx not in eligible_expert_ids:
+                continue
+            resolved_item = self._resolve_promotion_module(expert_idx, device, dtype)
+            self.apply_commit_ready_cache[expert_key] = {
+                "op": op,
+                "resolved": resolved_item,
+            }
+            self.apply_commit_ready_stores += 1
+            if background:
+                self.background_apply_commit_resolved += 1
+            resolved += 1
+            if resolved >= resolve_limit:
+                break
+        return resolved
 
     def _rebalance_apply_candidate_queue(self) -> None:
         limit = self._apply_queue_limit()
@@ -1300,6 +1369,7 @@ class HybridMoE(nn.Module):
 
         self._prune_apply_candidate_queue()
         self._prune_apply_commit_queue()
+        self._prune_apply_commit_ready_cache()
         if not self.apply_commit_queue:
             return 0, 0
 
@@ -1309,10 +1379,19 @@ class HybridMoE(nn.Module):
             if max_commits is None
             else max(1, int(max_commits))
         )
+        self._resolve_apply_commit_queue(
+            device=device,
+            dtype=dtype,
+            eligible_expert_ids=eligible_expert_ids,
+            max_resolves=max_promotions,
+            background=background,
+        )
         candidate_ops = []
         for expert_key, op in self.apply_commit_queue.items():
             expert_idx = int(expert_key)
             if eligible_expert_ids is not None and expert_idx not in eligible_expert_ids:
+                continue
+            if expert_key not in self.apply_commit_ready_cache:
                 continue
             candidate_ops.append(op)
         if not candidate_ops:
@@ -1354,16 +1433,27 @@ class HybridMoE(nn.Module):
         if not selected_ops:
             return 0, deferred
 
+        ready_entries = []
+        for op in selected_ops:
+            expert_key = str(int(op.expert_idx))
+            ready_entry = self.apply_commit_ready_cache.get(expert_key)
+            if ready_entry is not None:
+                ready_entries.append((op, ready_entry["resolved"]))
+        if not ready_entries:
+            return 0, deferred
+
         applied, completed_expert_ids, _source_counts = self._apply_promotion_batch(
-            selected_ops,
+            [op for op, _resolved in ready_entries],
             device=device,
             dtype=dtype,
             phase=phase,
+            pre_resolved_batch=ready_entries,
         )
         if completed_expert_ids:
             for expert_idx in completed_expert_ids:
                 self.apply_candidate_queue.pop(str(expert_idx), None)
                 self.apply_commit_queue.pop(str(expert_idx), None)
+                self.apply_commit_ready_cache.pop(str(expert_idx), None)
             self.offload_backend.migration_manager.take_layer(
                 self.layer_idx,
                 lambda op: (
@@ -1737,17 +1827,22 @@ class HybridMoE(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
         phase: str,
+        pre_resolved_batch: Optional[list[tuple[object, dict[str, object]]]] = None,
     ) -> tuple[int, set[int], dict[str, int]]:
         applied = 0
         completed_expert_ids: set[int] = set()
         source_counts = {"activated": 0, "warm": 0, "cold": 0}
-        resolved_batch = [
-            (
-                op,
-                self._resolve_promotion_module(int(op.expert_idx), device, dtype),
-            )
-            for op in promotion_ops
-        ]
+        resolved_batch = (
+            pre_resolved_batch
+            if pre_resolved_batch is not None
+            else [
+                (
+                    op,
+                    self._resolve_promotion_module(int(op.expert_idx), device, dtype),
+                )
+                for op in promotion_ops
+            ]
+        )
 
         for op, resolved in resolved_batch:
             expert_idx = int(op.expert_idx)
@@ -1759,6 +1854,8 @@ class HybridMoE(nn.Module):
             self.gpu_experts_mask[expert_idx] = True
             self._set_residency(expert_idx, ExpertResidency.GPU)
             source_counts[source] += 1
+            if pre_resolved_batch is not None:
+                self.apply_commit_ready_hits += 1
             if source == "activated":
                 self.pipeline_promotion_source_activated += 1
             elif source == "warm":
@@ -2308,6 +2405,7 @@ class HybridMoE(nn.Module):
                     len(self.apply_commit_queue) / max(1, self._apply_commit_queue_limit())
                 ),
                 "apply_commit_queue_pending_experts": [int(expert_idx) for expert_idx in self.apply_commit_queue.keys()],
+            "apply_commit_ready_cache_size": len(self.apply_commit_ready_cache),
             "apply_queue_enqueued": self.apply_queue_enqueued,
             "apply_queue_committed": self.apply_queue_committed,
             "apply_queue_pruned": self.apply_queue_pruned,
@@ -2317,6 +2415,10 @@ class HybridMoE(nn.Module):
             "apply_commit_queue_enqueued": self.apply_commit_queue_enqueued,
             "apply_commit_queue_pruned": self.apply_commit_queue_pruned,
             "apply_commit_queue_evictions": self.apply_commit_queue_evictions,
+            "apply_commit_ready_hits": self.apply_commit_ready_hits,
+            "apply_commit_ready_stores": self.apply_commit_ready_stores,
+            "apply_commit_ready_pruned": self.apply_commit_ready_pruned,
+            "background_apply_commit_resolved": self.background_apply_commit_resolved,
             "apply_queue_pressure": self._apply_queue_pressure(),
             "apply_queue_pressure_step": self._apply_queue_pressure_step(),
             "apply_queue_pressure_ema": self.apply_queue_pressure_ema,

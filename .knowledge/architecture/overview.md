@@ -218,6 +218,17 @@ tags: [architecture]
     - `warmed` 表示 module 已在 CPU warm cache 里预构建
     - `activated` 表示该 module 已执行 device transfer，进入目标 device 上的 warm cache
     - `applied` 才表示它真正被插入 `gpu_experts` 并更新 resident set
+39. `activated -> applied` 这条后半段流水线现在也开始分层：
+    - `apply_candidate_queue`：保存已进入 `ACTIVATED`、可进入 resident commit 的候选 expert
+    - `apply_commit_queue`：保存已被选中、等待 staged resident commit 的候选
+    - `apply_commit_ready_cache`：保存 commit queue 中已经完成 source/module 解析、可被直接 resident commit 的 ready entry
+    因此 resident commit 现在不再只是“从 activated cache 直接逐 expert 注入 resident set”，而是显式拆成 staged queue 和 ready cache。
+40. 当前 background tick 对后半段流水线的语义是：
+    - 可以在同一 tick 内把新 `ACTIVATED` expert 推进到 `apply_candidate_queue`
+    - 再推进到 `apply_commit_queue`
+    - 再完成 `apply_commit_ready_cache` 的 resolve
+    - 但真正 resident commit 只消费 tick 开始前已存在的 staged commit 候选
+    这样后台 enqueue/resolve 与 resident commit 的边界更清楚，避免 background tick 在同一轮里对同一 expert 同时 enqueue 和 commit。
 39. resident commit 现在也被拆成两段 staged queue：
     - `apply_candidate_queue`：承接所有已经进入 `ACTIVATED` 的候选 expert
     - `apply_commit_queue`：只承接被当前 batch policy 选中的 staged commit 候选

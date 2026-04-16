@@ -13,6 +13,7 @@ updated: 2026-04-17 18:40
 updated: 2026-04-17 19:10
 updated: 2026-04-17 19:35
 updated: 2026-04-17 20:00
+updated: 2026-04-17 21:05
 ---
 
 # 🔥 当前工作焦点
@@ -130,6 +131,8 @@ updated: 2026-04-17 20:00
 - [x] 当前有 background worker 运行时，`SimpleEngine` 已不再手动重复调用 `background_tick_offload_state()`，前台 refresh 和后台 worker 的职责边界更清晰
 - [x] background worker 的 runtime 指标现已细化到 `background_work_items_total` 与 `background_activation_applied_total`，后台线程推进了多少准备/提交工作已进入 summary 与 profile sweep
 - [x] `HybridMoE` 现已引入内部 pipeline 锁，background worker 与前台 refresh/forward 对 prepared tier、migration lifecycle 和 resident set 的共享状态访问开始串行化
+- [x] apply commit 路径现已补上 `apply_commit_ready_cache`，background tick 可以先把 staged commit queue 中的 expert 解析成可直接 commit 的 ready entry，再由后续 resident commit 消费
+- [x] background pipeline 现已允许“同一 tick 内新入队的 apply candidate 进入 apply commit queue 并完成 ready resolve”，但 resident set commit 仍只消费 tick 开始前已存在的 staged commit 候选，后台 enqueue / resolve / commit 边界更清晰
 
 ## 阻塞项
 

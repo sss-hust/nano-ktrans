@@ -5,6 +5,13 @@ tags: [changelog]
 
 # 📝 变更日志
 
+## 2026-04-17
+
+- <!-- updated: 2026-04-17 21:05 --> **[apply-commit-ready-cache]** `HybridMoE` 新增 `apply_commit_ready_cache`，`apply_commit_queue` 中的 staged commit 候选现在可以先在 background/foreground 路径上解析成可直接 resident commit 的 ready entry，`_apply_promotion_batch()` 也支持消费预解析 batch。
+- <!-- updated: 2026-04-17 21:05 --> **[background-commit-staging]** background pipeline 现在允许“同一 tick 新入队的 apply candidate -> apply commit queue -> ready resolve”连续推进，但 resident commit 仍只消费 tick 开始前已存在的 staged commit 候选，避免 background tick 在同一轮里同时 enqueue 和 commit 同一 expert。
+- <!-- updated: 2026-04-17 21:05 --> **[diagnostics]** 新增 `apply_commit_ready_cache_size / hits / stores / pruned / background_apply_commit_resolved`，用于区分 staged commit queue 的 ready resolve 命中与真正 resident commit 消费。
+- <!-- updated: 2026-04-17 21:05 --> **[tests]** 新增 background staged commit resolve 路径覆盖，并更新 background apply queue 语义测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `119 passed, 1 warning`。
+
 ## 2026-04-16
 
 - <!-- updated: 2026-04-17 01:53 --> **[apply-queue]** `HybridMoE` 新增显式 `apply_candidate_queue`，将 `ACTIVATED` expert 的 resident commit 从 opportunistic background apply 收敛为 staged commit 路径；background pipeline 现先执行 `ACTIVATED -> apply queue enqueue`，再由前台/后台从 apply queue 提交到 GPU resident set。
