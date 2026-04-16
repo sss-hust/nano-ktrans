@@ -9,6 +9,7 @@ PROFILE_SWEEP_SORT_KEYS = (
     "pipeline_promotion_non_cold_ratio",
     "prepared_cache_utilization",
     "effective_prepared_cache_utilization",
+    "prepared_cache_budget_backoff_avg",
     "cold_promotion_penalty_avg",
     "prepared_cache_rebalance_pressure_avg",
     "pipeline_prefetch_overlap_hits",
@@ -44,6 +45,7 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "runtime_apply_batch_size_avg": "max",
     "prepared_cache_utilization": "max",
     "effective_prepared_cache_utilization": "max",
+    "prepared_cache_budget_backoff_avg": "min",
     "cold_promotion_penalty_avg": "min",
     "prepared_cache_rebalance_pressure_avg": "min",
     "migration_activation_eviction_regressions": "min",
@@ -161,6 +163,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "activated_cache_evictions": 0,
         "activated_cache_size": 0,
         "prepared_cache_limit": 0,
+        "prepared_cache_budget_backoff": 0,
         "effective_prepared_cache_limit": 0,
         "prepared_cache_size": 0,
         "effective_warm_cache_limit": 0,
@@ -242,6 +245,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["activated_cache_evictions"] += int(layer.get("activated_cache_evictions", 0))
         summary["activated_cache_size"] += int(layer.get("activated_cache_size", 0))
         summary["prepared_cache_limit"] += int(layer.get("prepared_cache_limit") or 0)
+        summary["prepared_cache_budget_backoff"] += int(layer.get("prepared_cache_budget_backoff", 0))
         summary["effective_prepared_cache_limit"] += int(layer.get("effective_prepared_cache_limit") or 0)
         summary["prepared_cache_size"] += int(layer.get("prepared_cache_size", 0))
         summary["effective_warm_cache_limit"] += int(layer.get("effective_warm_cache_limit", 0))
@@ -340,6 +344,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["prepared_cache_activation_stage_bonus_avg"] = (
             summary["prepared_cache_activation_stage_bonus"] / summary["layer_count"]
         )
+        summary["prepared_cache_budget_backoff_avg"] = (
+            summary["prepared_cache_budget_backoff"] / summary["layer_count"]
+        )
         summary["cold_promotion_penalty_avg"] = (
             summary["cold_promotion_penalty"] / summary["layer_count"]
         )
@@ -354,6 +361,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
     else:
         summary["prepared_cache_activation_stage_bonus_avg"] = None
+        summary["prepared_cache_budget_backoff_avg"] = None
         summary["cold_promotion_penalty_avg"] = None
         summary["prepared_cache_rebalance_pressure_avg"] = None
         summary["adaptive_activation_limit_avg"] = None
@@ -483,6 +491,9 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
                 else None
             ),
             "prepared_cache_limit": scheduler_summary.get("prepared_cache_limit"),
+            "prepared_cache_budget_backoff_avg": scheduler_summary.get(
+                "prepared_cache_budget_backoff_avg"
+            ),
             "effective_prepared_cache_limit": scheduler_summary.get("effective_prepared_cache_limit"),
             "prepared_cache_size": scheduler_summary.get("prepared_cache_size"),
             "effective_warm_cache_limit": scheduler_summary.get("effective_warm_cache_limit"),

@@ -3059,6 +3059,7 @@ class TestDynamicScheduler:
             "layers": [
                 {
                     "prepared_cache_limit": 3,
+                    "prepared_cache_budget_backoff": 1,
                     "effective_prepared_cache_limit": 2,
                     "prepared_cache_size": 2,
                     "effective_warm_cache_limit": 1,
@@ -3081,11 +3082,13 @@ class TestDynamicScheduler:
         summary = summarize_offload_diagnostics(offload_diagnostics)
 
         assert summary["prepared_cache_limit"] == 3
+        assert summary["prepared_cache_budget_backoff"] == 1
         assert summary["effective_prepared_cache_limit"] == 2
         assert summary["prepared_cache_size"] == 2
         assert summary["effective_warm_cache_limit"] == 1
         assert summary["prepared_cache_utilization"] == 2 / 3
         assert summary["effective_prepared_cache_utilization"] == 1.0
+        assert summary["prepared_cache_budget_backoff_avg"] == 1.0
         assert summary["prepared_cache_rebalance_evicted_warm"] == 1
         assert summary["prepared_cache_rebalance_evicted_activated"] == 2
         assert summary["prepared_cache_rebalance_demoted_to_warm"] == 2
@@ -3124,6 +3127,7 @@ class TestDynamicScheduler:
                     "offload_pipeline_apply_batch_evictions_total": 0,
                     "runtime_deferred_for_prefetch": 0,
                     "prepared_cache_limit": 4,
+                    "prepared_cache_budget_backoff_avg": 1.0,
                     "effective_prepared_cache_limit": 3,
                     "prepared_cache_size": 3,
                     "effective_warm_cache_limit": 2,
@@ -3152,6 +3156,7 @@ class TestDynamicScheduler:
         best_by_metric = summary["best_by_metric"]["prepared_cache_utilization"]
 
         assert profile["prepared_cache_limit"] == 4
+        assert profile["prepared_cache_budget_backoff_avg"] == 1.0
         assert profile["effective_prepared_cache_limit"] == 3
         assert profile["prepared_cache_size"] == 3
         assert profile["effective_warm_cache_limit"] == 2
@@ -3167,6 +3172,62 @@ class TestDynamicScheduler:
         assert comparison_row["prepared_cache_utilization"] == 0.75
         assert best_by_metric["scheduler_profile"] == "baseline"
         assert best_by_metric["value"] == 0.75
+
+    def test_prepared_cache_budget_backoff_scales_with_pressure(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(3):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(enabled=True, gpu_budget_per_layer=1, offload_tier=ExpertResidency.PIM),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=3,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=2,
+            expert_prepared_cache_size=3,
+        ).to(dtype=torch.float32)
+
+        hybrid.prepared_cache_activation_stage_bonus = 0.0
+        hybrid.prepared_cache_rebalance_evicted_warm = 4
+        hybrid.prepared_cache_rebalance_evicted_activated = 2
+
+        assert hybrid._prepared_cache_rebalance_pressure() == pytest.approx(2.0)
+        assert hybrid._prepared_cache_budget_backoff() == 2
+        assert hybrid._effective_prepared_cache_limit() == 1
+
+        hybrid.cold_promotion_penalty = 1.5
+        assert hybrid._prepared_cache_budget_backoff() == 0
+        assert hybrid._effective_prepared_cache_limit() == 3
 
     def test_effective_prepared_cache_limit_shrinks_under_pressure(self, tmp_path):
         from safetensors.torch import save_file

@@ -227,6 +227,12 @@ tags: [architecture]
     - `prepared_cache_activation_stage_bonus`：更偏向保留 activated 还是 warm candidate
     - `cold_promotion_penalty`：真正 apply 时仍落到 cold path 的压力
     这三类信号开始共同影响 activation / prebuild aggressiveness 与 effective prepared budget，是后续演进为完整 per-layer controller 的基础。
+41. 当前 effective prepared budget 又向前走了一步：
+    - controller 不再只支持“收缩 1 个 slot”的单级退让，而是通过 `prepared_cache_budget_backoff` 表达多级收缩
+    - `prepared_cache_rebalance_pressure` 越高，backoff 级别越高
+    - `prepared_cache_activation_stage_bonus` 越高，说明 activated tier 越值得保留，会抵消部分 backoff
+    - `cold_promotion_penalty` 越高，说明冷路径 promotion 仍多，会继续抵消 backoff，避免 prepared tier 被压得过小
+    这使 prepared tier 已从“静态上限 + 局部 heuristic”进一步走向真正的小型闭环控制器。
     这样 `HybridMoE.advance_offload_pipeline()` 现在已经可以按 `queued -> prefetching -> ready -> warmed -> activated -> applied` 的顺序推进一次 promotion。
 39. 这也让“前台 pipeline”里的工作边界更清晰了：
     - resident export / safetensors prefetch 负责准备权重

@@ -335,20 +335,39 @@ class HybridMoE(nn.Module):
         )
         return rebalance_events / max(1, int(self.expert_prepared_cache_size))
 
+    def _prepared_cache_budget_backoff(self) -> int:
+        if self.expert_prepared_cache_size is None:
+            return 0
+        base_limit = int(self.expert_prepared_cache_size)
+        if base_limit <= 1:
+            return 0
+
+        pressure = self._prepared_cache_rebalance_pressure()
+        backoff = 0
+        if pressure >= 1.0:
+            backoff += 1
+        if pressure >= 2.0:
+            backoff += 1
+
+        if self.prepared_cache_activation_stage_bonus > 0.25 and backoff > 0:
+            backoff -= 1
+        if self.prepared_cache_activation_stage_bonus >= 1.0 and backoff > 0:
+            backoff -= 1
+
+        if self.cold_promotion_penalty >= 1.0 and backoff > 0:
+            backoff -= 1
+        if self.cold_promotion_penalty >= 1.5 and backoff > 0:
+            backoff -= 1
+
+        return min(max(0, backoff), max(0, base_limit - 1))
+
     def _effective_prepared_cache_limit(self) -> Optional[int]:
         if self.expert_prepared_cache_size is None:
             return None
         base_limit = int(self.expert_prepared_cache_size)
         if base_limit <= 1:
             return base_limit
-        if self.cold_promotion_penalty >= 1.0:
-            return base_limit
-        if (
-            self._prepared_cache_rebalance_pressure() >= 1.0
-            and self.prepared_cache_activation_stage_bonus <= 0.25
-        ):
-            return max(1, base_limit - 1)
-        return base_limit
+        return max(1, base_limit - self._prepared_cache_budget_backoff())
 
     def _prepared_cache_retention_score(self, expert_idx: int, cache_kind: str) -> float:
         stage_bonus = self.prepared_cache_activation_stage_bonus if cache_kind == "activated" else 0.0
@@ -1480,6 +1499,7 @@ class HybridMoE(nn.Module):
             "pipeline_apply_batch_warm": self.pipeline_apply_batch_warm,
             "pipeline_apply_batch_cold": self.pipeline_apply_batch_cold,
             "prepared_cache_limit": self.expert_prepared_cache_size,
+            "prepared_cache_budget_backoff": self._prepared_cache_budget_backoff(),
             "effective_prepared_cache_limit": self._effective_prepared_cache_limit(),
             "prepared_cache_size": self._prepared_cache_size(),
             "effective_warm_cache_limit": self._effective_warm_cache_limit(),
