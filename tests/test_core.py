@@ -442,6 +442,45 @@ class TestSimpleEngine:
         assert engine.model.model.last_phase == "decode"
 
 
+class TestBackgroundOffloadWorker:
+    def test_worker_records_ticks_and_can_reset(self):
+        from nano_ktrans.kernels.offload_worker import BackgroundOffloadWorker
+
+        work = {"count": 0}
+
+        def tick():
+            work["count"] += 1
+            return 1 if work["count"] <= 2 else 0
+
+        worker = BackgroundOffloadWorker(
+            tick,
+            poll_interval_seconds=0.001,
+            auto_start=False,
+        )
+        try:
+            worker.start()
+            time.sleep(0.02)
+            diagnostics = worker.diagnostics()
+            assert diagnostics["enabled"] is True
+            assert diagnostics["ticks"] >= 1
+            assert diagnostics["work_ticks"] >= 1
+            worker.reset_counters()
+            diagnostics = worker.diagnostics()
+            assert diagnostics["ticks"] == 0
+            assert diagnostics["work_ticks"] == 0
+            assert diagnostics["last_work_items"] == 0
+        finally:
+            worker.shutdown()
+
+    def test_worker_shutdown_marks_disabled(self):
+        from nano_ktrans.kernels.offload_worker import BackgroundOffloadWorker
+
+        worker = BackgroundOffloadWorker(lambda: 0, poll_interval_seconds=0.001)
+        worker.shutdown()
+        diagnostics = worker.diagnostics()
+        assert diagnostics["enabled"] is False
+
+
 # ============================================================
 # Test 7: Weight Loader (file-based, no GPU needed)
 # ============================================================
@@ -1849,6 +1888,36 @@ class TestDynamicScheduler:
         assert diagnostics["offload_background_warm_prebuilt_total"] == 1
         assert diagnostics["offload_background_activation_ready_total"] == 1
 
+    def test_mixtral_model_reports_background_worker_diagnostics(self):
+        from nano_ktrans.models.mixtral import MixtralModel
+
+        class DummyWorker:
+            def diagnostics(self):
+                return {"enabled": True, "ticks": 3, "work_ticks": 2}
+
+        model = MixtralModel.__new__(MixtralModel)
+        model.layers = []
+        model.offload_runtime = type("Runtime", (), {"diagnostics": lambda self: {"offload_refresh_calls": 0}})()
+        model.offload_worker = DummyWorker()
+
+        diagnostics = model.offload_refresh_diagnostics()
+        assert diagnostics["background_worker"]["enabled"] is True
+        assert diagnostics["background_worker"]["ticks"] == 3
+
+    def test_mixtral_model_can_reset_background_worker_diagnostics(self):
+        from nano_ktrans.models.mixtral import MixtralModel
+
+        called = {"count": 0}
+
+        class DummyWorker:
+            def reset_counters(self):
+                called["count"] += 1
+
+        model = MixtralModel.__new__(MixtralModel)
+        model.offload_worker = DummyWorker()
+        model.reset_offload_worker_diagnostics()
+        assert called["count"] == 1
+
     def test_scheduler_summary_reports_background_offload_tick_metrics(self):
         from nano_ktrans.scheduler.diagnostics import summarize_offload_diagnostics
 
@@ -1857,6 +1926,8 @@ class TestDynamicScheduler:
                 "offload_refresh": {
                     "offload_refresh_calls": 2,
                     "offload_background_ticks": 3,
+                    "offload_background_warm_prebuilt_total": 4,
+                    "offload_background_activation_ready_total": 2,
                     "offload_pipeline_ticks": 2,
                     "offload_pipeline_background_ready_callback_total": 5,
                 },
@@ -1867,6 +1938,8 @@ class TestDynamicScheduler:
         )
 
         assert summary["offload_background_ticks"] == 3
+        assert summary["offload_background_warm_prebuilt_total"] == 4
+        assert summary["offload_background_activation_ready_total"] == 2
         assert summary["offload_pipeline_background_ready_callback_total"] == 5
 
     def test_materialization_manager_poll_ready(self, tmp_path):
@@ -4748,6 +4821,7 @@ class TestDynamicScheduler:
         from nano_ktrans.llm import LLM
 
         llm = LLM.__new__(LLM)
+        worker_reset_calls = {"count": 0}
 
         class DummyRuntime:
             def __init__(self):
@@ -4781,6 +4855,7 @@ class TestDynamicScheduler:
             {
                 "layers": [layer],
                 "offload_runtime": runtime,
+                "reset_offload_worker_diagnostics": lambda self: worker_reset_calls.__setitem__("count", worker_reset_calls["count"] + 1),
             },
         )()
         llm.model = type("Wrapper", (), {"model": model})()
@@ -4794,3 +4869,18 @@ class TestDynamicScheduler:
         assert runtime.prefetch_submitted_total == 0
         assert runtime.background_ready_callback_total == 0
         assert runtime.last_phase == ""
+        assert worker_reset_calls["count"] == 1
+
+    def test_llm_shutdown_calls_model_offload_worker_shutdown(self):
+        from nano_ktrans.llm import LLM
+
+        llm = LLM.__new__(LLM)
+        called = {"count": 0}
+
+        class DummyModel:
+            def shutdown_offload_worker(self):
+                called["count"] += 1
+
+        llm.model = type("Wrapper", (), {"model": DummyModel()})()
+        llm.shutdown()
+        assert called["count"] == 1

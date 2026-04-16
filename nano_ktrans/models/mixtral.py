@@ -15,6 +15,7 @@ from nano_ktrans.layers.linear import QKVParallelLinear, RowParallelLinear
 from nano_ktrans.layers.rotary_embedding import get_rope
 from nano_ktrans.layers.hybrid_moe import HybridMoE
 from nano_ktrans.kernels.migration_runtime import MigrationPipelineRuntime
+from nano_ktrans.kernels.offload_worker import BackgroundOffloadWorker
 from nano_ktrans.models.config import GenericMoeConfig
 from nano_ktrans.scheduler import DynamicExpertScheduler
 from nano_ktrans.utils.expert_runtime_state import ExpertResidencyPlan
@@ -232,11 +233,16 @@ class MixtralModel(nn.Module):
         dynamic_expert_scheduler: Optional[DynamicExpertScheduler] = None,
         expert_prepared_cache_size: int | None = None,
         prepared_controller_aggressiveness: float = 0.0,
+        enable_background_offload_worker: bool = False,
+        background_offload_poll_interval_seconds: float = 0.005,
     ):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
         self.offload_runtime = MigrationPipelineRuntime()
+        self.enable_background_offload_worker = bool(enable_background_offload_worker)
+        self.background_offload_poll_interval_seconds = float(background_offload_poll_interval_seconds)
+        self.offload_worker: BackgroundOffloadWorker | None = None
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         
@@ -250,10 +256,17 @@ class MixtralModel(nn.Module):
                 offload_backend_kwargs=offload_backend_kwargs,
                 residency_plan=residency_plan,
                 dynamic_expert_scheduler=dynamic_expert_scheduler,
+                expert_prepared_cache_size=expert_prepared_cache_size,
+                prepared_controller_aggressiveness=prepared_controller_aggressiveness,
             ) for layer_idx in range(config.num_hidden_layers)
         ])
         
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        if self.enable_background_offload_worker:
+            self.offload_worker = BackgroundOffloadWorker(
+                lambda: int(self.background_tick_offload_state(phase="decode")),
+                poll_interval_seconds=self.background_offload_poll_interval_seconds,
+            )
 
     def refresh_offload_state(self, *, phase: str = "decode") -> int:
         if "offload_runtime" not in self.__dict__:
@@ -270,7 +283,22 @@ class MixtralModel(nn.Module):
     def offload_refresh_diagnostics(self) -> dict:
         if "offload_runtime" not in self.__dict__:
             self.offload_runtime = MigrationPipelineRuntime()
-        return self.offload_runtime.diagnostics()
+        offload_worker = self.__dict__.get("offload_worker")
+        diagnostics = self.offload_runtime.diagnostics()
+        diagnostics["background_worker"] = (
+            None if offload_worker is None else offload_worker.diagnostics()
+        )
+        return diagnostics
+
+    def shutdown_offload_worker(self) -> None:
+        offload_worker = self.__dict__.get("offload_worker")
+        if offload_worker is not None:
+            offload_worker.shutdown()
+
+    def reset_offload_worker_diagnostics(self) -> None:
+        offload_worker = self.__dict__.get("offload_worker")
+        if offload_worker is not None:
+            offload_worker.reset_counters()
 
     def forward(
         self,
@@ -302,6 +330,10 @@ class MixtralForCausalLM(nn.Module):
         offload_backend_kwargs: dict | None = None,
         residency_plan: Optional[ExpertResidencyPlan] = None,
         dynamic_expert_scheduler: Optional[DynamicExpertScheduler] = None,
+        expert_prepared_cache_size: int | None = None,
+        prepared_controller_aggressiveness: float = 0.0,
+        enable_background_offload_worker: bool = False,
+        background_offload_poll_interval_seconds: float = 0.005,
     ):
         super().__init__()
         self.model = MixtralModel(
@@ -314,6 +346,8 @@ class MixtralForCausalLM(nn.Module):
             dynamic_expert_scheduler=dynamic_expert_scheduler,
             expert_prepared_cache_size=expert_prepared_cache_size,
             prepared_controller_aggressiveness=prepared_controller_aggressiveness,
+            enable_background_offload_worker=enable_background_offload_worker,
+            background_offload_poll_interval_seconds=background_offload_poll_interval_seconds,
         )
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.packed_modules_mapping = {

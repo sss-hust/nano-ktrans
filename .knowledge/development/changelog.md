@@ -216,6 +216,17 @@ tags: [changelog]
 - benchmark 新增 `--scheduler-profile-sweep`，可在单次运行中依次比较多组 scheduler profile。
 - `normalize_scheduler_profiles()` 会做 profile 归一化与去重，避免 sweep 配置重复。
 
+<!-- updated: 2026-04-17 13:25 -->
+
+- 新增 `nano_ktrans/kernels/offload_worker.py`，提供最小后台 offload worker 骨架，可在独立线程中周期性推进 `background_tick_offload_state()`。
+- `MixtralModel` 现已支持：
+  - `enable_background_offload_worker`
+  - `background_offload_poll_interval_seconds`
+  - `offload_refresh_diagnostics()` 暴露 background worker 诊断
+  - `reset_offload_worker_diagnostics()` / `shutdown_offload_worker()`
+- `LLM.reset_offload_diagnostics()` 已同步重置 background worker 计数，`LLM.shutdown()` 会在生成结束后关闭后台 worker。
+- 新增对应测试覆盖 background worker 计数、reset 和 shutdown 路径。
+
 ## 2026-04-16
 
 - <!-- updated: 2026-04-16 00:40 --> **[migration-pipeline-runtime]** 新增 `MigrationPipelineRuntime`，将 token-step 级 offload refresh 提升为最小流水线运行时；ready prefetch 轮询与 ready promotion 现在可在进入模型前统一推进，不再依赖层内 forward 临时收敛。

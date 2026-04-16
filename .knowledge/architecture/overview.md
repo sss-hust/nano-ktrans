@@ -481,6 +481,15 @@ tags: [architecture]
     - decode 阶段也会在 background tick 中提前尝试 `ready -> warmed -> activated`
     - 主 refresh 则继续负责最终的 `activated -> applied`
     这样后台路径第一次真正覆盖到了 prepared tier，而不只是单纯的 ready callback；系统已经开始向“后台准备对象，前台只做最终 commit”这个方向靠拢。
+78. 当前系统还新增了最小后台 offload worker：
+    - `BackgroundOffloadWorker` 在独立线程中周期性调用模型级 `background_tick_offload_state()`
+    - 后台线程当前主要推进：
+      - background ready callback
+      - `READY -> WARMED`
+      - `WARMED -> ACTIVATED`
+    - 前台 decode 主路径则继续负责：
+      - `ACTIVATED -> APPLIED`
+    这意味着当前系统已经从“纯前台 hook 推进”演化成了“后台准备 + 前台 commit”的雏形；虽然还不是真正的 GPU<->PIM 异步迁移执行器，但后台 worker 已经是独立对象，并具备独立计数、reset 和 shutdown 生命周期。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

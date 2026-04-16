@@ -58,6 +58,8 @@ class LLM:
         scheduler_prefetch_candidate_budget_per_layer: Optional[int] = None,
         scheduler_prepared_cache_budget_per_layer: Optional[int] = None,
         scheduler_profile: str = SCHEDULER_PROFILE_BASELINE,
+        enable_background_offload_worker: bool = False,
+        background_offload_poll_interval_seconds: float = 0.005,
     ):
         if device is None or device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -184,6 +186,8 @@ class LLM:
         self.prepared_controller_aggressiveness = resolve_prepared_controller_aggressiveness(
             self.scheduler_profile
         )
+        self.enable_background_offload_worker = bool(enable_background_offload_worker)
+        self.background_offload_poll_interval_seconds = float(background_offload_poll_interval_seconds)
 
         # DEBUG: 仅测试一层以排查崩溃原因
         # config.num_hidden_layers = 1
@@ -200,6 +204,8 @@ class LLM:
             dynamic_expert_scheduler=self.dynamic_expert_scheduler,
             expert_prepared_cache_size=prepared_cache_budget,
             prepared_controller_aggressiveness=self.prepared_controller_aggressiveness,
+            enable_background_offload_worker=self.enable_background_offload_worker,
+            background_offload_poll_interval_seconds=self.background_offload_poll_interval_seconds,
         )
         self.model = self.model.to(device=device, dtype=model_dtype)
             
@@ -214,31 +220,34 @@ class LLM:
         # 1. Tokenize prompt
         inputs = self.tokenizer(prompt, return_tensors="pt")
         input_ids = inputs.input_ids.to(self.device)
-        
+
         seq_len = input_ids.shape[1]
         print(f"Prompt tokens: {seq_len}. Starts generation...")
-        
-        # 2. Prefill
-        logits = self.engine.prefill(input_ids)
-        next_token = torch.argmax(logits[0, -1, :], dim=-1).unsqueeze(0).unsqueeze(0)
-        
-        generated_ids = [next_token.item()]
-        
-        # 3. Decode Loop
-        for i in range(max_new_tokens - 1):
-            logits = self.engine.decode_step(next_token, seq_len + i)
+
+        try:
+            # 2. Prefill
+            logits = self.engine.prefill(input_ids)
             next_token = torch.argmax(logits[0, -1, :], dim=-1).unsqueeze(0).unsqueeze(0)
-            
-            token_id = next_token.item()
-            generated_ids.append(token_id)
-            
-            # Simple stopping criteria
-            if token_id == self.tokenizer.eos_token_id:
-                break
-                
-        # 4. Decode output
-        output_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-        return output_text
+
+            generated_ids = [next_token.item()]
+
+            # 3. Decode Loop
+            for i in range(max_new_tokens - 1):
+                logits = self.engine.decode_step(next_token, seq_len + i)
+                next_token = torch.argmax(logits[0, -1, :], dim=-1).unsqueeze(0).unsqueeze(0)
+
+                token_id = next_token.item()
+                generated_ids.append(token_id)
+
+                # Simple stopping criteria
+                if token_id == self.tokenizer.eos_token_id:
+                    break
+
+            # 4. Decode output
+            output_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+            return output_text
+        finally:
+            self.shutdown()
 
     def get_offload_diagnostics(self) -> dict:
         layers = []
@@ -255,6 +264,8 @@ class LLM:
             ),
             "prepared_cache_budget": self.prepared_cache_budget,
             "prepared_controller_aggressiveness": self.prepared_controller_aggressiveness,
+            "background_offload_worker_enabled": self.enable_background_offload_worker,
+            "background_offload_poll_interval_seconds": self.background_offload_poll_interval_seconds,
             "offload_refresh": self.model.model.offload_refresh_diagnostics(),
             "dynamic_scheduler": self.dynamic_expert_scheduler.diagnostics(),
             "layer_count": len(layers),
@@ -282,6 +293,9 @@ class LLM:
             runtime.layers_touched_total = 0
             runtime.background_ready_callback_total = 0
             runtime.last_phase = ""
+        reset_worker_fn = getattr(self.model.model, "reset_offload_worker_diagnostics", None)
+        if reset_worker_fn is not None:
+            reset_worker_fn()
         for layer in self.model.model.layers:
             hybrid_moe = getattr(layer, "hybrid_moe", None)
             if hybrid_moe is None:
@@ -328,3 +342,8 @@ class LLM:
             hybrid_moe.activation_submitted = 0
             hybrid_moe.activation_ready = 0
             hybrid_moe.activation_applied = 0
+
+    def shutdown(self) -> None:
+        shutdown_fn = getattr(self.model.model, "shutdown_offload_worker", None)
+        if shutdown_fn is not None:
+            shutdown_fn()

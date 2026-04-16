@@ -98,6 +98,8 @@ updated: 2026-04-17 13:00
 - [x] scheduler summary 现已汇总 `offload_background_ticks / offload_pipeline_background_ready_callback_total`，background tick 路径已进入 benchmark 可观测面
 - [x] `LLM.reset_offload_diagnostics()` 现已同步清零 runtime 级 background tick 计数，单次 run 的 background offload 指标不再混入历史步数
 - [x] background offload tick 现在不只推进 ready callback，也会提前推进一部分 `READY -> WARMED/ACTIVATED`，后台路径已开始覆盖 prepared tier 的前半段
+- [x] 新增最小后台 offload worker 骨架，后台线程可周期性推进 `background_tick_offload_state()`，decode 主线程不再是唯一能推动 ready/warm/activation 前半段前进的入口
+- [x] background worker 诊断现已并入 `offload_refresh_diagnostics()`，并支持 per-run reset，benchmark 可独立观察后台 worker tick 与 work tick 行为
 
 ## 阻塞项
 
