@@ -650,6 +650,11 @@ tags: [architecture]
     - tick 开始前已经存在的 resident-commit batch，允许进入本轮 background apply
     - 同一 tick 新推进到 `resident_commit_batch_queue` 的 batch，只会被标成 prefinalized，不会立即 commit
     这样最终 resident commit 也具备了稳定的流水线边界，避免同一轮里既组最终 batch 又立刻消费。
+96. resident commit 现已进一步拆成 `resident_commit_batch_queue -> resident_commit_finalize_queue -> resident set`：
+    - background tick 会先把 final resident batches 预推进到 `resident_commit_finalize_queue`
+    - 同一 tick 新推进到 finalize queue 的 batch 只记作 prefinalized，不会立即消费
+    - resident set apply 只消费 tick 开始前已经存在的 finalize batches
+    这样最后一段已经从“resident batch buffer + finalize”推进成“resident batch staging + finalize queue + metadata finalize”的更稳定三段结构。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

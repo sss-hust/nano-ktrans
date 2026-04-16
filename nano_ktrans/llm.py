@@ -294,6 +294,8 @@ class LLM:
             runtime.background_apply_commit_batch_queue_prefinalized_total = 0
             runtime.background_resident_commit_batch_queue_enqueued_total = 0
             runtime.background_resident_commit_batch_queue_prefinalized_total = 0
+            runtime.background_resident_commit_finalize_queue_enqueued_total = 0
+            runtime.background_resident_commit_finalize_queue_prefinalized_total = 0
             runtime.ready_polled_total = 0
             runtime.activation_ready_total = 0
             runtime.ready_applied_total = 0
@@ -380,6 +382,14 @@ class LLM:
             hybrid_moe.background_resident_commit_batch_queue_enqueued = 0
             hybrid_moe.background_resident_commit_batch_queue_committed_batches = 0
             hybrid_moe.background_resident_commit_batch_queue_prefinalized_batches = 0
+            hybrid_moe.resident_commit_finalize_queue_enqueued = 0
+            hybrid_moe.resident_commit_finalize_queue_batches = 0
+            hybrid_moe.resident_commit_finalize_queue_committed_batches = 0
+            hybrid_moe.resident_commit_finalize_queue_pruned = 0
+            hybrid_moe.resident_commit_finalize_queue_evictions = 0
+            hybrid_moe.background_resident_commit_finalize_queue_enqueued = 0
+            hybrid_moe.background_resident_commit_finalize_queue_committed_batches = 0
+            hybrid_moe.background_resident_commit_finalize_queue_prefinalized_batches = 0
             hybrid_moe.apply_commit_ready_hits = 0
             hybrid_moe.apply_commit_ready_stores = 0
             hybrid_moe.apply_commit_ready_pruned = 0
