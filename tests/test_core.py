@@ -3031,6 +3031,8 @@ class TestDynamicScheduler:
                     "prepared_cache_rebalance_demoted_to_warm": 2,
                     "prepared_cache_rebalance_dropped_to_ready": 1,
                     "prepared_cache_activation_stage_bonus": 0.75,
+                    "adaptive_activation_limit": 2,
+                    "adaptive_prebuild_limit": 3,
                     "activated_cache_size": 1,
                     "warm_cache_size": 1,
                     "backend": {"migration_manager": {"layers": []}},
@@ -3050,6 +3052,8 @@ class TestDynamicScheduler:
         assert summary["prepared_cache_rebalance_dropped_to_ready"] == 1
         assert summary["prepared_cache_rebalance_activated_ratio"] == 2 / 3
         assert summary["prepared_cache_activation_stage_bonus_avg"] == 0.75
+        assert summary["adaptive_activation_limit_avg"] == 2
+        assert summary["adaptive_prebuild_limit_avg"] == 3
 
     def test_profile_sweep_summary_includes_prepared_cache_metrics(self):
         from nano_ktrans.scheduler.diagnostics import summarize_profile_sweep_results
@@ -3087,6 +3091,8 @@ class TestDynamicScheduler:
                     "prepared_cache_rebalance_dropped_to_ready": 1,
                     "prepared_cache_rebalance_activated_ratio": 0.0,
                     "prepared_cache_activation_stage_bonus_avg": 0.25,
+                    "adaptive_activation_limit_avg": 1.0,
+                    "adaptive_prebuild_limit_avg": 2.0,
                     "migration_activation_eviction_regressions": 0,
                     "migration_warm_eviction_regressions": 0,
                     "pipeline_prefetch_overlap_hits": 2,
@@ -3106,6 +3112,8 @@ class TestDynamicScheduler:
         assert profile["prepared_cache_rebalance_evicted_warm"] == 1
         assert profile["prepared_cache_rebalance_evicted_activated"] == 0
         assert profile["prepared_cache_activation_stage_bonus_avg"] == 0.25
+        assert profile["adaptive_activation_limit_avg"] == 1.0
+        assert profile["adaptive_prebuild_limit_avg"] == 2.0
         assert comparison_row["prepared_cache_utilization"] == 0.75
         assert best_by_metric["scheduler_profile"] == "baseline"
         assert best_by_metric["value"] == 0.75
@@ -3199,6 +3207,71 @@ class TestDynamicScheduler:
 
         assert hybrid.prepared_cache_activation_stage_bonus != initial_bonus
         assert hybrid.prepared_cache_activation_stage_bonus >= 0.0
+
+    def test_adaptive_cache_limits_shrink_under_prepared_cache_pressure(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(4):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=2,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=4,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=4,
+            expert_prepared_cache_size=2,
+        ).to(dtype=torch.float32)
+
+        hybrid.prepared_cache_activation_stage_bonus = 0.0
+        for expert_idx in (1, 2):
+            module = hybrid._build_runtime_expert(expert_idx, torch.device("cpu"), torch.float32)
+            hybrid.offload_backend.migration_manager.mark_state(
+                0,
+                expert_idx,
+                state=MigrationLifecycle.ACTIVATED,
+                phase="decode",
+            )
+            hybrid._store_activated_module(expert_idx, module.to(dtype=torch.float32))
+
+        assert hybrid._prepared_cache_pressure() >= 1.0
+        assert hybrid._adaptive_activation_limit() == 1
+        assert hybrid._adaptive_prebuild_limit() == 2
 
     def test_warm_cache_eviction_downgrades_lifecycle_to_ready(self, tmp_path):
         from safetensors.torch import save_file

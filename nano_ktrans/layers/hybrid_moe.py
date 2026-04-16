@@ -495,10 +495,36 @@ class HybridMoE(nn.Module):
         }
         return priorities.get(state, 0)
 
+    def _prepared_cache_pressure(self) -> float:
+        if not self.expert_prepared_cache_size:
+            return 0.0
+        return self._prepared_cache_size() / max(1, int(self.expert_prepared_cache_size))
+
+    def _adaptive_activation_limit(self) -> int:
+        base_limit = self._activated_cache_limit()
+        if self.expert_prepared_cache_size is None:
+            return base_limit
+        if self._prepared_cache_pressure() >= 1.0 and self.prepared_cache_activation_stage_bonus <= 0.25:
+            return max(1, base_limit - 1)
+        if self.prepared_cache_activation_stage_bonus >= 1.0:
+            return min(base_limit + 1, max(base_limit, int(self.expert_prepared_cache_size)))
+        return base_limit
+
+    def _adaptive_prebuild_limit(self) -> int:
+        base_limit = max(1, self._activated_cache_limit() * 2)
+        if self.expert_prepared_cache_size is None:
+            return base_limit
+        pressure = self._prepared_cache_pressure()
+        if pressure >= 1.0:
+            return max(1, min(base_limit, int(self.expert_prepared_cache_size)))
+        if self.prepared_cache_activation_stage_bonus >= 1.0:
+            return min(base_limit + 1, max(base_limit, int(self.expert_prepared_cache_size) + 1))
+        return base_limit
+
     def _activation_target_ids(self) -> set[int]:
         if self.offload_backend is None:
             return set()
-        limit = self._activated_cache_limit()
+        limit = self._adaptive_activation_limit()
         candidates: set[int] = {int(expert_idx) for expert_idx in self.activated_expert_cache.keys()}
         for op in self.offload_backend.migration_manager.peek_layer(self.layer_idx):
             if op.dst != ExpertResidency.GPU:
@@ -522,7 +548,7 @@ class HybridMoE(nn.Module):
     def _prebuild_target_ids(self) -> set[int]:
         if self.offload_backend is None:
             return set()
-        limit = max(1, self._activated_cache_limit() * 2)
+        limit = self._adaptive_prebuild_limit()
         candidates: set[int] = set()
         for op in self.offload_backend.migration_manager.peek_layer(self.layer_idx):
             if op.dst != ExpertResidency.GPU:
@@ -1413,6 +1439,8 @@ class HybridMoE(nn.Module):
             "prepared_cache_rebalance_demoted_to_warm": self.prepared_cache_rebalance_demoted_to_warm,
             "prepared_cache_rebalance_dropped_to_ready": self.prepared_cache_rebalance_dropped_to_ready,
             "prepared_cache_activation_stage_bonus": self.prepared_cache_activation_stage_bonus,
+            "adaptive_activation_limit": self._adaptive_activation_limit(),
+            "adaptive_prebuild_limit": self._adaptive_prebuild_limit(),
             "warm_cache_hits": self.warm_cache_hits,
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,

@@ -379,6 +379,11 @@ tags: [architecture]
     - 这个 bonus 会随着最近的 prepared-cache 重平衡方向做小幅调整
     - 因而系统开始具备“近期更容易牺牲哪一层，就稍微补偿哪一层”的最小动态倾向
     这还不是完整的 budget controller，但已经把 prepared tier 从静态 heuristic 推进到了弱自适应策略。
+64. 这种弱自适应又进一步反馈到了 activation/prebuild 限额：
+    - 当前系统会根据 prepared-cache pressure 和 stage bonus 推出 `adaptive_activation_limit`
+    - 同时也会调整 `adaptive_prebuild_limit`
+    - 当 prepared tier 已经吃满且 activated 偏置较低时，pipeline 会自动降低后续准备动作的激进程度
+    这样 prepared-cache 不再只是事后淘汰，而开始对前向的 prebuild / activation 候选规模形成闭环约束。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
