@@ -1828,15 +1828,18 @@ class TestDynamicScheduler:
         from queue import Queue
         from threading import Event
         manager._lock = Lock()
+        manager._ready_mark_queue = Queue()
         manager._resolve_queue = Queue()
         manager._stop_event = Event()
         manager._resolver_thread = None
+        manager._ready_callback = None
         manager.prefetch_submitted = 0
         manager.prefetch_resolved = 0
         manager.prefetch_polled_ready = 0
         manager.prefetch_completion_events = 0
         manager.prefetch_background_resolved = 0
         manager.prefetch_background_failures = 0
+        manager.prefetch_background_ready_callbacks = 0
         manager.resident_stage_hits = 0
         manager.cache_hits = 0
         manager.sync_loads = 0
@@ -1892,6 +1895,43 @@ class TestDynamicScheduler:
         assert diagnostics["prefetch_polled_ready"] >= 1
         assert diagnostics["pending_prefetches"] == 0
         assert manager.has_pending_or_ready() is False
+        manager.shutdown()
+
+    def test_materialization_manager_ready_callback_marks_ready(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_materialization import ExpertMaterializationManager
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        manager = ExpertMaterializationManager(
+            weight_path=str(weight_path),
+            expert_key_template="model.layers.{layer}.block_sparse_moe.experts.{expert}.{proj}.weight",
+            max_cached_experts=2,
+            prefetch_workers=1,
+        )
+        ready = []
+        manager.set_ready_callback(lambda layer_idx, expert_idx: ready.append((layer_idx, expert_idx)))
+        assert manager.prefetch(0, 1) is True
+
+        for _ in range(20):
+            manager.drain_ready_callbacks()
+            if ready:
+                break
+            time.sleep(0.01)
+
+        diagnostics = manager.diagnostics()
+        assert ready == [(0, 1)]
+        assert diagnostics["prefetch_background_ready_callbacks"] >= 1
         manager.shutdown()
 
     def test_hybrid_moe_pipeline_applies_ready_promotions(self, tmp_path):

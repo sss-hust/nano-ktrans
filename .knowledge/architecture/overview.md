@@ -453,6 +453,11 @@ tags: [architecture]
     - 第一段先统一 resolve 每个 expert 的来源：`activated / warm / cold`
     - 第二段再统一 apply 到 GPU resident set
     当前 resident 注入还不是底层真正 batched apply，但系统边界已经从“批量选目标、逐 expert 一边查来源一边 apply”推进到“batch resolve -> batch commit”的形态，这为后续把 `activated/warm -> resident set` 做成真正批处理提供了清晰接口。
+72. materialization 解析完成后现在还可以直接触发后台 ready callback：
+    - ready callback 会在 expert 完成解析并写入 staging cache 后立即触发
+    - callback 可把对应 migration lifecycle 直接推进到 `READY`
+    - 前台 token-step refresh 只需要保留兜底 drain 和汇总语义
+    这让系统从“前台轮询 future 完成”进一步推进到了“后台完成即推状态”，虽然仍未形成独立 migration worker，但 `prefetching -> ready` 已不再完全依赖前台 hook。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

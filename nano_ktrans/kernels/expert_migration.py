@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from threading import RLock
 from typing import Callable, Dict, List, Sequence
 
 from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency
@@ -238,39 +239,45 @@ class ExpertMigrationManager:
 
     def __init__(self) -> None:
         self._queues: Dict[int, LayerMigrationQueue] = {}
+        self._lock = RLock()
 
     def queue(self, layer_idx: int, ops: Sequence[ExpertMigrationOp], *, phase: str) -> None:
-        if layer_idx not in self._queues:
-            self._queues[layer_idx] = LayerMigrationQueue(layer_idx=layer_idx)
-        self._queues[layer_idx].enqueue(ops, phase=phase)
+        with self._lock:
+            if layer_idx not in self._queues:
+                self._queues[layer_idx] = LayerMigrationQueue(layer_idx=layer_idx)
+            self._queues[layer_idx].enqueue(ops, phase=phase)
 
     def drain_layer(self, layer_idx: int) -> List[ExpertMigrationOp]:
-        queue = self._queues.get(layer_idx)
-        if queue is None:
-            return []
-        return queue.drain()
+        with self._lock:
+            queue = self._queues.get(layer_idx)
+            if queue is None:
+                return []
+            return queue.drain()
 
     def take_layer(
         self,
         layer_idx: int,
         predicate: Callable[[ExpertMigrationOp], bool],
     ) -> List[ExpertMigrationOp]:
-        queue = self._queues.get(layer_idx)
-        if queue is None:
-            return []
-        return queue.take(predicate)
+        with self._lock:
+            queue = self._queues.get(layer_idx)
+            if queue is None:
+                return []
+            return queue.take(predicate)
 
     def peek_layer(self, layer_idx: int) -> List[ExpertMigrationOp]:
-        queue = self._queues.get(layer_idx)
-        if queue is None:
-            return []
-        return queue.peek()
+        with self._lock:
+            queue = self._queues.get(layer_idx)
+            if queue is None:
+                return []
+            return queue.peek()
 
     def take_ready_layer(self, layer_idx: int) -> List[ExpertMigrationOp]:
-        queue = self._queues.get(layer_idx)
-        if queue is None:
-            return []
-        return queue.take_ready()
+        with self._lock:
+            queue = self._queues.get(layer_idx)
+            if queue is None:
+                return []
+            return queue.take_ready()
 
     def mark_state(
         self,
@@ -283,66 +290,69 @@ class ExpertMigrationManager:
         reason: str | None = None,
         phase: str | None = None,
     ) -> None:
-        queue = self._queues.get(layer_idx)
-        if queue is None:
-            return
-        queue.mark_state(
-            expert_idx,
-            src=src,
-            dst=dst,
-            reason=reason,
-            phase=phase,
-            state=state,
-        )
+        with self._lock:
+            queue = self._queues.get(layer_idx)
+            if queue is None:
+                return
+            queue.mark_state(
+                expert_idx,
+                src=src,
+                dst=dst,
+                reason=reason,
+                phase=phase,
+                state=state,
+            )
 
     def state_for(self, layer_idx: int, expert_idx: int) -> MigrationLifecycle | None:
-        queue = self._queues.get(layer_idx)
-        if queue is None:
-            return None
-        return queue.state_for(expert_idx)
+        with self._lock:
+            queue = self._queues.get(layer_idx)
+            if queue is None:
+                return None
+            return queue.state_for(expert_idx)
 
     def diagnostics(self) -> dict:
-        return {
-            "layers": [
-                {
-                    "layer_idx": layer_idx,
-                    "pending_ops": len(queue.pending_ops),
-                    "history": [
-                        {
-                            "phase": record.phase,
-                            "plan_size": record.plan_size,
-                            "deduped_plan_size": record.deduped_plan_size,
-                            "completed": record.completed,
-                        }
-                        for record in queue.history
-                    ],
-                    "total_enqueued_ops": queue.total_enqueued_ops,
-                    "total_deduped_ops": queue.total_deduped_ops,
-                    "total_drained_ops": queue.total_drained_ops,
-                    "total_ready_drains": queue.total_ready_drains,
-                    "total_prefetching_events": queue.total_prefetching_events,
-                    "total_ready_events": queue.total_ready_events,
-                    "total_warmed_events": queue.total_warmed_events,
-                    "total_activated_events": queue.total_activated_events,
-                    "total_deferred_events": queue.total_deferred_events,
-                    "total_applied_events": queue.total_applied_events,
-                    "total_requeue_preserved_states": queue.total_requeue_preserved_states,
-                    "total_stage_skips": queue.total_stage_skips,
-                    "total_warm_eviction_regressions": queue.total_warm_eviction_regressions,
-                    "total_activation_eviction_regressions": queue.total_activation_eviction_regressions,
-                    "lifecycle_state_counts": queue.lifecycle_state_counts(),
-                    "lifecycle": [
-                        {
-                            "expert_idx": tracked.expert_idx,
-                            "src": tracked.src,
-                            "dst": tracked.dst,
-                            "reason": tracked.reason,
-                            "phase": tracked.phase,
-                            "state": tracked.state.value,
-                        }
-                        for _, tracked in sorted(queue.lifecycle.items())
-                    ],
-                }
-                for layer_idx, queue in sorted(self._queues.items())
-            ]
-        }
+        with self._lock:
+            return {
+                "layers": [
+                    {
+                        "layer_idx": layer_idx,
+                        "pending_ops": len(queue.pending_ops),
+                        "history": [
+                            {
+                                "phase": record.phase,
+                                "plan_size": record.plan_size,
+                                "deduped_plan_size": record.deduped_plan_size,
+                                "completed": record.completed,
+                            }
+                            for record in queue.history
+                        ],
+                        "total_enqueued_ops": queue.total_enqueued_ops,
+                        "total_deduped_ops": queue.total_deduped_ops,
+                        "total_drained_ops": queue.total_drained_ops,
+                        "total_ready_drains": queue.total_ready_drains,
+                        "total_prefetching_events": queue.total_prefetching_events,
+                        "total_ready_events": queue.total_ready_events,
+                        "total_warmed_events": queue.total_warmed_events,
+                        "total_activated_events": queue.total_activated_events,
+                        "total_deferred_events": queue.total_deferred_events,
+                        "total_applied_events": queue.total_applied_events,
+                        "total_requeue_preserved_states": queue.total_requeue_preserved_states,
+                        "total_stage_skips": queue.total_stage_skips,
+                        "total_warm_eviction_regressions": queue.total_warm_eviction_regressions,
+                        "total_activation_eviction_regressions": queue.total_activation_eviction_regressions,
+                        "lifecycle_state_counts": queue.lifecycle_state_counts(),
+                        "lifecycle": [
+                            {
+                                "expert_idx": tracked.expert_idx,
+                                "src": tracked.src,
+                                "dst": tracked.dst,
+                                "reason": tracked.reason,
+                                "phase": tracked.phase,
+                                "state": tracked.state.value,
+                            }
+                            for _, tracked in sorted(queue.lifecycle.items())
+                        ],
+                    }
+                    for layer_idx, queue in sorted(self._queues.items())
+                ]
+            }

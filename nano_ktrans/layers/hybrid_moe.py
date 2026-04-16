@@ -160,6 +160,7 @@ class HybridMoE(nn.Module):
             max_cached_experts=expert_prefetch_cache_size,
             prefetch_workers=expert_prefetch_workers,
         )
+        self.materialization_manager.set_ready_callback(self._on_materialization_ready)
 
         # 只有存在离线 CPU 专家时才初始化 CPU backend。
         self.offload_backend = None
@@ -234,6 +235,17 @@ class HybridMoE(nn.Module):
         if submitted:
             self.prefetch_enqueued += 1
 
+    def _on_materialization_ready(self, layer_idx: int, expert_idx: int) -> None:
+        if self.offload_backend is None:
+            return
+        if int(layer_idx) != int(self.layer_idx):
+            return
+        self.offload_backend.migration_manager.mark_state(
+            self.layer_idx,
+            int(expert_idx),
+            state=MigrationLifecycle.READY,
+        )
+
     def _prime_pending_promotions(self, *, phase: str) -> int:
         if (
             self.offload_backend is None
@@ -295,8 +307,9 @@ class HybridMoE(nn.Module):
     def refresh_offload_state(self) -> int:
         if self.offload_backend is None:
             return 0
+        callback_ready = self.materialization_manager.drain_ready_callbacks()
         if not self.materialization_manager.has_pending_or_ready():
-            return 0
+            return int(callback_ready)
         ready_keys = self.materialization_manager.poll_ready()
         for layer_idx, expert_idx in ready_keys:
             if int(layer_idx) != int(self.layer_idx):
@@ -306,7 +319,7 @@ class HybridMoE(nn.Module):
                 int(expert_idx),
                 state=MigrationLifecycle.READY,
             )
-        return len(ready_keys)
+        return int(callback_ready) + len(ready_keys)
 
     def _insert_warm_module(self, expert_idx: int, module: nn.Module) -> None:
         expert_key = str(expert_idx)

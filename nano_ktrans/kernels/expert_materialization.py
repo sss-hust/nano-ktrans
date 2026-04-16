@@ -50,10 +50,12 @@ class ExpertMaterializationManager:
         self._cache: OrderedDict[ExpertKey, ExpertWeights] = OrderedDict()
         self._futures: Dict[ExpertKey, Future] = {}
         self._ready_queue = deque()
+        self._ready_mark_queue: "Queue[ExpertKey | None]" = Queue()
         self._resolve_queue: "Queue[ExpertKey | None]" = Queue()
         self._stop_event = Event()
         self._lock = Lock()
         self._resolver_thread: Optional[Thread] = None
+        self._ready_callback = None
         if self.executor is not None:
             self._resolver_thread = Thread(
                 target=self._resolve_ready_loop,
@@ -68,6 +70,7 @@ class ExpertMaterializationManager:
         self.prefetch_completion_events = 0
         self.prefetch_background_resolved = 0
         self.prefetch_background_failures = 0
+        self.prefetch_background_ready_callbacks = 0
         self.resident_stage_hits = 0
         self.cache_hits = 0
         self.sync_loads = 0
@@ -100,6 +103,9 @@ class ExpertMaterializationManager:
             key_template=self.expert_key_template,
             proj_name_map=self.expert_proj_names,
         )
+
+    def set_ready_callback(self, callback) -> None:
+        self._ready_callback = callback
 
     def _store_cache(self, key: ExpertKey, weights: ExpertWeights) -> None:
         self._cache[key] = weights
@@ -160,6 +166,7 @@ class ExpertMaterializationManager:
             self._store_cache(key, weights)
             self.prefetch_resolved += 1
             self._ready_queue.append(key)
+            self._ready_mark_queue.put(key)
         return True
 
     def _resolve_ready_loop(self) -> None:
@@ -176,6 +183,26 @@ class ExpertMaterializationManager:
                 if resolved:
                     self.prefetch_background_resolved += 1
             self._resolve_queue.task_done()
+
+    def drain_ready_callbacks(self) -> int:
+        if self._ready_callback is None:
+            return 0
+        callbacks = 0
+        while True:
+            try:
+                key = self._ready_mark_queue.get_nowait()
+            except Empty:
+                break
+            if key is None:
+                self._ready_mark_queue.task_done()
+                continue
+            layer_idx, expert_idx = key
+            self._ready_callback(int(layer_idx), int(expert_idx))
+            callbacks += 1
+            self._ready_mark_queue.task_done()
+        with self._lock:
+            self.prefetch_background_ready_callbacks += callbacks
+        return callbacks
 
     def prefetch(self, layer_idx: int, expert_idx: int) -> bool:
         key = self._cache_key(layer_idx, expert_idx)
@@ -237,6 +264,7 @@ class ExpertMaterializationManager:
         if self._resolver_thread is not None:
             self._resolve_queue.put(None)
             self._resolver_thread.join(timeout=1.0)
+        self._ready_mark_queue.put(None)
         if self.executor is not None:
             self.executor.shutdown(wait=False, cancel_futures=True)
 
@@ -254,6 +282,7 @@ class ExpertMaterializationManager:
                 "prefetch_completion_events": self.prefetch_completion_events,
                 "prefetch_background_resolved": self.prefetch_background_resolved,
                 "prefetch_background_failures": self.prefetch_background_failures,
+                "prefetch_background_ready_callbacks": self.prefetch_background_ready_callbacks,
                 "resident_stage_hits": self.resident_stage_hits,
                 "cache_hits": self.cache_hits,
                 "sync_loads": self.sync_loads,
