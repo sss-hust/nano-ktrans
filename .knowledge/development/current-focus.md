@@ -11,6 +11,7 @@ updated: 2026-04-17 02:01
 updated: 2026-04-17 02:05
 updated: 2026-04-17 18:40
 updated: 2026-04-17 19:10
+updated: 2026-04-17 19:35
 ---
 
 # 🔥 当前工作焦点
@@ -62,6 +63,7 @@ updated: 2026-04-17 19:10
 - [x] apply queue 现已拆成 `apply_candidate_queue -> apply_commit_queue -> resident set` 两段 staged commit，后台路径只负责把候选推进到 commit queue，真正 resident commit 只消费 staged commit queue
 - [x] apply commit queue 已补齐独立 `size / limit / utilization / enqueued / pruned / background_enqueued` 诊断，后半段 commit 拥塞开始能与 apply candidate queue 区分观测
 - [x] apply commit queue 现已具备独立 `evictions` 与 hotness-aware victim policy，后半段 staged commit 现在也能单独衡量 budget 压力与回退行为
+- [x] apply commit queue 现已新增独立 `pressure / step / ema / budget_backoff` 控制信号，并开始反向约束 activation / prebuild / prefetch aggressiveness
 - [x] offload refresh 已接入模型级统计，benchmark 可直接看到 refresh 次数与每步 ready 收敛量
 - [x] layer 级 refresh 已加空队列短路，避免无 pending prefetch 时做无意义轮询
 - [x] benchmark 已支持 scheduler profile sweep，可一轮比较多组调度策略
@@ -199,6 +201,7 @@ updated: 2026-04-17 19:10
 - 当前 apply queue 压力已接回 prepared-tier controller，但 resident commit 仍是 staged shared commit；下一步仍需把 `apply queue -> resident set` 收成真正的 per-layer batch commit
 - 当前 apply queue 现在虽然已经拆成 staged `apply_commit_queue`，但 resident 注入仍是 commit queue 内逐 expert 提交，还不是真正底层 batch resident commit
 - 当前 apply commit queue 虽已具备独立 budget / eviction / utilization 信号，但 resident set 注入仍是 commit queue 内逐 expert commit，尚未变成真正的 per-layer batch resident commit
+- 当前 apply commit queue 现在虽然也已接入独立 pressure controller，但 commit queue 与 resident set 之间仍是逐 expert staged commit，尚未形成真正底层 batched resident commit
 - 当前 apply queue commit 已有独立 batch 指标和 adaptive commit limit，但 resident 注入本身仍是 batch 内逐 expert 提交；下一步仍要继续压成真正底层 batched resident commit
 - 当前虽然已有 `HybridMoE` 级 pipeline 锁，但锁粒度仍偏粗；background apply 还只是“线程安全地 opportunistic apply”，不是独立 commit queue，也还没有真正 batched resident commit
 - 当前 promotion batch 虽然已先统一 resolve source/module，再进入 apply，但 resident set 注入仍是 batch 内逐 expert 提交，不是真正底层 batched apply

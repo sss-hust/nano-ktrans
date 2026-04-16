@@ -232,6 +232,12 @@ tags: [architecture]
     - 超预算时按 hotness 和 lifecycle 选择更冷的 staged commit victim
     - 并单独统计 `apply_commit_queue_evictions`
     这样后半段 resident commit 已经不再只是“复用 apply candidate queue 的 budget 信号”，而开始具备独立的 staged commit 缓冲层语义。
+42. `apply_commit_queue` 现在还拥有独立 controller 信号：
+    - `apply_commit_queue_pressure`
+    - `apply_commit_queue_pressure_step`
+    - `apply_commit_queue_pressure_ema`
+    - `apply_commit_queue_budget_backoff`
+    这些信号会与 candidate queue / prepared tier 一起作用于 activation、prebuild 和 prefetch 的 aggressiveness，因此系统现在已经不只感知“前半段 prepared tier 是否拥塞”，也开始感知“后半段 staged commit 是否拥塞”。
 39. prepared tier 当前不再只有静态预算：
     - `prepared_cache_limit` 表示配置上的 prepared 总预算
     - `effective_prepared_cache_limit` 表示运行时在当前压力下真正允许保留的 prepared expert 数

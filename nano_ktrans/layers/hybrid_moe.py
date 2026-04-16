@@ -174,6 +174,9 @@ class HybridMoE(nn.Module):
         self.apply_queue_pressure_ema = 0.0
         self.apply_queue_events_last_tick = 0
         self.apply_queue_events_prev_total = 0
+        self.apply_commit_queue_pressure_ema = 0.0
+        self.apply_commit_queue_events_last_tick = 0
+        self.apply_commit_queue_events_prev_total = 0
         self.materialization_manager = ExpertMaterializationManager(
             weight_path=weight_path,
             expert_key_template=self.expert_key_template,
@@ -733,6 +736,8 @@ class HybridMoE(nn.Module):
             or self._prepared_cache_pressure() >= 1.0
             or self._apply_queue_budget_backoff() > 0
             or self._apply_queue_pressure() >= 1.0
+            or self._apply_commit_queue_budget_backoff() > 0
+            or self._apply_commit_queue_pressure() >= 1.0
         )
 
     def _apply_queue_pressure(self) -> float:
@@ -789,6 +794,60 @@ class HybridMoE(nn.Module):
 
         return min(max(0, backoff), max(0, limit - 1))
 
+    def _apply_commit_queue_pressure(self) -> float:
+        limit = self._apply_commit_queue_limit()
+        if limit <= 0:
+            return 0.0
+        queue_utilization = len(self.apply_commit_queue) / max(1, int(limit))
+        normalization = self.pipeline_ticks if self.pipeline_ticks > 0 else int(limit)
+        eviction_pressure = self.apply_commit_queue_evictions / max(1, int(normalization))
+        return queue_utilization + eviction_pressure
+
+    def _apply_commit_queue_pressure_step(self) -> float:
+        limit = self._apply_commit_queue_limit()
+        if limit <= 0:
+            return 0.0
+        queue_utilization = len(self.apply_commit_queue) / max(1, int(limit))
+        return queue_utilization + (
+            self.apply_commit_queue_events_last_tick / max(1, int(limit))
+        )
+
+    def _update_apply_commit_queue_pressure_ema(self) -> None:
+        step_pressure = self._apply_commit_queue_pressure_step()
+        self.apply_commit_queue_pressure_ema = (0.8 * self.apply_commit_queue_pressure_ema) + (0.2 * step_pressure)
+
+    def _update_apply_commit_queue_pressure_signals(self) -> None:
+        current_total = self.apply_commit_queue_evictions
+        self.apply_commit_queue_events_last_tick = max(
+            0,
+            current_total - self.apply_commit_queue_events_prev_total,
+        )
+        self.apply_commit_queue_events_prev_total = current_total
+        self._update_apply_commit_queue_pressure_ema()
+
+    def _apply_commit_queue_budget_backoff(self) -> int:
+        limit = self._apply_commit_queue_limit()
+        if limit <= 1:
+            return 0
+
+        pressure = max(
+            self._apply_commit_queue_pressure_step(),
+            self._apply_commit_queue_pressure(),
+            self.apply_commit_queue_pressure_ema,
+        )
+        backoff = 0
+        if pressure >= 1.0:
+            backoff += 1
+        if pressure >= 2.0:
+            backoff += 1
+
+        if self.cold_promotion_penalty >= 1.0 and backoff > 0:
+            backoff -= 1
+        if self.cold_promotion_penalty >= 1.5 and backoff > 0:
+            backoff -= 1
+
+        return min(max(0, backoff), max(0, limit - 1))
+
     def _adaptive_apply_commit_limit(self, *, background: bool) -> int:
         if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
             return 1
@@ -797,11 +856,15 @@ class HybridMoE(nn.Module):
             limit += 1
         if self.apply_queue_pressure_ema >= 1.0:
             limit += 1
+        if self._apply_commit_queue_pressure() >= 1.0:
+            limit += 1
+        if self.apply_commit_queue_pressure_ema >= 1.0:
+            limit += 1
         if self.cold_promotion_penalty >= 1.0:
             limit += 1
         if not background and self.prepared_controller_aggressiveness >= 1.0:
             limit += 1
-        return min(max(1, limit), max(1, self._apply_queue_limit()))
+        return min(max(1, limit), max(1, self._apply_commit_queue_limit()))
 
     def _adaptive_activation_limit(self) -> int:
         base_limit = self._activated_cache_limit()
@@ -829,6 +892,8 @@ class HybridMoE(nn.Module):
             limit += 1
         if self._apply_queue_budget_backoff() > 0:
             limit = max(1, limit - self._apply_queue_budget_backoff())
+        if self._apply_commit_queue_budget_backoff() > 0:
+            limit = max(1, limit - self._apply_commit_queue_budget_backoff())
         return max(1, limit)
 
     def _adaptive_prebuild_limit(self) -> int:
@@ -858,6 +923,8 @@ class HybridMoE(nn.Module):
             limit += 1
         if self._apply_queue_budget_backoff() > 0:
             limit = max(1, limit - self._apply_queue_budget_backoff())
+        if self._apply_commit_queue_budget_backoff() > 0:
+            limit = max(1, limit - self._apply_commit_queue_budget_backoff())
         return max(1, limit)
 
     def _adaptive_prefetch_pending_limit(self, *, phase: str) -> int:
@@ -887,6 +954,8 @@ class HybridMoE(nn.Module):
             limit += 1
         if self._apply_queue_budget_backoff() > 0:
             limit = max(1, limit - self._apply_queue_budget_backoff())
+        if self._apply_commit_queue_budget_backoff() > 0:
+            limit = max(1, limit - self._apply_commit_queue_budget_backoff())
 
         return min(max(1, limit), max(1, self._adaptive_prebuild_limit()))
 
@@ -920,6 +989,8 @@ class HybridMoE(nn.Module):
             budget += 1
         if self._apply_queue_budget_backoff() > 0:
             budget = max(0, budget - self._apply_queue_budget_backoff())
+        if self._apply_commit_queue_budget_backoff() > 0:
+            budget = max(0, budget - self._apply_commit_queue_budget_backoff())
 
         return max(0, budget)
 
@@ -1539,6 +1610,7 @@ class HybridMoE(nn.Module):
             self.pipeline_ticks += 1
             self._update_prepared_cache_rebalance_pressure_signals()
             self._update_apply_queue_pressure_signals()
+            self._update_apply_commit_queue_pressure_signals()
             self.pipeline_ready_applied += ready_applied
             self.pipeline_ready_deferred += ready_deferred
             return {
@@ -2245,6 +2317,10 @@ class HybridMoE(nn.Module):
             "apply_queue_pressure_step": self._apply_queue_pressure_step(),
             "apply_queue_pressure_ema": self.apply_queue_pressure_ema,
             "apply_queue_budget_backoff": self._apply_queue_budget_backoff(),
+            "apply_commit_queue_pressure": self._apply_commit_queue_pressure(),
+            "apply_commit_queue_pressure_step": self._apply_commit_queue_pressure_step(),
+            "apply_commit_queue_pressure_ema": self.apply_commit_queue_pressure_ema,
+            "apply_commit_queue_budget_backoff": self._apply_commit_queue_budget_backoff(),
             "background_apply_queue_enqueued": self.background_apply_queue_enqueued,
             "background_apply_commit_queue_enqueued": self.background_apply_commit_queue_enqueued,
             "background_apply_commit_batches": self.background_apply_commit_batches,
