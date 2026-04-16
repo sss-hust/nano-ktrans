@@ -663,6 +663,47 @@ class TestDynamicScheduler:
 
         assert summary["prepared_cache_budget_heuristic"] == 6
 
+    def test_llm_get_offload_diagnostics_reports_prepared_budget_heuristic(self):
+        from nano_ktrans.llm import LLM
+        from nano_ktrans.scheduler import SchedulerConfig
+
+        llm = LLM.__new__(LLM)
+        llm.offload_backend = "cpu"
+        llm.scheduler_profile = "baseline"
+        llm.prepared_cache_budget = 6
+        llm.prepared_controller_aggressiveness = 0.5
+        llm.enable_background_offload_worker = False
+        llm.background_offload_poll_interval_seconds = 0.01
+        llm.dynamic_expert_scheduler = type(
+            "Scheduler",
+            (),
+            {
+                "config": SchedulerConfig(
+                    enabled=True,
+                    decode_promote_k=3,
+                    prefetch_candidate_budget_per_layer=4,
+                ),
+                "diagnostics": staticmethod(lambda: {"enabled": True}),
+            },
+        )()
+        llm.model = type(
+            "Wrapper",
+            (),
+            {
+                "model": type(
+                    "Inner",
+                    (),
+                    {
+                        "layers": [],
+                        "offload_refresh_diagnostics": staticmethod(lambda: {"offload_refresh_calls": 0}),
+                    },
+                )(),
+            },
+        )()
+
+        diagnostics = llm.get_offload_diagnostics()
+        assert diagnostics["prepared_cache_budget_heuristic"] == 6
+
     def test_resolve_prepared_cache_budget_varies_by_profile(self):
         from nano_ktrans.scheduler import (
             SCHEDULER_PROFILE_BASELINE,

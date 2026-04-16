@@ -243,6 +243,11 @@ tags: [changelog]
 - `summarize_offload_diagnostics()` 现已汇总 background worker 的 `enabled / ticks / work_ticks / work_ratio`。
 - `summarize_profile_sweep_results()` 现已将 `background_worker_work_ratio` 纳入 profile 对比和 `best_by_metric` 排名，后台 worker 的活跃度开始进入 benchmark 决策面。
 
+<!-- updated: 2026-04-17 14:35 -->
+
+- `LLM.get_offload_diagnostics()` 现已显式输出 `prepared_cache_budget_heuristic`，用户可以直接对照 profile 的静态 prepared 预算基线与 runtime controller 的实际 prepared-tier 行为。
+- 新增对应测试，确保 prepared budget heuristic 不只存在于 profile summary，也会进入最终的 offload diagnostics。
+
 ## 2026-04-16
 
 - <!-- updated: 2026-04-16 00:40 --> **[migration-pipeline-runtime]** 新增 `MigrationPipelineRuntime`，将 token-step 级 offload refresh 提升为最小流水线运行时；ready prefetch 轮询与 ready promotion 现在可在进入模型前统一推进，不再依赖层内 forward 临时收敛。

@@ -504,6 +504,10 @@ tags: [architecture]
     - summary 会显式输出 worker 的 `enabled / ticks / work_ticks / work_ratio`
     - profile sweep 也会把 `background_worker_work_ratio` 纳入比较
     这让系统终于可以直接回答一个关键问题：后台 worker 是否真的在产生有效工作，以及它和 decode 吞吐之间的关系。
+82. prepared-tier 的“静态预算基线”和“运行时控制结果”现在也被明确区分：
+    - `prepared_cache_budget_heuristic` 表示当前 profile 给出的静态 prepared budget 基线
+    - `prepared_cache_budget / effective_prepared_cache_limit / adaptive_*` 则表示 runtime controller 实际如何调节 prepared tier
+    这样 benchmark 和诊断不再只看到 controller 的结果，也能回溯“这组策略一开始给了 prepared tier 多大基线”，更利于分析 profile 本身和 controller 本身各自的贡献。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

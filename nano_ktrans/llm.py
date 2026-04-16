@@ -264,6 +264,10 @@ class LLM:
                 self.scheduler_profile,
                 self.dynamic_expert_scheduler.config,
             ),
+            "prepared_cache_budget_heuristic": resolve_prepared_cache_budget(
+                self.scheduler_profile,
+                self.dynamic_expert_scheduler.config,
+            ),
             "prepared_cache_budget": self.prepared_cache_budget,
             "prepared_controller_aggressiveness": self.prepared_controller_aggressiveness,
             "background_offload_worker_enabled": self.enable_background_offload_worker,

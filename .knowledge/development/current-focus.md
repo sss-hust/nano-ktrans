@@ -2,6 +2,7 @@
 updated: 2026-04-17 13:45
 updated: 2026-04-17 14:05
 updated: 2026-04-17 14:20
+updated: 2026-04-17 14:35
 ---
 
 # 🔥 当前工作焦点
@@ -105,6 +106,7 @@ updated: 2026-04-17 14:20
 - [x] `SimpleEngine/LLM` 现已接入 background worker 生命周期：生成前启动后台 worker，生成后停止并清理，后台推进不再只是模型内部的“可选对象”
 - [x] background worker 现已改成显式启动，模型构造时默认不自动起线程，后台迁移执行器的生命周期边界更清晰
 - [x] scheduler summary / profile sweep 现已纳入 background worker 指标，可直接比较后台 worker 的 tick、work ratio 与 decode 吞吐的关系
+- [x] `LLM.get_offload_diagnostics()` 现已显式暴露 `prepared_cache_budget_heuristic`，profile 的静态 prepared 预算基线和 runtime controller 的实际行为已统一进入诊断面
 
 ## 阻塞项
 

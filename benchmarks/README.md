@@ -42,6 +42,10 @@ Notes:
     - `cold_promotion_penalty_avg`
     - `adaptive_activation_limit_avg / adaptive_prebuild_limit_avg`
     - `adaptive_prefetch_pending_limit_avg / adaptive_prefetch_candidate_budget_avg`
+  - background offload worker metrics:
+    - `background_worker_enabled`
+    - `background_worker_ticks / background_worker_work_ticks`
+    - `background_worker_work_ratio`
   - cache eviction regression pressure (`activated -> warmed`, `warmed -> ready`)
   - deferred-for-prefetch counts
   - a ranked `comparison_table` and `best_by_metric` summary for quick profile selection
