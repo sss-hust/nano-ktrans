@@ -218,6 +218,15 @@ tags: [architecture]
     - `warmed` 表示 module 已在 CPU warm cache 里预构建
     - `activated` 表示该 module 已执行 device transfer，进入目标 device 上的 warm cache
     - `applied` 才表示它真正被插入 `gpu_experts` 并更新 resident set
+39. prepared tier 当前不再只有静态预算：
+    - `prepared_cache_limit` 表示配置上的 prepared 总预算
+    - `effective_prepared_cache_limit` 表示运行时在当前压力下真正允许保留的 prepared expert 数
+    - 当 prepared-cache 重平衡压力持续偏高且 activation stage bonus 偏低时，系统会临时收缩 effective prepared budget，优先减少低价值 warm/activated candidate 的保留
+40. 因此 prepared tier 当前已经形成三类闭环信号：
+    - `prepared_cache_rebalance_pressure`：prepared 层内部因为预算冲突而发生的回退压力
+    - `prepared_cache_activation_stage_bonus`：更偏向保留 activated 还是 warm candidate
+    - `cold_promotion_penalty`：真正 apply 时仍落到 cold path 的压力
+    这三类信号开始共同影响 activation / prebuild aggressiveness 与 effective prepared budget，是后续演进为完整 per-layer controller 的基础。
     这样 `HybridMoE.advance_offload_pipeline()` 现在已经可以按 `queued -> prefetching -> ready -> warmed -> activated -> applied` 的顺序推进一次 promotion。
 39. 这也让“前台 pipeline”里的工作边界更清晰了：
     - resident export / safetensors prefetch 负责准备权重

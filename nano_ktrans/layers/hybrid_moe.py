@@ -317,13 +317,38 @@ class HybridMoE(nn.Module):
 
     def _effective_warm_cache_limit(self) -> int:
         limit = self.expert_warm_cache_size
-        if self.expert_prepared_cache_size is None:
+        effective_prepared_limit = self._effective_prepared_cache_limit()
+        if effective_prepared_limit is None:
             return limit
-        remaining_budget = max(0, self.expert_prepared_cache_size - len(self.activated_expert_cache))
+        remaining_budget = max(0, effective_prepared_limit - len(self.activated_expert_cache))
         return min(limit, remaining_budget)
 
     def _prepared_cache_size(self) -> int:
         return len(self.warm_expert_cache) + len(self.activated_expert_cache)
+
+    def _prepared_cache_rebalance_pressure(self) -> float:
+        if not self.expert_prepared_cache_size:
+            return 0.0
+        rebalance_events = (
+            self.prepared_cache_rebalance_evicted_warm
+            + self.prepared_cache_rebalance_evicted_activated
+        )
+        return rebalance_events / max(1, int(self.expert_prepared_cache_size))
+
+    def _effective_prepared_cache_limit(self) -> Optional[int]:
+        if self.expert_prepared_cache_size is None:
+            return None
+        base_limit = int(self.expert_prepared_cache_size)
+        if base_limit <= 1:
+            return base_limit
+        if self.cold_promotion_penalty >= 1.0:
+            return base_limit
+        if (
+            self._prepared_cache_rebalance_pressure() >= 1.0
+            and self.prepared_cache_activation_stage_bonus <= 0.25
+        ):
+            return max(1, base_limit - 1)
+        return base_limit
 
     def _prepared_cache_retention_score(self, expert_idx: int, cache_kind: str) -> float:
         stage_bonus = self.prepared_cache_activation_stage_bonus if cache_kind == "activated" else 0.0
@@ -398,13 +423,14 @@ class HybridMoE(nn.Module):
             self.warm_cache_evictions += 1
 
     def _rebalance_prepared_caches(self) -> None:
-        if self.expert_prepared_cache_size is None:
+        effective_prepared_limit = self._effective_prepared_cache_limit()
+        if effective_prepared_limit is None:
             self._trim_warm_cache_to_budget()
             return
 
         activated_demotions = 0
         warm_drops = 0
-        while self._prepared_cache_size() > self.expert_prepared_cache_size:
+        while self._prepared_cache_size() > effective_prepared_limit:
             victim = self._pick_prepared_cache_victim()
             if victim is None:
                 break
@@ -497,9 +523,10 @@ class HybridMoE(nn.Module):
         return priorities.get(state, 0)
 
     def _prepared_cache_pressure(self) -> float:
-        if not self.expert_prepared_cache_size:
+        effective_prepared_limit = self._effective_prepared_cache_limit()
+        if not effective_prepared_limit:
             return 0.0
-        return self._prepared_cache_size() / max(1, int(self.expert_prepared_cache_size))
+        return self._prepared_cache_size() / max(1, int(effective_prepared_limit))
 
     def _adaptive_activation_limit(self) -> int:
         base_limit = self._activated_cache_limit()
@@ -1453,8 +1480,10 @@ class HybridMoE(nn.Module):
             "pipeline_apply_batch_warm": self.pipeline_apply_batch_warm,
             "pipeline_apply_batch_cold": self.pipeline_apply_batch_cold,
             "prepared_cache_limit": self.expert_prepared_cache_size,
+            "effective_prepared_cache_limit": self._effective_prepared_cache_limit(),
             "prepared_cache_size": self._prepared_cache_size(),
             "effective_warm_cache_limit": self._effective_warm_cache_limit(),
+            "prepared_cache_rebalance_pressure": self._prepared_cache_rebalance_pressure(),
             "prepared_cache_rebalance_evicted_warm": self.prepared_cache_rebalance_evicted_warm,
             "prepared_cache_rebalance_evicted_activated": self.prepared_cache_rebalance_evicted_activated,
             "prepared_cache_rebalance_demoted_to_warm": self.prepared_cache_rebalance_demoted_to_warm,

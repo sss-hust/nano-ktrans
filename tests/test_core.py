@@ -739,6 +739,7 @@ class TestDynamicScheduler:
                         "offload_pipeline_apply_batch_count_total": 2,
                         "offload_pipeline_apply_batch_experts_total": 3,
                         "offload_pipeline_apply_batch_evictions_total": 1,
+                        "cold_promotion_penalty_avg": 1.5,
                         "migration_activation_eviction_regressions": 2,
                         "migration_warm_eviction_regressions": 3,
                         "runtime_deferred_for_prefetch": 4,
@@ -772,6 +773,7 @@ class TestDynamicScheduler:
                         "offload_pipeline_apply_batch_count_total": 3,
                         "offload_pipeline_apply_batch_experts_total": 6,
                         "offload_pipeline_apply_batch_evictions_total": 2,
+                        "cold_promotion_penalty_avg": 0.5,
                         "migration_activation_eviction_regressions": 0,
                         "migration_warm_eviction_regressions": 1,
                         "runtime_deferred_for_prefetch": 1,
@@ -791,11 +793,13 @@ class TestDynamicScheduler:
         assert summary["best_by_decode_tokens_per_second"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_decode_tokens_per_second"]["decode_tokens_per_second"] == pytest.approx(2.5)
         assert summary["metric_directions"]["pipeline_promotion_source_cold"] == "min"
+        assert summary["metric_directions"]["cold_promotion_penalty_avg"] == "min"
         assert summary["metric_directions"]["migration_activation_eviction_regressions"] == "min"
         assert "pipeline_apply_batch_size_avg" in summary["sort_keys"]
         assert "pipeline_promotion_non_cold_ratio" in summary["sort_keys"]
         assert summary["best_by_decode_tokens_per_second"]["runtime_offload_pipeline_apply_batch_count_total"] == 3
         assert summary["best_by_metric"]["pipeline_promotion_source_cold"]["scheduler_profile"] == "overlap_safe"
+        assert summary["best_by_metric"]["cold_promotion_penalty_avg"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["migration_activation_eviction_regressions"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["pipeline_promotion_non_cold_ratio"]["value"] == pytest.approx(0.75)
         assert summary["best_by_metric"]["runtime_apply_batch_size_avg"]["value"] == pytest.approx(2.0)
@@ -3055,8 +3059,10 @@ class TestDynamicScheduler:
             "layers": [
                 {
                     "prepared_cache_limit": 3,
+                    "effective_prepared_cache_limit": 2,
                     "prepared_cache_size": 2,
                     "effective_warm_cache_limit": 1,
+                    "prepared_cache_rebalance_pressure": 1.0 / 3.0,
                     "prepared_cache_rebalance_evicted_warm": 1,
                     "prepared_cache_rebalance_evicted_activated": 2,
                     "prepared_cache_rebalance_demoted_to_warm": 2,
@@ -3075,14 +3081,17 @@ class TestDynamicScheduler:
         summary = summarize_offload_diagnostics(offload_diagnostics)
 
         assert summary["prepared_cache_limit"] == 3
+        assert summary["effective_prepared_cache_limit"] == 2
         assert summary["prepared_cache_size"] == 2
         assert summary["effective_warm_cache_limit"] == 1
         assert summary["prepared_cache_utilization"] == 2 / 3
+        assert summary["effective_prepared_cache_utilization"] == 1.0
         assert summary["prepared_cache_rebalance_evicted_warm"] == 1
         assert summary["prepared_cache_rebalance_evicted_activated"] == 2
         assert summary["prepared_cache_rebalance_demoted_to_warm"] == 2
         assert summary["prepared_cache_rebalance_dropped_to_ready"] == 1
         assert summary["prepared_cache_rebalance_activated_ratio"] == 2 / 3
+        assert summary["prepared_cache_rebalance_pressure_avg"] == pytest.approx(1.0 / 3.0)
         assert summary["prepared_cache_activation_stage_bonus_avg"] == 0.75
         assert summary["cold_promotion_penalty_avg"] == 0.5
         assert summary["adaptive_activation_limit_avg"] == 2
@@ -3115,9 +3124,12 @@ class TestDynamicScheduler:
                     "offload_pipeline_apply_batch_evictions_total": 0,
                     "runtime_deferred_for_prefetch": 0,
                     "prepared_cache_limit": 4,
+                    "effective_prepared_cache_limit": 3,
                     "prepared_cache_size": 3,
                     "effective_warm_cache_limit": 2,
                     "prepared_cache_utilization": 0.75,
+                    "effective_prepared_cache_utilization": 1.0,
+                    "prepared_cache_rebalance_pressure_avg": 0.5,
                     "prepared_cache_rebalance_evicted_warm": 1,
                     "prepared_cache_rebalance_evicted_activated": 0,
                     "prepared_cache_rebalance_demoted_to_warm": 0,
@@ -3140,9 +3152,12 @@ class TestDynamicScheduler:
         best_by_metric = summary["best_by_metric"]["prepared_cache_utilization"]
 
         assert profile["prepared_cache_limit"] == 4
+        assert profile["effective_prepared_cache_limit"] == 3
         assert profile["prepared_cache_size"] == 3
         assert profile["effective_warm_cache_limit"] == 2
         assert profile["prepared_cache_utilization"] == 0.75
+        assert profile["effective_prepared_cache_utilization"] == 1.0
+        assert profile["prepared_cache_rebalance_pressure_avg"] == 0.5
         assert profile["prepared_cache_rebalance_evicted_warm"] == 1
         assert profile["prepared_cache_rebalance_evicted_activated"] == 0
         assert profile["prepared_cache_activation_stage_bonus_avg"] == 0.25
@@ -3152,6 +3167,59 @@ class TestDynamicScheduler:
         assert comparison_row["prepared_cache_utilization"] == 0.75
         assert best_by_metric["scheduler_profile"] == "baseline"
         assert best_by_metric["value"] == 0.75
+
+    def test_effective_prepared_cache_limit_shrinks_under_pressure(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(3):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(enabled=True, gpu_budget_per_layer=1, offload_tier=ExpertResidency.PIM),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=3,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=2,
+            expert_prepared_cache_size=3,
+        ).to(dtype=torch.float32)
+
+        hybrid.prepared_cache_activation_stage_bonus = 0.0
+        hybrid.prepared_cache_rebalance_evicted_warm = 2
+        hybrid.prepared_cache_rebalance_evicted_activated = 1
+
+        assert hybrid._effective_prepared_cache_limit() == 2
+        diagnostics = hybrid.diagnostics()
+        assert diagnostics["effective_prepared_cache_limit"] == 2
+        assert diagnostics["prepared_cache_rebalance_pressure"] == pytest.approx(1.0)
 
     def test_prepared_cache_stage_bonus_tracks_rebalance_direction(self, tmp_path):
         from safetensors.torch import save_file

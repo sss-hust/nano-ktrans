@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-16 03:22
+updated: 2026-04-16 08:29
 ---
 
 # 🔥 当前工作焦点
@@ -29,6 +29,8 @@ updated: 2026-04-16 03:22
 - [x] migration queue 已接入按 expert 去重和更细的排队诊断
 - [x] scheduler 已支持“无立即迁移也可按热度预取 offloaded experts”
 - [x] scheduler 已支持 profile 预设，benchmark 已输出迁移/预取摘要，便于直接比较 overlap 相关策略
+- [x] prepared tier controller 已显式区分静态 prepared budget 与 `effective_prepared_cache_limit`，当重平衡压力持续偏高且 activation stage bonus 偏低时，会临时收缩 prepared tier 的有效预算
+- [x] scheduler summary / profile sweep 已补充 `effective_prepared_cache_limit`、`effective_prepared_cache_utilization` 与 `prepared_cache_rebalance_pressure_avg`，prepared tier 的预算收缩行为已可观测
 - [x] migration queue 已接入 lifecycle 状态：`queued / prefetching / ready / deferred / applied`
 - [x] decode 在 `decode_require_prefetch_ready` 模式下已改成 ready-only 消费，不再先 drain 全队列再回退
 - [x] materialization manager 已支持后台 prefetch completion 轮询，ready 状态可在进入层前被主动刷新
@@ -142,6 +144,7 @@ updated: 2026-04-16 03:22
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总
 - 当前 prebuild 已做候选裁剪，但 warm cache 还没有独立的“低优先级淘汰”策略，仍然主要依赖容量上限和 LRU
 - 当前已经能量化 promotion source，但 benchmark 还缺少跨 profile 的自动排名/对比表
+- 当前 prepared tier 已开始有“弱自适应 effective budget”语义，但还没有形成真正的 per-layer prepared budget controller；下一步应继续把 `cold_promotion_penalty`、rebalance pressure 与 prepared budget 收缩合成更完整的闭环
 - 将 `activated -> applied` 从当前逐 expert 路径推进到同层小批量提交，继续压 decode 关键路径上的 Python 控制开销
 - 将当前“批次截断 + 逐 expert apply”升级成真正的 per-layer batched activation/apply，尽量减少 batch 内重复的 GPU budget 检查与 Python 字典操作
 - 将当前“批量预腾位 + 逐 expert apply”继续推进成真正的 per-layer batched activation/apply，把 warm/activated 命中后的 resident set 注入也批处理化

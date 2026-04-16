@@ -7,6 +7,9 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-16 08:29 --> **[effective-prepared-budget]** prepared tier 现在区分静态 `prepared_cache_limit` 与动态 `effective_prepared_cache_limit`：当重平衡压力持续偏高且 activation stage bonus 偏低时，会临时收缩 prepared tier 的有效预算，避免 warm/activated 两层在高回退压力下继续无效扩张。
+- <!-- updated: 2026-04-16 08:29 --> **[prepared-budget-metrics]** scheduler summary / profile sweep 新增 `effective_prepared_cache_limit`、`effective_prepared_cache_utilization` 与 `prepared_cache_rebalance_pressure_avg`，prepared tier 的预算收缩行为与压力强度现在都可直接比较。
+- <!-- updated: 2026-04-16 08:29 --> **[tests]** 新增 effective prepared budget 的诊断与摘要覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `86 passed, 1 warning`。
 - <!-- updated: 2026-04-16 08:12 --> **[cold-promotion-penalty]** prepared tier controller 现在会跟踪 `cold_promotion_penalty`：当 ready apply 中冷路径 promotion 占比偏高时，会提高后续 adaptive activation/prebuild limit，尝试增加 prepared overlap 以减少下一轮冷启动。
 - <!-- updated: 2026-04-16 08:12 --> **[tests]** 新增 cold-promotion penalty 的摘要与行为测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `85 passed, 1 warning`。
 - <!-- updated: 2026-04-16 07:54 --> **[adaptive-prepared-limits]** `HybridMoE` 现在会根据 prepared-cache 压力和 `prepared_cache_activation_stage_bonus` 动态调整 activation/prebuild 候选上限；在 prepared tier 吃紧且 activated 偏置较低时，会主动收缩 `adaptive_activation_limit` 和 `adaptive_prebuild_limit`。
