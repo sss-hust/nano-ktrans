@@ -89,6 +89,7 @@ updated: 2026-04-16 09:08
 - [x] prepared tier controller 现在也开始直接约束 prefetch aggressiveness，新增 `adaptive_prefetch_pending_limit / adaptive_prefetch_candidate_budget`，prepared 压力与 cold penalty 会同时影响 pending promotion 预取和候选预取规模
 - [x] prepared-cache budget 现在已从 profile heuristic 打通到诊断输出，`scheduler_profile_summary` 和 `LLM.get_offload_diagnostics()` 都会显式暴露 `prepared_cache_budget(_heuristic)`，便于 profile sweep 对照“控制器动作”和“静态预算基线”
 - [x] prepared-cache budget heuristic 现在已开始随 scheduler profile 变化：`overlap_safe` 和 `eager` 会在 baseline 预算之上进一步抬高 prepared budget，为 strict ready-only 和更激进预热提供更稳定的 prepared tier
+- [x] scheduler profile 现在也开始显式控制 prepared-tier aggressiveness：`baseline / overlap_safe / eager` 会分别对应不同的 `prepared_controller_aggressiveness`，直接影响 activation/prebuild/prefetch 三段的推进力度
 
 ## 阻塞项
 

@@ -11,6 +11,7 @@ from nano_ktrans.scheduler import (
     SCHEDULER_PROFILE_BASELINE,
     SchedulerConfig,
     apply_scheduler_overrides,
+    resolve_prepared_controller_aggressiveness,
     resolve_scheduler_profile,
     resolve_prepared_cache_budget,
     scheduler_profile_summary,
@@ -180,6 +181,9 @@ class LLM:
             )
         )
         self.prepared_cache_budget = int(prepared_cache_budget)
+        self.prepared_controller_aggressiveness = resolve_prepared_controller_aggressiveness(
+            self.scheduler_profile
+        )
 
         # DEBUG: 仅测试一层以排查崩溃原因
         # config.num_hidden_layers = 1
@@ -195,6 +199,7 @@ class LLM:
             residency_plan=self.dynamic_expert_scheduler.residency_plan,
             dynamic_expert_scheduler=self.dynamic_expert_scheduler,
             expert_prepared_cache_size=prepared_cache_budget,
+            prepared_controller_aggressiveness=self.prepared_controller_aggressiveness,
         )
         self.model = self.model.to(device=device, dtype=model_dtype)
             
@@ -249,6 +254,7 @@ class LLM:
                 self.dynamic_expert_scheduler.config,
             ),
             "prepared_cache_budget": self.prepared_cache_budget,
+            "prepared_controller_aggressiveness": self.prepared_controller_aggressiveness,
             "offload_refresh": self.model.model.offload_refresh_diagnostics(),
             "dynamic_scheduler": self.dynamic_expert_scheduler.diagnostics(),
             "layer_count": len(layers),

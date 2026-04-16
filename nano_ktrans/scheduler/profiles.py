@@ -119,6 +119,15 @@ def resolve_prepared_cache_budget(profile: str, config: SchedulerConfig) -> int:
     return base_budget
 
 
+def resolve_prepared_controller_aggressiveness(profile: str) -> float:
+    normalized = normalize_scheduler_profiles([profile])[0]
+    if normalized == SCHEDULER_PROFILE_OVERLAP_SAFE:
+        return 0.5
+    if normalized == SCHEDULER_PROFILE_EAGER:
+        return 1.0
+    return 0.0
+
+
 def scheduler_profile_summary(profile: str, config: SchedulerConfig) -> dict[str, Any]:
     prepared_cache_budget = resolve_prepared_cache_budget(profile, config)
     return {
@@ -131,4 +140,7 @@ def scheduler_profile_summary(profile: str, config: SchedulerConfig) -> dict[str
         "decode_require_prefetch_ready": bool(config.decode_require_prefetch_ready),
         "prefetch_candidate_budget_per_layer": int(config.prefetch_candidate_budget_per_layer),
         "prepared_cache_budget_heuristic": int(prepared_cache_budget),
+        "prepared_controller_aggressiveness_heuristic": float(
+            resolve_prepared_controller_aggressiveness(profile)
+        ),
     }

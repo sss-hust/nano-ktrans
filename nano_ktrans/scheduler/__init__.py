@@ -8,6 +8,7 @@ from .profiles import (
     apply_scheduler_overrides,
     normalize_scheduler_profiles,
     resolve_prepared_cache_budget,
+    resolve_prepared_controller_aggressiveness,
     resolve_scheduler_profile,
     scheduler_profile_summary,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "apply_scheduler_overrides",
     "normalize_scheduler_profiles",
     "resolve_prepared_cache_budget",
+    "resolve_prepared_controller_aggressiveness",
     "resolve_scheduler_profile",
     "scheduler_profile_summary",
     "summarize_offload_diagnostics",

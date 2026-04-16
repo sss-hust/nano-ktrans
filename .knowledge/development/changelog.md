@@ -263,3 +263,5 @@ tags: [changelog]
 - <!-- updated: 2026-04-16 09:48 --> **[tests]** 新增 prepared-budget heuristic/diagnostics 覆盖，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `90 passed, 1 warning`。
 - <!-- updated: 2026-04-16 09:56 --> **[profile-budget-heuristic]** prepared-cache budget heuristic 现在开始随 scheduler profile 变化：`baseline` 使用 `max(2 * decode_promote_k, prefetch_candidate_budget, 2)`，`overlap_safe` 和 `eager` 会在此基础上进一步上调 prepared budget，为 strict ready-only 和更激进的 prepared-tier 推进保留额外空间。
 - <!-- updated: 2026-04-16 09:56 --> **[tests]** 新增 profile-aware prepared-budget 解析测试，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `91 passed, 1 warning`。
+- <!-- updated: 2026-04-16 10:05 --> **[profile-aggressiveness]** prepared-tier controller 现在开始显式受 scheduler profile 影响：新增 `resolve_prepared_controller_aggressiveness()`，并通过 `LLM -> Mixtral -> HybridMoE` 传入 `prepared_controller_aggressiveness`，用于区分 `baseline / overlap_safe / eager` 在 activation / prebuild / prefetch 三段上的推进力度。
+- <!-- updated: 2026-04-16 10:05 --> **[tests]** 新增 profile-aware controller aggressiveness 解析与 diagnostics 覆盖，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `92 passed, 1 warning`。

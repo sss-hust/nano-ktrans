@@ -619,6 +619,18 @@ class TestDynamicScheduler:
         assert resolve_prepared_cache_budget(SCHEDULER_PROFILE_OVERLAP_SAFE, config) == 5
         assert resolve_prepared_cache_budget(SCHEDULER_PROFILE_EAGER, config) == 6
 
+    def test_resolve_prepared_controller_aggressiveness_varies_by_profile(self):
+        from nano_ktrans.scheduler import (
+            SCHEDULER_PROFILE_BASELINE,
+            SCHEDULER_PROFILE_EAGER,
+            SCHEDULER_PROFILE_OVERLAP_SAFE,
+            resolve_prepared_controller_aggressiveness,
+        )
+
+        assert resolve_prepared_controller_aggressiveness(SCHEDULER_PROFILE_BASELINE) == 0.0
+        assert resolve_prepared_controller_aggressiveness(SCHEDULER_PROFILE_OVERLAP_SAFE) == 0.5
+        assert resolve_prepared_controller_aggressiveness(SCHEDULER_PROFILE_EAGER) == 1.0
+
     def test_normalize_scheduler_profiles_dedupes(self):
         from nano_ktrans.scheduler import normalize_scheduler_profiles
 
@@ -3088,6 +3100,7 @@ class TestDynamicScheduler:
             "layer_count": 1,
             "scheduler_profile": {"profile": "baseline"},
             "prepared_cache_budget": 3,
+            "prepared_controller_aggressiveness": 0.5,
             "offload_refresh": {},
             "dynamic_scheduler": {"enabled": True},
             "layers": [
@@ -3118,6 +3131,7 @@ class TestDynamicScheduler:
         summary = summarize_offload_diagnostics(offload_diagnostics)
 
         assert summary["prepared_cache_budget"] == 3
+        assert summary["prepared_controller_aggressiveness"] == 0.5
         assert summary["prepared_cache_limit"] == 3
         assert summary["prepared_cache_budget_backoff"] == 1
         assert summary["effective_prepared_cache_limit"] == 2

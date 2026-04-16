@@ -439,6 +439,11 @@ tags: [architecture]
     - `overlap_safe` 会额外抬高 prepared budget，给 strict ready-only decode 留出更多 warmed/activated 空间
     - `eager` 会进一步上调 prepared budget，配合更积极的 prefetch / prebuild / activation
     这让 profile 不再只是 scheduler 开关集合，而开始直接塑造 prepared tier 的初始容量形态，为后续做 profile-driven auto-tuning 打基础。
+69. profile 现在也开始显式塑造 prepared-tier controller 的 aggressiveness：
+    - `baseline` 使用最保守的 prepared-tier 推进力度
+    - `overlap_safe` 会给 controller 一个中等 aggressiveness，主要帮助 strict ready-only 场景减少 cold promotion
+    - `eager` 会进一步提高 prepared-tier 推进力度，使 activation / prebuild / prefetch 都更积极
+    这意味着 profile 不再只决定“预算多大”，也开始决定“预算用得有多激进”，prepared tier 已开始具备 profile-driven 控制语义，而不是仅靠运行时局部 heuristic 自行漂移。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

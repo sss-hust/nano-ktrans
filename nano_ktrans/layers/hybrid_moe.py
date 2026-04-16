@@ -77,6 +77,7 @@ class HybridMoE(nn.Module):
         expert_prefetch_workers: int = 1,
         expert_warm_cache_size: int = 4,
         expert_prepared_cache_size: Optional[int] = None,
+        prepared_controller_aggressiveness: float = 0.0,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -138,6 +139,7 @@ class HybridMoE(nn.Module):
         self.expert_prepared_cache_size = (
             None if expert_prepared_cache_size is None else max(0, int(expert_prepared_cache_size))
         )
+        self.prepared_controller_aggressiveness = max(0.0, float(prepared_controller_aggressiveness))
         self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.warm_cache_hits = 0
@@ -602,6 +604,10 @@ class HybridMoE(nn.Module):
             if self.cold_promotion_penalty >= 1.0:
                 controller_cap += 1
             limit = min(limit, max(1, controller_cap))
+        if self.prepared_controller_aggressiveness >= 0.5:
+            limit += 1
+        if self.prepared_controller_aggressiveness >= 1.0:
+            limit += 1
         return max(1, limit)
 
     def _adaptive_prebuild_limit(self) -> int:
@@ -625,6 +631,10 @@ class HybridMoE(nn.Module):
             if self.cold_promotion_penalty >= 1.0:
                 controller_cap += 1
             limit = min(limit, max(1, controller_cap))
+        if self.prepared_controller_aggressiveness >= 0.5:
+            limit += 1
+        if self.prepared_controller_aggressiveness >= 1.0:
+            limit += 1
         return max(1, limit)
 
     def _adaptive_prefetch_pending_limit(self, *, phase: str) -> int:
@@ -647,6 +657,10 @@ class HybridMoE(nn.Module):
         if self.cold_promotion_penalty >= 1.0:
             limit += 1
         if self.cold_promotion_penalty >= 1.5:
+            limit += 1
+        if self.prepared_controller_aggressiveness >= 0.5:
+            limit += 1
+        if self.prepared_controller_aggressiveness >= 1.0:
             limit += 1
 
         return min(max(1, limit), max(1, self._adaptive_prebuild_limit()))
@@ -674,6 +688,10 @@ class HybridMoE(nn.Module):
         if self.cold_promotion_penalty >= 1.0:
             budget += 1
         if self.cold_promotion_penalty >= 1.5:
+            budget += 1
+        if self.prepared_controller_aggressiveness >= 0.5:
+            budget += 1
+        if self.prepared_controller_aggressiveness >= 1.0:
             budget += 1
 
         return max(0, budget)

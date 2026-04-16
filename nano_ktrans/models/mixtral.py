@@ -108,6 +108,7 @@ class MixtralDecoderLayer(nn.Module):
         residency_plan: Optional[ExpertResidencyPlan] = None,
         dynamic_expert_scheduler: Optional[DynamicExpertScheduler] = None,
         expert_prepared_cache_size: int | None = None,
+        prepared_controller_aggressiveness: float = 0.0,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -157,6 +158,7 @@ class MixtralDecoderLayer(nn.Module):
                 experts_are_packed=config.arch.experts_are_packed,
                 hidden_act=config.hidden_act,
                 expert_prepared_cache_size=expert_prepared_cache_size,
+                prepared_controller_aggressiveness=prepared_controller_aggressiveness,
             )
 
             if config.arch.has_shared_expert and config.shared_expert_intermediate_size:
@@ -228,6 +230,8 @@ class MixtralModel(nn.Module):
         offload_backend_kwargs: dict | None = None,
         residency_plan: Optional[ExpertResidencyPlan] = None,
         dynamic_expert_scheduler: Optional[DynamicExpertScheduler] = None,
+        expert_prepared_cache_size: int | None = None,
+        prepared_controller_aggressiveness: float = 0.0,
     ):
         super().__init__()
         self.config = config
@@ -302,6 +306,8 @@ class MixtralForCausalLM(nn.Module):
             offload_backend_kwargs=offload_backend_kwargs,
             residency_plan=residency_plan,
             dynamic_expert_scheduler=dynamic_expert_scheduler,
+            expert_prepared_cache_size=expert_prepared_cache_size,
+            prepared_controller_aggressiveness=prepared_controller_aggressiveness,
         )
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.packed_modules_mapping = {
