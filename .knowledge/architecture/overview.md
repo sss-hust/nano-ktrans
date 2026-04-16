@@ -655,6 +655,11 @@ tags: [architecture]
     - 同一 tick 新推进到 finalize queue 的 batch 只记作 prefinalized，不会立即消费
     - resident set apply 只消费 tick 开始前已经存在的 finalize batches
     这样最后一段已经从“resident batch buffer + finalize”推进成“resident batch staging + finalize queue + metadata finalize”的更稳定三段结构。
+97. resident commit 现已再拆成 `resident_commit_finalize_queue -> resident_commit_ready_cache -> resident set`：
+    - background tick 会先把 preexisting finalize batches 解析成 ready cache entries
+    - 同一 tick 新进入 finalize queue 的 batch 不会立刻进入 ready cache
+    - resident set apply 只消费 tick 开始前已经存在的 ready cache batches
+    这样最后一段已经从“finalize queue + metadata finalize”推进成“finalize staging + ready cache + lightweight finalize”的更稳定后台提交结构。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
