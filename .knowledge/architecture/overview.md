@@ -344,6 +344,11 @@ tags: [architecture]
     这有助于判断“某个 profile 是真的让流水线更像 batch system”，还是只是把局部 layer 指标做得好看。
 56. 为了让这些 step 级 totals 可信，runtime hook 现在返回的是“本次 tick 新增了多少 apply batch 指标”，而不是把 layer 上的累计计数每步重新上报一遍。
     这样 `MigrationPipelineRuntime` 聚合出来的 `offload_pipeline_apply_batch_*_total` 才真正代表 token-step 级的累计推进，而不是把同一层的历史计数重复累加。
+57. activated cache 的淘汰策略也已经从简单插入顺序，推进到了“lifecycle 优先级 + hotness”：
+    - device-side activated candidate 被逐出时，会优先挑选更冷、准备阶段更低的对象
+    - 被逐出的 activated expert 会回退到 CPU warm cache
+    - 同时 migration lifecycle 会从 `ACTIVATED` 降级为 `WARMED`
+    这样 activated cache 开始具备和 warm cache 一致的热点保留语义，不再只是一个短暂的过渡列表。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

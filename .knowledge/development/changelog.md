@@ -7,6 +7,8 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-16 06:30 --> **[activated-cache-victims]** activated cache 的 victim 选择已从简单 FIFO/LRU 收敛为“lifecycle 优先级 + hotness”排序；更冷的 activated candidate 会优先回退到 warm cache，并把 lifecycle 从 `ACTIVATED` 降到 `WARMED`，与 warm cache 的热点保留策略保持一致。
+- <!-- updated: 2026-04-16 06:30 --> **[tests]** 新增 activated cache eviction 测试，验证在容量不足时更冷的 activated expert 会被逐出到 warm cache，同时回归 `tests/test_core.py + tests/test_pim_runtime.py` 为 `78 passed, 1 warning`。
 - <!-- updated: 2026-04-16 03:22 --> **[benchmark-sweep]** `profile_sweep_summary` 新增自动对比层，输出 `comparison_table`、`best_by_metric`、`metric_directions`，并补充 `pipeline_promotion_non_cold_total/ratio` 与 `runtime_apply_batch_size_avg`，便于直接比较 overlap 质量而不只看 decode TPS。
 - <!-- updated: 2026-04-16 03:36 --> **[batch-apply-sources]** ready promotion 的批处理现在会统计 batch 内 `activated / warm / cold` 三类来源；对应指标已接到 `HybridMoE` 诊断、`MigrationPipelineRuntime` 汇总和 scheduler summary，便于判断批处理究竟是在消费热路径还是仍有大量冷启动。
 - <!-- updated: 2026-04-16 03:48 --> **[lifecycle-alignment]** warm/activated cache 的 eviction 现在会同步回退 migration lifecycle：device-side activated candidate 被挤出时回退到 `WARMED`，CPU warm candidate 被挤出时回退到 `READY`，避免 cache 层次和状态机脱节。

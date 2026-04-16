@@ -335,6 +335,19 @@ class HybridMoE(nn.Module):
             return 1
         return max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
 
+    def _pick_activated_cache_victim_key(self) -> str | None:
+        if not self.activated_expert_cache:
+            return None
+        ordered_keys = list(self.activated_expert_cache.keys())
+        return min(
+            ordered_keys,
+            key=lambda expert_key: (
+                self._migration_state_priority(int(expert_key)),
+                self._hotness_score(int(expert_key)),
+                ordered_keys.index(expert_key),
+            ),
+        )
+
     def _hotness_score(self, expert_idx: int) -> float:
         if self.residency_plan is None:
             return 0.0
@@ -409,7 +422,11 @@ class HybridMoE(nn.Module):
         self.activated_expert_cache.move_to_end(expert_key)
         self.activated_cache_stores += 1
         while len(self.activated_expert_cache) > self._activated_cache_limit():
-            evicted_key, evicted_module = self.activated_expert_cache.popitem(last=False)
+            evicted_key = self._pick_activated_cache_victim_key()
+            if evicted_key is None:
+                evicted_key, evicted_module = self.activated_expert_cache.popitem(last=False)
+            else:
+                evicted_module = self.activated_expert_cache.pop(evicted_key)
             self._store_warm_module(int(evicted_key), evicted_module, count_store=False)
             if self.offload_backend is not None:
                 evicted_idx = int(evicted_key)
