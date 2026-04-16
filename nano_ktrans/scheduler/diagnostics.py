@@ -117,11 +117,17 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "layer_count": int(offload_diagnostics.get("layer_count", 0)),
         "offload_refresh_calls": int((offload_diagnostics.get("offload_refresh") or {}).get("offload_refresh_calls", 0)),
         "offload_background_ticks": int((offload_diagnostics.get("offload_refresh") or {}).get("offload_background_ticks", 0)),
+        "offload_background_work_items_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_background_work_items_total", 0)
+        ),
         "offload_background_warm_prebuilt_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_background_warm_prebuilt_total", 0)
         ),
         "offload_background_activation_ready_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_background_activation_ready_total", 0)
+        ),
+        "offload_background_activation_applied_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_background_activation_applied_total", 0)
         ),
         "offload_refresh_ready_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_refresh_ready_total", 0)
@@ -472,6 +478,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
     else:
         summary["background_worker_work_ratio"] = None
+    if summary["offload_background_ticks"] > 0:
+        summary["offload_background_work_items_avg"] = (
+            summary["offload_background_work_items_total"] / summary["offload_background_ticks"]
+        )
+    else:
+        summary["offload_background_work_items_avg"] = None
     return summary
 
 
@@ -546,6 +558,15 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             ),
             "background_worker_work_ratio": scheduler_summary.get(
                 "background_worker_work_ratio"
+            ),
+            "offload_background_work_items_total": int(
+                scheduler_summary.get("offload_background_work_items_total", 0)
+            ),
+            "offload_background_work_items_avg": scheduler_summary.get(
+                "offload_background_work_items_avg"
+            ),
+            "offload_background_activation_applied_total": int(
+                scheduler_summary.get("offload_background_activation_applied_total", 0)
             ),
             "pipeline_apply_batches": int(
                 scheduler_summary.get("pipeline_apply_batches", 0)

@@ -1975,6 +1975,7 @@ class TestDynamicScheduler:
                     "ready_polled": 2,
                     "warm_prebuilt": 1,
                     "activation_ready": 1,
+                    "activation_applied": 1,
                 }
 
             def advance_offload_pipeline(self, *, phase, device, dtype):
@@ -1999,13 +2000,15 @@ class TestDynamicScheduler:
         layer.parameters = linear.parameters
         model.layers = [layer]
 
-        assert model.background_tick_offload_state(phase="decode") == 2
+        assert model.background_tick_offload_state(phase="decode") == 5
         assert model.refresh_offload_state(phase="decode") == 1
         diagnostics = model.offload_refresh_diagnostics()
         assert diagnostics["offload_background_ticks"] == 1
+        assert diagnostics["offload_background_work_items_total"] == 5
         assert diagnostics["offload_pipeline_background_ready_callback_total"] == 2
         assert diagnostics["offload_background_warm_prebuilt_total"] == 1
         assert diagnostics["offload_background_activation_ready_total"] == 1
+        assert diagnostics["offload_background_activation_applied_total"] == 1
 
     def test_mixtral_model_reports_background_worker_diagnostics(self):
         from nano_ktrans.models.mixtral import MixtralModel
@@ -2091,8 +2094,10 @@ class TestDynamicScheduler:
                 "offload_refresh": {
                     "offload_refresh_calls": 2,
                     "offload_background_ticks": 3,
+                    "offload_background_work_items_total": 7,
                     "offload_background_warm_prebuilt_total": 4,
                     "offload_background_activation_ready_total": 2,
+                    "offload_background_activation_applied_total": 1,
                     "offload_pipeline_ticks": 2,
                     "offload_pipeline_background_ready_callback_total": 5,
                 },
@@ -2103,9 +2108,49 @@ class TestDynamicScheduler:
         )
 
         assert summary["offload_background_ticks"] == 3
+        assert summary["offload_background_work_items_total"] == 7
+        assert summary["offload_background_work_items_avg"] == pytest.approx(7 / 3)
         assert summary["offload_background_warm_prebuilt_total"] == 4
         assert summary["offload_background_activation_ready_total"] == 2
+        assert summary["offload_background_activation_applied_total"] == 1
         assert summary["offload_pipeline_background_ready_callback_total"] == 5
+
+    def test_profile_sweep_summary_includes_background_pipeline_totals(self):
+        from nano_ktrans.scheduler.diagnostics import summarize_profile_sweep_results
+
+        summary = summarize_profile_sweep_results(
+            [
+                {
+                    "backend": "cuda_pim",
+                    "scheduler_profile": "overlap_safe",
+                    "status": "ok",
+                    "runs": [
+                        {
+                            "decode_tokens_per_second": 1.5,
+                            "prefill_seconds": 1.0,
+                            "decode_seconds": 2.0,
+                        }
+                    ],
+                    "scheduler_summary": {
+                        "background_worker_work_ratio": 0.5,
+                        "offload_background_work_items_total": 9,
+                        "offload_background_work_items_avg": 3.0,
+                        "offload_background_activation_applied_total": 4,
+                        "pipeline_promotion_source_activated": 3,
+                        "pipeline_promotion_source_warm": 2,
+                        "pipeline_promotion_source_cold": 1,
+                        "offload_pipeline_apply_batch_count_total": 2,
+                        "offload_pipeline_apply_batch_experts_total": 4,
+                        "offload_pipeline_apply_batch_evictions_total": 1,
+                    },
+                }
+            ]
+        )
+
+        row = summary["comparison_table"][0]
+        assert row["offload_background_work_items_total"] == 9
+        assert row["offload_background_work_items_avg"] == 3.0
+        assert row["offload_background_activation_applied_total"] == 4
 
     def test_materialization_manager_poll_ready(self, tmp_path):
         from safetensors.torch import save_file
@@ -4963,6 +5008,7 @@ class TestDynamicScheduler:
                 self.activation_submitted = 21
                 self.activation_ready = 22
                 self.activation_applied = 23
+                self.background_activation_applied = 24
 
         dummy_hybrid = DummyHybrid()
         layer = type("Layer", (), {"hybrid_moe": dummy_hybrid})()
@@ -4981,6 +5027,7 @@ class TestDynamicScheduler:
         assert dummy_hybrid.warm_cache_prebuilt == 0
         assert dummy_hybrid.activated_cache_hits == 0
         assert dummy_hybrid.activation_applied == 0
+        assert dummy_hybrid.background_activation_applied == 0
 
     def test_llm_reset_offload_diagnostics_zeros_runtime_background_tick_counters(self):
         from nano_ktrans.llm import LLM
@@ -4992,21 +5039,23 @@ class TestDynamicScheduler:
             def __init__(self):
                 self.tick_calls = 4
                 self.background_ticks = 5
+                self.background_work_items_total = 6
                 self.background_warm_prebuilt_total = 6
                 self.background_activation_ready_total = 7
+                self.background_activation_applied_total = 8
                 self.prefetch_submitted_total = 6
-                self.ready_polled_total = 8
-                self.activation_ready_total = 9
-                self.ready_applied_total = 10
-                self.ready_deferred_total = 11
-                self.apply_batch_count_total = 12
-                self.apply_batch_experts_total = 13
-                self.apply_batch_evictions_total = 14
-                self.apply_batch_activated_total = 15
-                self.apply_batch_warm_total = 16
-                self.apply_batch_cold_total = 17
-                self.layers_touched_total = 18
-                self.background_ready_callback_total = 19
+                self.ready_polled_total = 9
+                self.activation_ready_total = 10
+                self.ready_applied_total = 11
+                self.ready_deferred_total = 12
+                self.apply_batch_count_total = 13
+                self.apply_batch_experts_total = 14
+                self.apply_batch_evictions_total = 15
+                self.apply_batch_activated_total = 16
+                self.apply_batch_warm_total = 17
+                self.apply_batch_cold_total = 18
+                self.layers_touched_total = 19
+                self.background_ready_callback_total = 20
                 self.last_phase = "decode"
 
         class DummyHybrid:
@@ -5029,8 +5078,10 @@ class TestDynamicScheduler:
 
         assert runtime.tick_calls == 0
         assert runtime.background_ticks == 0
+        assert runtime.background_work_items_total == 0
         assert runtime.background_warm_prebuilt_total == 0
         assert runtime.background_activation_ready_total == 0
+        assert runtime.background_activation_applied_total == 0
         assert runtime.prefetch_submitted_total == 0
         assert runtime.background_ready_callback_total == 0
         assert runtime.last_phase == ""

@@ -512,6 +512,11 @@ tags: [architecture]
     - 如果后台 worker 已运行，`SimpleEngine` 不再手动触发 `background_tick_offload_state()`
     - 前台路径只保留主 `refresh_offload_state()` 和后续 `advance_offload_pipeline()`
     这避免了同一个 token-step 里，后台线程和前台 hook 对 ready/warmed/activated 前半段做重复推进，是后台执行器真正接入运行路径后的一次必要收口。
+84. background worker 的可观测面现在也更完整了：
+    - `offload_background_work_items_total` 表示后台线程总共推进了多少 ready/warmed/activated/background-applied 工作项
+    - `offload_background_activation_applied_total` 表示其中有多少已经推进到了后台 apply
+    - `offload_background_work_items_avg` 则给出每个 background tick 的平均推进量
+    因此 benchmark/profile sweep 现在不只是在看“后台线程有没有跑”，而是开始看“后台线程到底推进了多少有效迁移工作”。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

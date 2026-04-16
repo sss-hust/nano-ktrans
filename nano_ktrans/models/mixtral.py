@@ -279,7 +279,7 @@ class MixtralModel(nn.Module):
         if "offload_runtime" not in self.__dict__:
             self.offload_runtime = MigrationPipelineRuntime()
         tick = self.offload_runtime.background_tick_layers(self.layers, phase=phase)
-        return int(tick["background_ready_callbacks"])
+        return int(tick["background_work_items"])
 
     def offload_refresh_diagnostics(self) -> dict:
         if "offload_runtime" not in self.__dict__:

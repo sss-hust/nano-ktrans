@@ -19,8 +19,10 @@ class MigrationPipelineRuntime:
     def __init__(self) -> None:
         self.tick_calls = 0
         self.background_ticks = 0
+        self.background_work_items_total = 0
         self.background_warm_prebuilt_total = 0
         self.background_activation_ready_total = 0
+        self.background_activation_applied_total = 0
         self.prefetch_submitted_total = 0
         self.ready_polled_total = 0
         self.activation_ready_total = 0
@@ -45,6 +47,7 @@ class MigrationPipelineRuntime:
     ) -> dict[str, int | str]:
         ready_polled = 0
         activation_ready = 0
+        activation_applied = 0
         ready_applied = 0
         ready_deferred = 0
         prefetch_submitted = 0
@@ -57,7 +60,7 @@ class MigrationPipelineRuntime:
         layers_touched = 0
         background_ready_callbacks = 0
         warm_prebuilt = 0
-        activation_ready = 0
+        background_work_items = 0
 
         for decoder_layer in decoder_layers:
             hybrid_moe = getattr(decoder_layer, "hybrid_moe", None)
@@ -75,11 +78,20 @@ class MigrationPipelineRuntime:
                     background_ready_callbacks += int(background_stats.get("ready_polled", 0))
                     warm_prebuilt += int(background_stats.get("warm_prebuilt", 0))
                     activation_ready += int(background_stats.get("activation_ready", 0))
+                    activation_applied += int(background_stats.get("activation_applied", 0))
+                    background_work_items += (
+                        int(background_stats.get("ready_polled", 0))
+                        + int(background_stats.get("warm_prebuilt", 0))
+                        + int(background_stats.get("activation_ready", 0))
+                        + int(background_stats.get("activation_applied", 0))
+                    )
                     continue
                 background_tick_fn = getattr(hybrid_moe, "background_tick_offload_state", None)
                 if background_tick_fn is None:
                     continue
-                background_ready_callbacks += int(background_tick_fn())
+                work_items = int(background_tick_fn())
+                background_ready_callbacks += work_items
+                background_work_items += work_items
                 continue
 
             advance_fn = getattr(hybrid_moe, "advance_offload_pipeline", None)
@@ -121,8 +133,10 @@ class MigrationPipelineRuntime:
             "apply_batch_warm": apply_batch_warm,
             "apply_batch_cold": apply_batch_cold,
             "background_ready_callbacks": background_ready_callbacks,
+            "background_work_items": background_work_items,
             "background_warm_prebuilt": warm_prebuilt,
             "background_activation_ready": activation_ready,
+            "background_activation_applied": activation_applied,
             "background_only": int(background_only),
         }
 
@@ -130,8 +144,10 @@ class MigrationPipelineRuntime:
         stats = self._tick_layers_impl(decoder_layers, phase=phase, background_only=True)
         self.background_ticks += 1
         self.background_ready_callback_total += int(stats.get("background_ready_callbacks", 0))
+        self.background_work_items_total += int(stats.get("background_work_items", 0))
         self.background_warm_prebuilt_total += int(stats.get("background_warm_prebuilt", 0))
         self.background_activation_ready_total += int(stats.get("background_activation_ready", 0))
+        self.background_activation_applied_total += int(stats.get("background_activation_applied", 0))
         self.layers_touched_total += int(stats.get("layers_touched", 0))
         self.last_phase = phase
         return stats
@@ -171,8 +187,10 @@ class MigrationPipelineRuntime:
         return {
             "offload_refresh_calls": int(self.tick_calls),
             "offload_background_ticks": int(self.background_ticks),
+            "offload_background_work_items_total": int(self.background_work_items_total),
             "offload_background_warm_prebuilt_total": int(self.background_warm_prebuilt_total),
             "offload_background_activation_ready_total": int(self.background_activation_ready_total),
+            "offload_background_activation_applied_total": int(self.background_activation_applied_total),
             "offload_refresh_ready_total": int(self.ready_polled_total),
             "offload_pipeline_ticks": int(self.tick_calls),
             "offload_pipeline_prefetch_submitted_total": int(self.prefetch_submitted_total),

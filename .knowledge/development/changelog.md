@@ -7,6 +7,10 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-17 15:05 --> **[background-apply-metrics]** background offload runtime 现已显式累计 `offload_background_work_items_total` 与 `offload_background_activation_applied_total`；`MixtralModel.background_tick_offload_state()` 返回值也已从“ready callback 数”扩展为“后台 tick 总 work items”。
+- <!-- updated: 2026-04-17 15:05 --> **[sweep]** scheduler summary / profile sweep 新增 `offload_background_work_items_avg` 与 `offload_background_activation_applied_total`，可以直接比较后台 worker 是否在稳定推进 prepared/apply 工作，而不只看 tick/work ratio。
+- <!-- updated: 2026-04-17 15:05 --> **[tests]** 扩展 background runtime reset、summary 和 sweep 覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `111 passed, 1 warning`。
+
 - <!-- updated: 2026-04-16 09:08 --> **[prepared-controller-reset]** `LLM.reset_offload_diagnostics()` 现在会同步清零 prepared-tier controller 的 `prepared_cache_rebalance_pressure_ema`、`prepared_cache_rebalance_events_last_tick` 和 `prepared_cache_rebalance_events_prev_total`，避免单次 benchmark run 混入前序 step 的 controller 状态。
 - <!-- updated: 2026-04-16 09:08 --> **[tests]** 扩展 `reset_offload_diagnostics()` 覆盖，验证 prepared controller 的 EMA / step counters 也会被清零；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `88 passed, 1 warning`。
 - <!-- updated: 2026-04-16 09:02 --> **[prepared-pressure-signals]** prepared-tier 现在同时输出三类压力信号：累计 `prepared_cache_rebalance_pressure`、单步 `prepared_cache_rebalance_pressure_step` 和平滑后的 `prepared_cache_rebalance_pressure_ema`；prepared budget backoff 可以同时参考累计与 EMA，而不是只靠累计压力。

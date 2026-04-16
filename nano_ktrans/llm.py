@@ -283,9 +283,11 @@ class LLM:
         if runtime is not None:
             runtime.tick_calls = 0
             runtime.background_ticks = 0
+            runtime.background_work_items_total = 0
             runtime.prefetch_submitted_total = 0
             runtime.background_warm_prebuilt_total = 0
             runtime.background_activation_ready_total = 0
+            runtime.background_activation_applied_total = 0
             runtime.ready_polled_total = 0
             runtime.activation_ready_total = 0
             runtime.ready_applied_total = 0
@@ -348,6 +350,7 @@ class LLM:
             hybrid_moe.activation_submitted = 0
             hybrid_moe.activation_ready = 0
             hybrid_moe.activation_applied = 0
+            hybrid_moe.background_activation_applied = 0
 
     def shutdown(self) -> None:
         shutdown_fn = getattr(self.model.model, "shutdown_offload_worker", None)

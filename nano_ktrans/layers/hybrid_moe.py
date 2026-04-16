@@ -153,6 +153,7 @@ class HybridMoE(nn.Module):
         self.activation_submitted = 0
         self.activation_ready = 0
         self.activation_applied = 0
+        self.background_activation_applied = 0
         self.materialization_manager = ExpertMaterializationManager(
             weight_path=weight_path,
             expert_key_template=self.expert_key_template,
@@ -336,13 +337,16 @@ class HybridMoE(nn.Module):
         ready_polled = self.background_tick_offload_state()
         warm_prebuilt = 0
         activation_ready = 0
+        activation_applied = 0
         if phase == "decode":
             warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
             activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
+            activation_applied = self._background_apply_activated_experts(phase=phase)
         return {
             "ready_polled": int(ready_polled),
             "warm_prebuilt": int(warm_prebuilt),
             "activation_ready": int(activation_ready),
+            "activation_applied": int(activation_applied),
         }
 
     def _insert_warm_module(self, expert_idx: int, module: nn.Module) -> None:
@@ -885,6 +889,65 @@ class HybridMoE(nn.Module):
 
         self.activation_ready += activated
         return activated
+
+    def _background_apply_activated_experts(self, *, phase: str) -> int:
+        if (
+            phase != "decode"
+            or self.offload_backend is None
+            or self.dynamic_expert_scheduler is None
+            or not self.dynamic_expert_scheduler.enabled
+        ):
+            return 0
+
+        queued_ops = self.offload_backend.migration_manager.peek_layer(self.layer_idx)
+        if not queued_ops:
+            return 0
+
+        gpu_budget = self._runtime_gpu_budget()
+        if gpu_budget <= 0:
+            return 0
+
+        promotion_ops = []
+        for op in self._coalesce_migration_ops(queued_ops):
+            if op.dst != ExpertResidency.GPU:
+                continue
+            expert_idx = int(op.expert_idx)
+            if bool(self.gpu_experts_mask[expert_idx].item()):
+                continue
+            lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+            if lifecycle != MigrationLifecycle.ACTIVATED:
+                continue
+            promotion_ops.append(op)
+
+        if not promotion_ops:
+            return 0
+
+        batch_budget = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+        free_slots = max(0, gpu_budget - int(self.gpu_experts_mask.bool().sum().item()))
+        if free_slots <= 0:
+            return 0
+        promotion_ops = promotion_ops[: min(batch_budget, free_slots)]
+        if not promotion_ops:
+            return 0
+
+        applied, completed_expert_ids, _source_counts = self._apply_promotion_batch(
+            promotion_ops,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            phase=phase,
+        )
+        if completed_expert_ids:
+            self.offload_backend.migration_manager.take_layer(
+                self.layer_idx,
+                lambda op: (
+                    op.dst == ExpertResidency.GPU
+                    and int(op.expert_idx) in completed_expert_ids
+                ),
+            )
+        if applied:
+            self.background_activation_applied += applied
+            self._synchronize_gpu_mask()
+        return applied
 
     def _prebuild_ready_experts(self, *, phase: str, device: torch.device, dtype: torch.dtype) -> int:
         if (
@@ -1742,6 +1805,7 @@ class HybridMoE(nn.Module):
             "activation_submitted": self.activation_submitted,
             "activation_ready": self.activation_ready,
             "activation_applied": self.activation_applied,
+            "background_activation_applied": self.background_activation_applied,
             "materialization_manager": self.materialization_manager.diagnostics(),
             "layer_residency": layer_residency,
             "pending_migrations": pending_migrations,
