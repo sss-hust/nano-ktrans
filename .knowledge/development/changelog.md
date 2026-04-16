@@ -17,6 +17,8 @@ tags: [changelog]
   以及 runtime 级 `offload_background_apply_queue_enqueued_total`，可以单独量化后台将激活 expert 推入 apply queue 的工作量。
 - <!-- updated: 2026-04-17 02:01 --> **[apply-queue-policy]** apply queue 现在新增独立 budget 与 hotness-aware victim 选择；当 `ACTIVATED` candidate 超过 queue 容量时，会优先保留更热 expert，并显式统计 `apply_queue_evictions`。
 - <!-- updated: 2026-04-17 02:01 --> **[tests]** 新增 apply queue enqueue / rebalance / summary 覆盖，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `113 passed, 1 warning`。
+- <!-- updated: 2026-04-17 02:05 --> **[background-apply-boundary]** background pipeline 现只负责把 `ACTIVATED` expert 推入 apply queue；真正的 resident commit 留在后续 staged commit 路径，不再在同一 background tick 里立即消费“刚入队”的 apply candidate。
+- <!-- updated: 2026-04-17 02:05 --> **[tests]** 调整 background apply queue 语义测试，并新增 apply queue 利用率/摘要覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `114 passed, 1 warning`。
 
 - <!-- updated: 2026-04-17 15:18 --> **[pipeline-lock]** `HybridMoE` 新增内部 `RLock`，background worker 与前台 `refresh/advance/forward/diagnostics` 对 prepared-tier cache、migration lifecycle 和 resident set 的共享状态访问开始串行化，降低后台推进接入真实生成后出现竞态的风险。
 - <!-- updated: 2026-04-17 15:18 --> **[tests]** 并发边界收口后重新回归 `tests/test_core.py + tests/test_pim_runtime.py`，当前为 `111 passed, 1 warning`。

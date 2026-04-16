@@ -6,6 +6,7 @@ updated: 2026-04-17 14:35
 updated: 2026-04-17 14:50
 updated: 2026-04-17 01:53
 updated: 2026-04-17 02:01
+updated: 2026-04-17 02:05
 ---
 
 # 🔥 当前工作焦点
@@ -51,6 +52,7 @@ updated: 2026-04-17 02:01
 - [x] `SimpleEngine` 已抽出统一 offload refresh hook，prefill full/chunked 与 decode 共用同一入口
 - [x] `activated -> applied` 已抽出显式 apply candidate queue；后台 worker 现在会先把 `ACTIVATED` expert 入队，前台再做 ready promotion commit
 - [x] apply queue 现已具备独立预算、hotness-aware victim 选择和 queue 级诊断，后半段 resident commit 开始从“ opportunistic apply ”推进成“受控 staged commit”
+- [x] background pipeline 现在只负责 `activated -> apply queue enqueue`；真正 resident commit 会留在后续前台/共享 staged commit 阶段，后台/前台边界更清晰
 - [x] offload refresh 已接入模型级统计，benchmark 可直接看到 refresh 次数与每步 ready 收敛量
 - [x] layer 级 refresh 已加空队列短路，避免无 pending prefetch 时做无意义轮询
 - [x] benchmark 已支持 scheduler profile sweep，可一轮比较多组调度策略

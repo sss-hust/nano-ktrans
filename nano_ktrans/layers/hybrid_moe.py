@@ -351,11 +351,17 @@ class HybridMoE(nn.Module):
             activation_applied = 0
             apply_queue_enqueued = 0
             if phase == "decode":
+                preexisting_apply_candidate_ids = {
+                    int(expert_idx) for expert_idx in self.apply_candidate_queue.keys()
+                }
                 warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
                 activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
                 apply_queue_enqueued = self._enqueue_activated_apply_candidates(phase=phase)
                 self.background_apply_queue_enqueued += apply_queue_enqueued
-                activation_applied = self._background_apply_activated_experts(phase=phase)
+                activation_applied = self._background_apply_activated_experts(
+                    phase=phase,
+                    eligible_expert_ids=preexisting_apply_candidate_ids,
+                )
             return {
                 "ready_polled": int(ready_polled),
                 "warm_prebuilt": int(warm_prebuilt),
@@ -988,6 +994,7 @@ class HybridMoE(nn.Module):
         dtype: torch.dtype,
         phase: str,
         active_experts: Optional[set[int]] = None,
+        eligible_expert_ids: Optional[set[int]] = None,
         allow_eviction: bool,
         count_batch: bool,
     ) -> tuple[int, int]:
@@ -1005,7 +1012,14 @@ class HybridMoE(nn.Module):
 
         active_experts = active_experts or set()
         max_promotions = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
-        candidate_ops = list(self.apply_candidate_queue.values())
+        candidate_ops = []
+        for expert_key, op in self.apply_candidate_queue.items():
+            expert_idx = int(expert_key)
+            if eligible_expert_ids is not None and expert_idx not in eligible_expert_ids:
+                continue
+            candidate_ops.append(op)
+        if not candidate_ops:
+            return 0, 0
         candidate_ops.sort(key=lambda op: self._promotion_sort_key(op, active_experts, phase))
 
         if count_batch:
@@ -1062,7 +1076,12 @@ class HybridMoE(nn.Module):
         self.apply_queue_committed += applied
         return applied, deferred
 
-    def _background_apply_activated_experts(self, *, phase: str) -> int:
+    def _background_apply_activated_experts(
+        self,
+        *,
+        phase: str,
+        eligible_expert_ids: Optional[set[int]] = None,
+    ) -> int:
         if (
             phase != "decode"
             or self.offload_backend is None
@@ -1075,6 +1094,7 @@ class HybridMoE(nn.Module):
             device=torch.device("cpu"),
             dtype=torch.float32,
             phase=phase,
+            eligible_expert_ids=eligible_expert_ids,
             allow_eviction=False,
             count_batch=False,
         )

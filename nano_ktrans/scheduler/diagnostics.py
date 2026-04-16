@@ -8,6 +8,7 @@ PROFILE_SWEEP_SORT_KEYS = (
     "pipeline_promotion_non_cold_total",
     "pipeline_promotion_non_cold_ratio",
     "background_worker_work_ratio",
+    "apply_queue_utilization",
     "prepared_cache_utilization",
     "effective_prepared_cache_utilization",
     "prepared_cache_budget_backoff_avg",
@@ -39,6 +40,7 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "pipeline_promotion_non_cold_total": "max",
     "pipeline_promotion_non_cold_ratio": "max",
     "background_worker_work_ratio": "max",
+    "apply_queue_utilization": "max",
     "pipeline_apply_batches": "max",
     "pipeline_apply_batch_size_avg": "max",
     "pipeline_apply_batch_evictions": "min",
@@ -495,6 +497,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
     else:
         summary["background_worker_work_ratio"] = None
+    if summary["apply_queue_limit"] > 0:
+        summary["apply_queue_utilization"] = (
+            summary["apply_queue_size"] / summary["apply_queue_limit"]
+        )
+    else:
+        summary["apply_queue_utilization"] = None
     if summary["offload_background_ticks"] > 0:
         summary["offload_background_work_items_avg"] = (
             summary["offload_background_work_items_total"] / summary["offload_background_ticks"]
@@ -576,6 +584,7 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             "background_worker_work_ratio": scheduler_summary.get(
                 "background_worker_work_ratio"
             ),
+            "apply_queue_utilization": scheduler_summary.get("apply_queue_utilization"),
             "offload_background_work_items_total": int(
                 scheduler_summary.get("offload_background_work_items_total", 0)
             ),

@@ -3202,11 +3202,11 @@ class TestDynamicScheduler:
         diagnostics = hybrid.diagnostics()
 
         assert stats["apply_queue_enqueued"] == 1
-        assert stats["activation_applied"] == 1
+        assert stats["activation_applied"] == 0
         assert diagnostics["background_apply_queue_enqueued"] == 1
         assert diagnostics["apply_queue_enqueued"] == 1
-        assert diagnostics["apply_queue_committed"] == 1
-        assert diagnostics["apply_queue_size"] == 0
+        assert diagnostics["apply_queue_committed"] == 0
+        assert diagnostics["apply_queue_size"] == 1
 
     def test_hybrid_moe_apply_queue_rebalances_cold_candidates(self, tmp_path):
         from safetensors.torch import save_file
@@ -3297,6 +3297,40 @@ class TestDynamicScheduler:
         assert diagnostics["apply_queue_evictions"] >= 1
         assert diagnostics["apply_queue_size"] <= diagnostics["apply_queue_limit"]
         assert diagnostics["apply_queue_pending_experts"] == [1]
+
+    def test_summarize_offload_diagnostics_reports_apply_queue_metrics(self):
+        from nano_ktrans.scheduler.diagnostics import summarize_offload_diagnostics
+
+        summary = summarize_offload_diagnostics(
+            {
+                "layer_count": 1,
+                "offload_refresh": {
+                    "offload_background_apply_queue_enqueued_total": 3,
+                },
+                "dynamic_scheduler": {"enabled": True},
+                "layers": [
+                    {
+                        "apply_queue_size": 2,
+                        "apply_queue_limit": 4,
+                        "apply_queue_enqueued": 5,
+                        "apply_queue_committed": 3,
+                        "apply_queue_pruned": 1,
+                        "apply_queue_evictions": 2,
+                        "background_apply_queue_enqueued": 3,
+                    }
+                ],
+            }
+        )
+
+        assert summary["apply_queue_size"] == 2
+        assert summary["apply_queue_limit"] == 4
+        assert summary["apply_queue_enqueued"] == 5
+        assert summary["apply_queue_committed"] == 3
+        assert summary["apply_queue_pruned"] == 1
+        assert summary["apply_queue_evictions"] == 2
+        assert summary["background_apply_queue_enqueued"] == 3
+        assert summary["apply_queue_utilization"] == pytest.approx(0.5)
+        assert summary["offload_background_apply_queue_enqueued_total"] == 3
 
     def test_hybrid_moe_promotion_prefers_activated_cache(self, tmp_path):
         from safetensors.torch import save_file

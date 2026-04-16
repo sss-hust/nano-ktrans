@@ -254,6 +254,11 @@ tags: [architecture]
     - 有基于 hotness 和 lifecycle 的 victim 选择
     - 有 `apply_queue_enqueued / committed / pruned / evictions` 诊断
     这让后台 prepared 阶段和前台 resident commit 之间开始有清晰的缓冲边界，而不再只是直接从 activated cache 命中就提交。
+48. 当前 background pipeline 与 apply queue 的边界也进一步收紧：
+    - background tick 负责把 `ACTIVATED` candidate 推入 apply queue
+    - 但不会在同一个 tick 里立刻消费刚入队的 candidate
+    - resident commit 仍由后续 staged commit 路径完成
+    这样系统更接近“后台准备、前台提交”的分层执行语义，而不是单 tick 内再次退化成 opportunistic apply。
 44. 当前 prepared pressure 已进一步拆成三类信号：
     - `prepared_cache_rebalance_pressure`：累计平均压力，反映长期拥塞
     - `prepared_cache_rebalance_pressure_step`：本步压力，反映瞬时抖动
