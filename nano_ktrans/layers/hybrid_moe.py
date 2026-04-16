@@ -19,6 +19,7 @@ import torch
 from torch import nn
 from typing import Optional, Dict
 from collections import OrderedDict
+from threading import RLock
 
 from nano_ktrans.kernels.cpu_moe import CPUMoEBackend
 from nano_ktrans.kernels.expert_materialization import ExpertMaterializationManager
@@ -140,6 +141,7 @@ class HybridMoE(nn.Module):
             None if expert_prepared_cache_size is None else max(0, int(expert_prepared_cache_size))
         )
         self.prepared_controller_aggressiveness = max(0.0, float(prepared_controller_aggressiveness))
+        self._pipeline_lock = RLock()
         self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.warm_cache_hits = 0
@@ -306,26 +308,28 @@ class HybridMoE(nn.Module):
         return submitted
 
     def refresh_offload_state(self) -> int:
-        if self.offload_backend is None:
-            return 0
-        callback_ready = self.materialization_manager.drain_ready_callbacks()
-        if not self.materialization_manager.has_pending_or_ready():
-            return int(callback_ready)
-        ready_keys = self.materialization_manager.poll_ready()
-        for layer_idx, expert_idx in ready_keys:
-            if int(layer_idx) != int(self.layer_idx):
-                continue
-            self.offload_backend.migration_manager.mark_state(
-                self.layer_idx,
-                int(expert_idx),
-                state=MigrationLifecycle.READY,
-            )
-        return int(callback_ready) + len(ready_keys)
+        with self._pipeline_lock:
+            if self.offload_backend is None:
+                return 0
+            callback_ready = self.materialization_manager.drain_ready_callbacks()
+            if not self.materialization_manager.has_pending_or_ready():
+                return int(callback_ready)
+            ready_keys = self.materialization_manager.poll_ready()
+            for layer_idx, expert_idx in ready_keys:
+                if int(layer_idx) != int(self.layer_idx):
+                    continue
+                self.offload_backend.migration_manager.mark_state(
+                    self.layer_idx,
+                    int(expert_idx),
+                    state=MigrationLifecycle.READY,
+                )
+            return int(callback_ready) + len(ready_keys)
 
     def background_tick_offload_state(self) -> int:
-        if self.offload_backend is None:
-            return 0
-        return int(self.materialization_manager.drain_ready_callbacks())
+        with self._pipeline_lock:
+            if self.offload_backend is None:
+                return 0
+            return int(self.materialization_manager.drain_ready_callbacks())
 
     def background_advance_offload_pipeline(
         self,
@@ -334,20 +338,21 @@ class HybridMoE(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> dict[str, int]:
-        ready_polled = self.background_tick_offload_state()
-        warm_prebuilt = 0
-        activation_ready = 0
-        activation_applied = 0
-        if phase == "decode":
-            warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
-            activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
-            activation_applied = self._background_apply_activated_experts(phase=phase)
-        return {
-            "ready_polled": int(ready_polled),
-            "warm_prebuilt": int(warm_prebuilt),
-            "activation_ready": int(activation_ready),
-            "activation_applied": int(activation_applied),
-        }
+        with self._pipeline_lock:
+            ready_polled = self.background_tick_offload_state()
+            warm_prebuilt = 0
+            activation_ready = 0
+            activation_applied = 0
+            if phase == "decode":
+                warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
+                activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
+                activation_applied = self._background_apply_activated_experts(phase=phase)
+            return {
+                "ready_polled": int(ready_polled),
+                "warm_prebuilt": int(warm_prebuilt),
+                "activation_ready": int(activation_ready),
+                "activation_applied": int(activation_applied),
+            }
 
     def _insert_warm_module(self, expert_idx: int, module: nn.Module) -> None:
         expert_key = str(expert_idx)
@@ -1102,42 +1107,43 @@ class HybridMoE(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> dict[str, int]:
-        prev_apply_batches = self.pipeline_apply_batches
-        prev_apply_batch_experts = self.pipeline_apply_batch_experts
-        prev_apply_batch_evictions = self.pipeline_apply_batch_evictions
-        prev_apply_batch_activated = self.pipeline_apply_batch_activated
-        prev_apply_batch_warm = self.pipeline_apply_batch_warm
-        prev_apply_batch_cold = self.pipeline_apply_batch_cold
-        prefetch_submitted = self._prime_pending_promotions(phase=phase)
-        ready_polled = self.refresh_offload_state()
-        warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
-        activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
-        ready_applied = 0
-        ready_deferred = 0
-        if phase == "decode":
-            ready_applied, ready_deferred = self._promote_ready_migrations(
-                device=device,
-                dtype=dtype,
-                phase=phase,
-            )
-        self.pipeline_ticks += 1
-        self._update_prepared_cache_rebalance_pressure_signals()
-        self.pipeline_ready_applied += ready_applied
-        self.pipeline_ready_deferred += ready_deferred
-        return {
-            "ready_polled": int(ready_polled),
-            "ready_applied": int(ready_applied),
-            "ready_deferred": int(ready_deferred),
-            "prefetch_submitted": int(prefetch_submitted),
-            "warm_prebuilt": int(warm_prebuilt),
-            "activation_ready": int(activation_ready),
-            "apply_batch_count": int(self.pipeline_apply_batches - prev_apply_batches),
-            "apply_batch_experts": int(self.pipeline_apply_batch_experts - prev_apply_batch_experts),
-            "apply_batch_evictions": int(self.pipeline_apply_batch_evictions - prev_apply_batch_evictions),
-            "apply_batch_activated": int(self.pipeline_apply_batch_activated - prev_apply_batch_activated),
-            "apply_batch_warm": int(self.pipeline_apply_batch_warm - prev_apply_batch_warm),
-            "apply_batch_cold": int(self.pipeline_apply_batch_cold - prev_apply_batch_cold),
-        }
+        with self._pipeline_lock:
+            prev_apply_batches = self.pipeline_apply_batches
+            prev_apply_batch_experts = self.pipeline_apply_batch_experts
+            prev_apply_batch_evictions = self.pipeline_apply_batch_evictions
+            prev_apply_batch_activated = self.pipeline_apply_batch_activated
+            prev_apply_batch_warm = self.pipeline_apply_batch_warm
+            prev_apply_batch_cold = self.pipeline_apply_batch_cold
+            prefetch_submitted = self._prime_pending_promotions(phase=phase)
+            ready_polled = self.refresh_offload_state()
+            warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
+            activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
+            ready_applied = 0
+            ready_deferred = 0
+            if phase == "decode":
+                ready_applied, ready_deferred = self._promote_ready_migrations(
+                    device=device,
+                    dtype=dtype,
+                    phase=phase,
+                )
+            self.pipeline_ticks += 1
+            self._update_prepared_cache_rebalance_pressure_signals()
+            self.pipeline_ready_applied += ready_applied
+            self.pipeline_ready_deferred += ready_deferred
+            return {
+                "ready_polled": int(ready_polled),
+                "ready_applied": int(ready_applied),
+                "ready_deferred": int(ready_deferred),
+                "prefetch_submitted": int(prefetch_submitted),
+                "warm_prebuilt": int(warm_prebuilt),
+                "activation_ready": int(activation_ready),
+                "apply_batch_count": int(self.pipeline_apply_batches - prev_apply_batches),
+                "apply_batch_experts": int(self.pipeline_apply_batch_experts - prev_apply_batch_experts),
+                "apply_batch_evictions": int(self.pipeline_apply_batch_evictions - prev_apply_batch_evictions),
+                "apply_batch_activated": int(self.pipeline_apply_batch_activated - prev_apply_batch_activated),
+                "apply_batch_warm": int(self.pipeline_apply_batch_warm - prev_apply_batch_warm),
+                "apply_batch_cold": int(self.pipeline_apply_batch_cold - prev_apply_batch_cold),
+            }
 
     def _request_prefetch_candidates(self, *, phase: str) -> None:
         if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
@@ -1473,16 +1479,15 @@ class HybridMoE(nn.Module):
             if applied_ok:
                 applied += 1
                 completed_expert_ids.add(expert_idx)
-                if self.offload_backend is not None:
-                    self.offload_backend.migration_manager.mark_state(
-                        self.layer_idx,
-                        expert_idx,
-                        src=op.src.value,
-                        dst=op.dst.value,
-                        reason=op.reason,
-                        phase=phase,
-                        state=MigrationLifecycle.APPLIED,
-                    )
+                self.offload_backend.migration_manager.mark_state(
+                    self.layer_idx,
+                    expert_idx,
+                    src=op.src.value,
+                    dst=op.dst.value,
+                    reason=op.reason,
+                    phase=phase,
+                    state=MigrationLifecycle.APPLIED,
+                )
                 self.applied_migration_history.append(
                     {
                         "phase": phase,
@@ -1503,16 +1508,15 @@ class HybridMoE(nn.Module):
             expert_idx = int(op.expert_idx)
             if bool(self.gpu_experts_mask[expert_idx].item()):
                 completed_expert_ids.add(expert_idx)
-                if self.offload_backend is not None:
-                    self.offload_backend.migration_manager.mark_state(
-                        self.layer_idx,
-                        expert_idx,
-                        src=op.src.value,
-                        dst=op.dst.value,
-                        reason=op.reason,
-                        phase=phase,
-                        state=MigrationLifecycle.APPLIED,
-                    )
+                self.offload_backend.migration_manager.mark_state(
+                    self.layer_idx,
+                    expert_idx,
+                    src=op.src.value,
+                    dst=op.dst.value,
+                    reason=op.reason,
+                    phase=phase,
+                    state=MigrationLifecycle.APPLIED,
+                )
                 continue
 
             lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
@@ -1522,7 +1526,7 @@ class HybridMoE(nn.Module):
                 MigrationLifecycle.WARMED,
                 MigrationLifecycle.ACTIVATED,
             }
-            if is_ready and self.offload_backend is not None and not require_prefetch_ready:
+            if is_ready and not require_prefetch_ready:
                 self.offload_backend.migration_manager.mark_state(
                     self.layer_idx,
                     expert_idx,
@@ -1535,16 +1539,15 @@ class HybridMoE(nn.Module):
                 ready_for_decode = True
             if require_prefetch_ready and not ready_for_decode:
                 self.runtime_deferred_for_prefetch += 1
-                if self.offload_backend is not None:
-                    self.offload_backend.migration_manager.mark_state(
-                        self.layer_idx,
-                        expert_idx,
-                        src=op.src.value,
-                        dst=op.dst.value,
-                        reason=op.reason,
-                        phase=phase,
-                        state=MigrationLifecycle.DEFERRED,
-                    )
+                self.offload_backend.migration_manager.mark_state(
+                    self.layer_idx,
+                    expert_idx,
+                    src=op.src.value,
+                    dst=op.dst.value,
+                    reason=op.reason,
+                    phase=phase,
+                    state=MigrationLifecycle.DEFERRED,
+                )
                 if not is_ready:
                     self._request_prefetch(expert_idx)
                 continue
@@ -1563,16 +1566,15 @@ class HybridMoE(nn.Module):
                 self.runtime_evictions += 1
                 applied += 1
                 completed_expert_ids.add(victim_idx)
-                if self.offload_backend is not None:
-                    self.offload_backend.migration_manager.mark_state(
-                        self.layer_idx,
-                        victim_idx,
-                        src=ExpertResidency.GPU.value,
-                        dst=victim_dst.value,
-                        reason="evict_for_promotion",
-                        phase=phase,
-                        state=MigrationLifecycle.APPLIED,
-                    )
+                self.offload_backend.migration_manager.mark_state(
+                    self.layer_idx,
+                    victim_idx,
+                    src=ExpertResidency.GPU.value,
+                    dst=victim_dst.value,
+                    reason="evict_for_promotion",
+                    phase=phase,
+                    state=MigrationLifecycle.APPLIED,
+                )
                 self.applied_migration_history.append(
                     {
                         "phase": phase,
@@ -1593,16 +1595,15 @@ class HybridMoE(nn.Module):
                     applied_promotions += 1
                     completed_expert_ids.add(expert_idx)
                     self.prefetch_materialized += 1
-                    if self.offload_backend is not None:
-                        self.offload_backend.migration_manager.mark_state(
-                            self.layer_idx,
-                            expert_idx,
-                            src=op.src.value,
-                            dst=op.dst.value,
-                            reason=op.reason,
-                            phase=phase,
-                            state=MigrationLifecycle.APPLIED,
-                        )
+                    self.offload_backend.migration_manager.mark_state(
+                        self.layer_idx,
+                        expert_idx,
+                        src=op.src.value,
+                        dst=op.dst.value,
+                        reason=op.reason,
+                        phase=phase,
+                        state=MigrationLifecycle.APPLIED,
+                    )
                     self.applied_migration_history.append(
                         {
                             "phase": phase,
@@ -1653,22 +1654,25 @@ class HybridMoE(nn.Module):
         context = get_context()
         phase = "prefill" if context.is_prefill else "decode"
         active_experts = {int(expert_idx) for expert_idx in torch.unique(topk_ids).tolist()}
-        self._apply_queued_migrations(hidden_states, active_experts, phase=phase)
+        with self._pipeline_lock:
+            self._apply_queued_migrations(hidden_states, active_experts, phase=phase)
 
-        if self.dynamic_expert_scheduler is not None and self.dynamic_expert_scheduler.enabled:
-            self.dynamic_expert_scheduler.observe(self.layer_idx, topk_ids, phase=phase)
-            self._request_prefetch_candidates(phase=phase)
-            planned_ops = self.dynamic_expert_scheduler.plan_layer(self.layer_idx, phase=phase)
-            if planned_ops and self.offload_backend is not None:
-                for op in planned_ops:
-                    if (
-                        op.dst == ExpertResidency.GPU
-                        and not self.materialization_manager.has_cached(self.layer_idx, int(op.expert_idx))
-                    ):
-                        self._request_prefetch(op.expert_idx)
-                # 当前系统只有迁移控制面，没有真实 GPU/PIM 权重迁移数据面。
-                # 这里先排队；decode 阶段会消费队列并执行最小 GPU materialize/demote。
-                self.offload_backend.queue_migration_plan(planned_ops, phase=phase)
+            if self.dynamic_expert_scheduler is not None and self.dynamic_expert_scheduler.enabled:
+                self.dynamic_expert_scheduler.observe(self.layer_idx, topk_ids, phase=phase)
+                self._request_prefetch_candidates(phase=phase)
+                planned_ops = self.dynamic_expert_scheduler.plan_layer(self.layer_idx, phase=phase)
+                if planned_ops and self.offload_backend is not None:
+                    for op in planned_ops:
+                        if (
+                            op.dst == ExpertResidency.GPU
+                            and not self.materialization_manager.has_cached(self.layer_idx, int(op.expert_idx))
+                        ):
+                            self._request_prefetch(op.expert_idx)
+                    # 当前系统只有迁移控制面，没有真实 GPU/PIM 权重迁移数据面。
+                    # 这里先排队；decode 阶段会消费队列并执行最小 GPU materialize/demote。
+                    self.offload_backend.queue_migration_plan(planned_ops, phase=phase)
+            gpu_experts_mask_snapshot = self.gpu_experts_mask.detach().clone()
+            gpu_experts_snapshot = dict(self.gpu_experts.items())
 
         batch_seq_len, hidden_dim = hidden_states.shape
 
@@ -1688,11 +1692,11 @@ class HybridMoE(nn.Module):
         ).sum(dim=1).bool()
 
         for expert_idx in range(self.num_experts):
-            if not self.gpu_experts_mask[expert_idx]:
+            if not gpu_experts_mask_snapshot[expert_idx]:
                 continue  # CPU 专家，跳过
 
             expert_key = str(expert_idx)
-            if expert_key not in self.gpu_experts:
+            if expert_key not in gpu_experts_snapshot:
                 continue
 
             # 找到路由到这个专家的 token
@@ -1704,7 +1708,7 @@ class HybridMoE(nn.Module):
             current_state = hidden_states[token_indices]
 
             # GPU 专家前向
-            expert_output = self.gpu_experts[expert_key](current_state)
+            expert_output = gpu_experts_snapshot[expert_key](current_state)
 
             # 提取对应的路由权重
             expert_match = (topk_ids[token_indices] == expert_idx)
@@ -1724,45 +1728,46 @@ class HybridMoE(nn.Module):
         return final_gpu_states + cpu_output
 
     def diagnostics(self) -> dict:
-        layer_residency = None
-        pending_migrations = []
-        if self.residency_plan is not None:
-            state = self.residency_plan.layer_state(self.layer_idx)
-            layer_residency = {
-                "gpu_experts": int(state.gpu_mask().sum().item()),
-                "pim_experts": int(state.pim_mask().sum().item()),
-                "cpu_experts": int(state.cpu_mask().sum().item()),
-                "epoch": state.epoch,
-            }
-            pending_migrations = [
-                {
-                    "expert_idx": op.expert_idx,
-                    "src": op.src.value,
-                    "dst": op.dst.value,
-                    "reason": op.reason,
+        with self._pipeline_lock:
+            layer_residency = None
+            pending_migrations = []
+            if self.residency_plan is not None:
+                state = self.residency_plan.layer_state(self.layer_idx)
+                layer_residency = {
+                    "gpu_experts": int(state.gpu_mask().sum().item()),
+                    "pim_experts": int(state.pim_mask().sum().item()),
+                    "cpu_experts": int(state.cpu_mask().sum().item()),
+                    "epoch": state.epoch,
                 }
-                for op in state.pending_ops
-            ]
-        return {
-            "layer_idx": self.layer_idx,
-            "offload_backend_name": self.offload_backend_name,
-            "has_cpu_experts": self.has_cpu_experts,
-            "applied_migration_ops": self.applied_migration_ops,
-            "last_applied_migration_phase": self.last_applied_migration_phase,
-            "runtime_gpu_experts": sorted(int(expert_idx) for expert_idx in self.gpu_experts.keys()),
-            "gpu_experts_mask_sum": int(self.gpu_experts_mask.bool().sum().item()),
-            "prefetch_requested": self.prefetch_requested,
-            "prefetch_enqueued": self.prefetch_enqueued,
-            "prefetch_materialized": self.prefetch_materialized,
-            "prefetch_candidate_scans": self.prefetch_candidate_scans,
-            "runtime_evictions": self.runtime_evictions,
-            "runtime_skipped_demotion_cooldown": self.runtime_skipped_demotion_cooldown,
-            "runtime_deferred_for_prefetch": self.runtime_deferred_for_prefetch,
-            "decode_prefetch_hits": self.decode_prefetch_hits,
-            "decode_prefetch_misses": self.decode_prefetch_misses,
-            "pipeline_ticks": self.pipeline_ticks,
-            "pipeline_ready_applied": self.pipeline_ready_applied,
-            "pipeline_ready_deferred": self.pipeline_ready_deferred,
+                pending_migrations = [
+                    {
+                        "expert_idx": op.expert_idx,
+                        "src": op.src.value,
+                        "dst": op.dst.value,
+                        "reason": op.reason,
+                    }
+                    for op in state.pending_ops
+                ]
+            return {
+                "layer_idx": self.layer_idx,
+                "offload_backend_name": self.offload_backend_name,
+                "has_cpu_experts": self.has_cpu_experts,
+                "applied_migration_ops": self.applied_migration_ops,
+                "last_applied_migration_phase": self.last_applied_migration_phase,
+                "runtime_gpu_experts": sorted(int(expert_idx) for expert_idx in self.gpu_experts.keys()),
+                "gpu_experts_mask_sum": int(self.gpu_experts_mask.bool().sum().item()),
+                "prefetch_requested": self.prefetch_requested,
+                "prefetch_enqueued": self.prefetch_enqueued,
+                "prefetch_materialized": self.prefetch_materialized,
+                "prefetch_candidate_scans": self.prefetch_candidate_scans,
+                "runtime_evictions": self.runtime_evictions,
+                "runtime_skipped_demotion_cooldown": self.runtime_skipped_demotion_cooldown,
+                "runtime_deferred_for_prefetch": self.runtime_deferred_for_prefetch,
+                "decode_prefetch_hits": self.decode_prefetch_hits,
+                "decode_prefetch_misses": self.decode_prefetch_misses,
+                "pipeline_ticks": self.pipeline_ticks,
+                "pipeline_ready_applied": self.pipeline_ready_applied,
+                "pipeline_ready_deferred": self.pipeline_ready_deferred,
             "pipeline_prefetch_overlap_hits": self.pipeline_prefetch_overlap_hits,
             "pipeline_promotion_source_activated": self.pipeline_promotion_source_activated,
             "pipeline_promotion_source_warm": self.pipeline_promotion_source_warm,

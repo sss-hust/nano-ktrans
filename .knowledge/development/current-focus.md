@@ -110,6 +110,7 @@ updated: 2026-04-17 14:50
 - [x] `LLM.get_offload_diagnostics()` 现已显式暴露 `prepared_cache_budget_heuristic`，profile 的静态 prepared 预算基线和 runtime controller 的实际行为已统一进入诊断面
 - [x] 当前有 background worker 运行时，`SimpleEngine` 已不再手动重复调用 `background_tick_offload_state()`，前台 refresh 和后台 worker 的职责边界更清晰
 - [x] background worker 的 runtime 指标现已细化到 `background_work_items_total` 与 `background_activation_applied_total`，后台线程推进了多少准备/提交工作已进入 summary 与 profile sweep
+- [x] `HybridMoE` 现已引入内部 pipeline 锁，background worker 与前台 refresh/forward 对 prepared tier、migration lifecycle 和 resident set 的共享状态访问开始串行化
 
 ## 阻塞项
 
@@ -178,6 +179,7 @@ updated: 2026-04-17 14:50
 - 当前 background tick 指标已支持 per-run reset，但 benchmark 还未把这组指标纳入 profile sweep 排序与 best-by-metric 对比
 - 当前 background tick 已开始推进 warm/activation 准备，但真正的 `activated -> applied` 仍完全留在前台主流水线，后台路径还没触及 resident set commit
 - 当前 background worker 已能推进一部分 `activated -> applied`，但目前仍是 opportunistic background apply，不是真正独立的 resident commit queue，也还不是底层 batched apply
+- 当前虽然已有 `HybridMoE` 级 pipeline 锁，但锁粒度仍偏粗；background apply 还只是“线程安全地 opportunistic apply”，不是独立 commit queue，也还没有真正 batched resident commit
 - 当前 promotion batch 虽然已先统一 resolve source/module，再进入 apply，但 resident set 注入仍是 batch 内逐 expert 提交，不是真正底层 batched apply
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总
 - 当前 prebuild 已做候选裁剪，但 warm cache 还没有独立的“低优先级淘汰”策略，仍然主要依赖容量上限和 LRU

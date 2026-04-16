@@ -7,6 +7,8 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-17 15:18 --> **[pipeline-lock]** `HybridMoE` 新增内部 `RLock`，background worker 与前台 `refresh/advance/forward/diagnostics` 对 prepared-tier cache、migration lifecycle 和 resident set 的共享状态访问开始串行化，降低后台推进接入真实生成后出现竞态的风险。
+- <!-- updated: 2026-04-17 15:18 --> **[tests]** 并发边界收口后重新回归 `tests/test_core.py + tests/test_pim_runtime.py`，当前为 `111 passed, 1 warning`。
 - <!-- updated: 2026-04-17 15:05 --> **[background-apply-metrics]** background offload runtime 现已显式累计 `offload_background_work_items_total` 与 `offload_background_activation_applied_total`；`MixtralModel.background_tick_offload_state()` 返回值也已从“ready callback 数”扩展为“后台 tick 总 work items”。
 - <!-- updated: 2026-04-17 15:05 --> **[sweep]** scheduler summary / profile sweep 新增 `offload_background_work_items_avg` 与 `offload_background_activation_applied_total`，可以直接比较后台 worker 是否在稳定推进 prepared/apply 工作，而不只看 tick/work ratio。
 - <!-- updated: 2026-04-17 15:05 --> **[tests]** 扩展 background runtime reset、summary 和 sweep 覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `111 passed, 1 warning`。

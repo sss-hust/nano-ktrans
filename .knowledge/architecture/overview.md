@@ -517,6 +517,14 @@ tags: [architecture]
     - `offload_background_activation_applied_total` 表示其中有多少已经推进到了后台 apply
     - `offload_background_work_items_avg` 则给出每个 background tick 的平均推进量
     因此 benchmark/profile sweep 现在不只是在看“后台线程有没有跑”，而是开始看“后台线程到底推进了多少有效迁移工作”。
+85. 随着后台 worker 真正进入运行时，`HybridMoE` 现在增加了内部 pipeline 锁：
+    - `refresh_offload_state()`
+    - `background_tick_offload_state()`
+    - `background_advance_offload_pipeline()`
+    - `advance_offload_pipeline()`
+    - decode 入口的 migration 应用与诊断快照
+    都开始通过同一个 `RLock` 串行化访问 prepared-tier cache、migration lifecycle 和 resident set。
+    这一步还没有把后台 apply 做成独立 commit queue，但它先把“后台线程已经真实在跑”的共享状态风险收住了，为后续继续拆 activation/apply queue 提供了安全边界。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
