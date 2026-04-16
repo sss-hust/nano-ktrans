@@ -1573,6 +1573,7 @@ class HybridMoE(nn.Module):
         active_experts: Optional[set[int]] = None,
         eligible_expert_ids: Optional[set[int]] = None,
         max_commits: Optional[int] = None,
+        max_batch_commits: Optional[int] = None,
         allow_eviction: bool,
         count_batch: bool,
         background: bool = False,
@@ -1600,8 +1601,8 @@ class HybridMoE(nn.Module):
         )
         batch_limit = (
             self._adaptive_apply_commit_batch_limit(background=background)
-            if max_commits is None
-            else max(1, int(max_commits))
+            if max_batch_commits is None and max_commits is None
+            else max(1, int(max_batch_commits if max_batch_commits is not None else max_commits))
         )
         self._resolve_apply_commit_queue(
             device=device,
@@ -1636,22 +1637,16 @@ class HybridMoE(nn.Module):
             )
         )
 
-        if count_batch:
-            selected_batch_entries = ready_batches[:batch_limit]
-            selected_ops = [
-                op
-                for _batch_key, batch_entries in selected_batch_entries
-                for op, _resolved in batch_entries
-            ]
-            deferred = max(0, len(ready_batches) - len(selected_batch_entries))
-        else:
-            selected_batch_entries = ready_batches[:batch_limit]
-            selected_ops = [
-                op
-                for _batch_key, batch_entries in selected_batch_entries
-                for op, _resolved in batch_entries
-            ]
-            deferred = max(0, len(ready_batches) - len(selected_batch_entries))
+        selected_batch_entries = ready_batches[:batch_limit]
+        selected_ops = [
+            op
+            for _batch_key, batch_entries in selected_batch_entries
+            for op, _resolved in batch_entries
+        ]
+        deferred = max(
+            0,
+            sum(len(batch_entries) for _batch_key, batch_entries in ready_batches[batch_limit:]),
+        )
 
         if not selected_ops:
             return 0, deferred
@@ -1660,28 +1655,40 @@ class HybridMoE(nn.Module):
         current_gpu_residents = int(self.gpu_experts_mask.bool().sum().item())
         free_slots = max(0, gpu_budget - current_gpu_residents)
 
-        if allow_eviction and gpu_budget > 0 and len(selected_ops) > free_slots:
+        selected_expert_count = sum(len(batch_entries) for _batch_key, batch_entries in selected_batch_entries)
+
+        if allow_eviction and gpu_budget > 0 and selected_expert_count > free_slots:
             protected_experts = set(active_experts)
             protected_experts.update(int(op.expert_idx) for op in selected_ops)
-            required_slots = max(0, len(selected_ops) - free_slots)
+            required_slots = max(0, selected_expert_count - free_slots)
             evicted = self._evict_for_promotion_batch(
                 protected_experts=protected_experts,
                 fallback_dst=self.dynamic_expert_scheduler.config.offload_tier,
                 required_slots=required_slots,
                 phase=phase,
             )
-            promotable = min(len(selected_ops), free_slots + evicted)
+            promotable_slots = free_slots + evicted
         else:
-            promotable = min(len(selected_ops), free_slots)
+            promotable_slots = free_slots
 
-        deferred += max(0, len(selected_ops) - promotable)
-        selected_ops = selected_ops[:promotable]
-        if not selected_ops:
+        promotable_batch_entries: list[tuple[str, list[tuple[object, dict[str, object]]]]] = []
+        committed_experts = 0
+        for batch_key, batch_entries in selected_batch_entries:
+            batch_size = len(batch_entries)
+            if batch_size <= 0:
+                continue
+            if committed_experts + batch_size > promotable_slots:
+                deferred += batch_size
+                continue
+            promotable_batch_entries.append((batch_key, batch_entries))
+            committed_experts += batch_size
+
+        if not promotable_batch_entries:
             return 0, deferred
 
         ready_entries = [
             (op, resolved)
-            for _batch_key, batch_entries in selected_batch_entries
+            for _batch_key, batch_entries in promotable_batch_entries
             for op, resolved in batch_entries
         ]
         if not ready_entries:
@@ -1699,7 +1706,7 @@ class HybridMoE(nn.Module):
                 self.apply_candidate_queue.pop(str(expert_idx), None)
                 self.apply_commit_queue.pop(str(expert_idx), None)
                 self.apply_commit_ready_cache.pop(str(expert_idx), None)
-            for batch_key, _batch_entries in selected_batch_entries:
+            for batch_key, _batch_entries in promotable_batch_entries:
                 self.apply_commit_batch_queue.pop(batch_key, None)
             self.offload_backend.migration_manager.take_layer(
                 self.layer_idx,
@@ -1712,11 +1719,11 @@ class HybridMoE(nn.Module):
         if applied > 0:
             self.apply_queue_commit_batches += 1
             self.apply_queue_commit_experts += applied
-            self.apply_commit_batch_queue_committed_batches += len(selected_batch_entries)
+            self.apply_commit_batch_queue_committed_batches += len(promotable_batch_entries)
             if background:
                 self.background_apply_commit_batches += 1
                 self.background_apply_commit_experts += applied
-                self.background_apply_commit_batch_queue_committed_batches += len(selected_batch_entries)
+                self.background_apply_commit_batch_queue_committed_batches += len(promotable_batch_entries)
         return applied, deferred
 
     def _background_apply_activated_experts(
@@ -1739,6 +1746,7 @@ class HybridMoE(nn.Module):
             phase=phase,
             eligible_expert_ids=eligible_expert_ids,
             max_commits=self._adaptive_apply_commit_limit(background=True),
+            max_batch_commits=self._adaptive_apply_commit_batch_limit(background=True),
             allow_eviction=False,
             count_batch=False,
             background=True,
@@ -1819,6 +1827,7 @@ class HybridMoE(nn.Module):
             dtype=dtype,
             phase=phase,
             max_commits=self._adaptive_apply_commit_limit(background=False),
+            max_batch_commits=self._adaptive_apply_commit_batch_limit(background=False),
             allow_eviction=True,
             count_batch=True,
             background=False,

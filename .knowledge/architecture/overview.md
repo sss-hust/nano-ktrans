@@ -637,6 +637,10 @@ tags: [architecture]
     - resident commit 消费 batch entries 做模块提交
     - 后续 finalize 再逐 expert 写回 residency / lifecycle
     这意味着 resident commit 的最后一段已经不再是“逐 expert 的 staged buffer”，而是“batch commit buffer + per-expert finalize”的结构。
+93. resident commit 现在还显式区分了两种预算：
+    - staged budget：控制 `apply_commit_queue -> apply_commit_batch_queue`
+    - final batch budget：控制 `apply_commit_batch_queue -> resident set`
+    这让后半段不仅按 batch 组织，还能对“准备多少 batch”和“每轮真正 commit 多少 batch”分别施加控制，为后续后台 batch commit worker 留出接口。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
