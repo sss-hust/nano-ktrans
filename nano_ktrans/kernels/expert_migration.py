@@ -60,6 +60,8 @@ class LayerMigrationQueue:
     total_applied_events: int = 0
     total_requeue_preserved_states: int = 0
     total_stage_skips: int = 0
+    total_warm_eviction_regressions: int = 0
+    total_activation_eviction_regressions: int = 0
 
     def _queued_state_for_expert(
         self,
@@ -198,6 +200,11 @@ class LayerMigrationQueue:
         if previous_state == state:
             return
 
+        if previous_state == MigrationLifecycle.ACTIVATED and state == MigrationLifecycle.WARMED:
+            self.total_activation_eviction_regressions += 1
+        elif previous_state == MigrationLifecycle.WARMED and state == MigrationLifecycle.READY:
+            self.total_warm_eviction_regressions += 1
+
         if state == MigrationLifecycle.PREFETCHING:
             self.total_prefetching_events += 1
         elif state == MigrationLifecycle.READY:
@@ -321,6 +328,8 @@ class ExpertMigrationManager:
                     "total_applied_events": queue.total_applied_events,
                     "total_requeue_preserved_states": queue.total_requeue_preserved_states,
                     "total_stage_skips": queue.total_stage_skips,
+                    "total_warm_eviction_regressions": queue.total_warm_eviction_regressions,
+                    "total_activation_eviction_regressions": queue.total_activation_eviction_regressions,
                     "lifecycle_state_counts": queue.lifecycle_state_counts(),
                     "lifecycle": [
                         {

@@ -2714,6 +2714,8 @@ class TestDynamicScheduler:
         assert lifecycle[2] == MigrationLifecycle.ACTIVATED.value
         assert "1" in hybrid.warm_expert_cache
         assert "2" in hybrid.activated_expert_cache
+        layer_diag = hybrid.offload_backend.migration_manager.diagnostics()["layers"][0]
+        assert layer_diag["total_activation_eviction_regressions"] == 1
 
     def test_warm_cache_eviction_downgrades_lifecycle_to_ready(self, tmp_path):
         from safetensors.torch import save_file
@@ -2803,6 +2805,8 @@ class TestDynamicScheduler:
         assert lifecycle[2] == MigrationLifecycle.WARMED.value
         assert "1" not in hybrid.warm_expert_cache
         assert "2" in hybrid.warm_expert_cache
+        layer_diag = hybrid.offload_backend.migration_manager.diagnostics()["layers"][0]
+        assert layer_diag["total_warm_eviction_regressions"] == 1
 
     def test_hybrid_moe_prebuild_targets_only_hot_ready_candidates(self, tmp_path):
         from safetensors.torch import save_file

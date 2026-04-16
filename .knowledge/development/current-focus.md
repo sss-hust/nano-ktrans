@@ -67,6 +67,7 @@ updated: 2026-04-16 03:22
 - [x] profile sweep 现在会额外输出 `comparison_table`、`best_by_metric`、非冷路径 promotion 比例以及 runtime batch size 平均值，便于直接按 overlap 指标比较 profile
 - [x] ready promotion 的批处理现在会额外区分 `activated / warm / cold` 三类 apply 来源，layer/runtime/summary 三层都能直接观察 batch 内部构成
 - [x] activated/warm cache 的 eviction 现在会同步回退 migration lifecycle：`ACTIVATED -> WARMED`、`WARMED -> READY`，cache 层次与状态机重新对齐
+- [x] migration diagnostics 现在会显式统计 `activation_eviction_regressions` 和 `warm_eviction_regressions`，后续 benchmark 可直接看到缓存回退压力
 
 ## 阻塞项
 
@@ -113,6 +114,7 @@ updated: 2026-04-16 03:22
 - 当前 profile sweep 已能给出自动对比表和 metric 排名，但还没在宿主机真实 `cuda_cpu_offload/cuda_pim` sweep 上收集一轮对照结果
 - 当前 batch apply 的来源构成已经可见，但还没把这些来源构成真正用于 batch policy，例如按 `activated` 命中率自适应调整 activation/prebuild 预算
 - 当前 cache eviction 已和 lifecycle 对齐，但还没有把这些回退事件显式汇总进 scheduler summary，后续 benchmark 仍难直接看出“冷热回退”压力
+- 当前回退事件已经能进 scheduler summary，但 profile sweep 还没把这些 regression 指标纳入排序或 best-by-metric 比较
 - 当前 runtime batch totals 已是按 tick 增量统计，但还没有接入真实宿主机 benchmark 结果做长期趋势归档
 - 当前 strict ready-only 语义已经覆盖 resident staging，但 `prefetching -> ready` 仍然依赖前台 refresh，而不是真 completion event 驱动
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总

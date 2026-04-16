@@ -274,6 +274,11 @@ tags: [architecture]
     - 当 warm cache 因容量被挤出时，对应 lifecycle 会从 `WARMED` 回退到 `READY`
     - 因此 cache 淘汰不再只是对象层面的变化，而会同步反映到控制面状态机
     这对后续做真正的后台 worker 很关键，因为系统终于能从 lifecycle 上准确知道 expert 还处于哪一层缓存。
+49. 这些 cache 回退现在也开始变得可量化：
+    - migration diagnostics 会分别累计 `activation_eviction_regressions` 与 `warm_eviction_regressions`
+    - 前者表示 device-side activated candidate 被挤回 CPU warm 层
+    - 后者表示 CPU warm candidate 被进一步打回 `READY`
+    这意味着后续 profile sweep 不只可以看命中率，也可以看“系统为了维持 budget 到底回退了多少已准备好的 expert”。
 46. benchmark 侧现在也开始按“单次 run”观察流水线：
     - 每次 generation 前会重置 HybridMoE 的 runtime/queue/cache 计数器
     - 每个 run 结果都带自己的 `scheduler_summary`
