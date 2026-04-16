@@ -710,6 +710,12 @@ class TestDynamicScheduler:
             "offload_refresh": {
                 "offload_refresh_calls": 3,
                 "offload_refresh_ready_total": 2,
+                "background_worker": {
+                    "enabled": True,
+                    "ticks": 10,
+                    "work_ticks": 4,
+                    "last_work_items": 2,
+                },
             },
             "dynamic_scheduler": {"enabled": True},
             "layer_count": 2,
@@ -781,6 +787,11 @@ class TestDynamicScheduler:
         assert summary["migration_submit_calls"] == 3
         assert summary["migration_total_enqueued_ops"] == 8
         assert summary["migration_total_deduped_ops"] == 3
+        assert summary["background_worker_enabled"] is True
+        assert summary["background_worker_ticks"] == 10
+        assert summary["background_worker_work_ticks"] == 4
+        assert summary["background_worker_last_work_items"] == 2
+        assert summary["background_worker_work_ratio"] == pytest.approx(0.4)
 
     def test_summarize_offload_diagnostics_reports_pipeline_apply_batches(self):
         from nano_ktrans.scheduler import summarize_offload_diagnostics
@@ -831,6 +842,10 @@ class TestDynamicScheduler:
                     "scheduler_profile": "baseline",
                     "status": "ok",
                     "scheduler_summary": {
+                        "background_worker_enabled": True,
+                        "background_worker_ticks": 10,
+                        "background_worker_work_ticks": 4,
+                        "background_worker_work_ratio": 0.4,
                         "pipeline_prefetch_overlap_hits": 2,
                         "pipeline_promotion_source_activated": 1,
                         "pipeline_promotion_source_warm": 1,
@@ -865,6 +880,10 @@ class TestDynamicScheduler:
                     "scheduler_profile": "overlap_safe",
                     "status": "ok",
                     "scheduler_summary": {
+                        "background_worker_enabled": True,
+                        "background_worker_ticks": 12,
+                        "background_worker_work_ticks": 7,
+                        "background_worker_work_ratio": 7 / 12,
                         "pipeline_prefetch_overlap_hits": 4,
                         "pipeline_promotion_source_activated": 3,
                         "pipeline_promotion_source_warm": 0,
@@ -909,6 +928,7 @@ class TestDynamicScheduler:
         assert summary["best_by_metric"]["pipeline_promotion_source_cold"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["cold_promotion_penalty_avg"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["migration_activation_eviction_regressions"]["scheduler_profile"] == "overlap_safe"
+        assert summary["best_by_metric"]["background_worker_work_ratio"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["pipeline_promotion_non_cold_ratio"]["value"] == pytest.approx(0.75)
         assert summary["best_by_metric"]["runtime_apply_batch_size_avg"]["value"] == pytest.approx(2.0)
         assert summary["comparison_table"][0]["pipeline_apply_batch_activated"] == 3
@@ -918,6 +938,7 @@ class TestDynamicScheduler:
         assert summary["comparison_table"][0]["rank_by_decode_tokens_per_second"] == 1
         assert summary["comparison_table"][0]["pipeline_promotion_non_cold_total"] == 3
         assert summary["comparison_table"][0]["runtime_apply_batch_size_avg"] == pytest.approx(2.0)
+        assert summary["comparison_table"][0]["background_worker_work_ratio"] == pytest.approx(7 / 12)
 
     def test_migration_pipeline_runtime_tracks_apply_batch_totals(self):
         from nano_ktrans.kernels.migration_runtime import MigrationPipelineRuntime

@@ -7,6 +7,7 @@ PROFILE_SWEEP_SORT_KEYS = (
     "decode_tokens_per_second",
     "pipeline_promotion_non_cold_total",
     "pipeline_promotion_non_cold_ratio",
+    "background_worker_work_ratio",
     "prepared_cache_utilization",
     "effective_prepared_cache_utilization",
     "prepared_cache_budget_backoff_avg",
@@ -37,6 +38,7 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "pipeline_promotion_source_cold": "min",
     "pipeline_promotion_non_cold_total": "max",
     "pipeline_promotion_non_cold_ratio": "max",
+    "background_worker_work_ratio": "max",
     "pipeline_apply_batches": "max",
     "pipeline_apply_batch_size_avg": "max",
     "pipeline_apply_batch_evictions": "min",
@@ -153,6 +155,18 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
             (offload_diagnostics.get("offload_refresh") or {}).get(
                 "offload_pipeline_background_ready_callback_total", 0
             )
+        ),
+        "background_worker_enabled": bool(
+            ((offload_diagnostics.get("offload_refresh") or {}).get("background_worker") or {}).get("enabled", False)
+        ),
+        "background_worker_ticks": int(
+            ((offload_diagnostics.get("offload_refresh") or {}).get("background_worker") or {}).get("ticks", 0)
+        ),
+        "background_worker_work_ticks": int(
+            ((offload_diagnostics.get("offload_refresh") or {}).get("background_worker") or {}).get("work_ticks", 0)
+        ),
+        "background_worker_last_work_items": int(
+            ((offload_diagnostics.get("offload_refresh") or {}).get("background_worker") or {}).get("last_work_items", 0)
         ),
         "prefetch_requested": 0,
         "prefetch_enqueued": 0,
@@ -452,6 +466,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["pipeline_apply_batch_activated_ratio"] = None
         summary["pipeline_apply_batch_warm_ratio"] = None
         summary["pipeline_apply_batch_cold_ratio"] = None
+    if summary["background_worker_ticks"] > 0:
+        summary["background_worker_work_ratio"] = (
+            summary["background_worker_work_ticks"] / summary["background_worker_ticks"]
+        )
+    else:
+        summary["background_worker_work_ratio"] = None
     return summary
 
 
@@ -514,6 +534,18 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
                 (activated_count + warm_count) / promotion_total
                 if promotion_total > 0
                 else None
+            ),
+            "background_worker_enabled": bool(
+                scheduler_summary.get("background_worker_enabled", False)
+            ),
+            "background_worker_ticks": int(
+                scheduler_summary.get("background_worker_ticks", 0)
+            ),
+            "background_worker_work_ticks": int(
+                scheduler_summary.get("background_worker_work_ticks", 0)
+            ),
+            "background_worker_work_ratio": scheduler_summary.get(
+                "background_worker_work_ratio"
             ),
             "pipeline_apply_batches": int(
                 scheduler_summary.get("pipeline_apply_batches", 0)

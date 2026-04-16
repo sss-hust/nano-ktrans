@@ -500,6 +500,10 @@ tags: [architecture]
     - 真正进入生成路径时，再由 `SimpleEngine/LLM` 显式启动
     - 生成结束后立即停止
     这使后台迁移执行器的生命周期边界更清晰，也避免了“模型一构造就常驻后台线程”的隐式资源占用。
+81. background worker 现在也进入了 summary/sweep 决策面：
+    - summary 会显式输出 worker 的 `enabled / ticks / work_ticks / work_ratio`
+    - profile sweep 也会把 `background_worker_work_ratio` 纳入比较
+    这让系统终于可以直接回答一个关键问题：后台 worker 是否真的在产生有效工作，以及它和 decode 吞吐之间的关系。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

@@ -238,6 +238,11 @@ tags: [changelog]
 - `MixtralModel` 中的 background offload worker 现在默认 `auto_start=False`，模型构造时不再隐式起线程。
 - worker 生命周期已明确改成“构造对象 -> 生成前显式启动 -> 生成后停止”，避免后台线程在未进入 decode 路径前就提前占用资源。
 
+<!-- updated: 2026-04-17 14:20 -->
+
+- `summarize_offload_diagnostics()` 现已汇总 background worker 的 `enabled / ticks / work_ticks / work_ratio`。
+- `summarize_profile_sweep_results()` 现已将 `background_worker_work_ratio` 纳入 profile 对比和 `best_by_metric` 排名，后台 worker 的活跃度开始进入 benchmark 决策面。
+
 ## 2026-04-16
 
 - <!-- updated: 2026-04-16 00:40 --> **[migration-pipeline-runtime]** 新增 `MigrationPipelineRuntime`，将 token-step 级 offload refresh 提升为最小流水线运行时；ready prefetch 轮询与 ready promotion 现在可在进入模型前统一推进，不再依赖层内 forward 临时收敛。

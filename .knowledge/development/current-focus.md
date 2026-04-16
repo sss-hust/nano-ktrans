@@ -1,6 +1,7 @@
 ---
 updated: 2026-04-17 13:45
 updated: 2026-04-17 14:05
+updated: 2026-04-17 14:20
 ---
 
 # 🔥 当前工作焦点
@@ -103,6 +104,7 @@ updated: 2026-04-17 14:05
 - [x] background worker 诊断现已并入 `offload_refresh_diagnostics()`，并支持 per-run reset，benchmark 可独立观察后台 worker tick 与 work tick 行为
 - [x] `SimpleEngine/LLM` 现已接入 background worker 生命周期：生成前启动后台 worker，生成后停止并清理，后台推进不再只是模型内部的“可选对象”
 - [x] background worker 现已改成显式启动，模型构造时默认不自动起线程，后台迁移执行器的生命周期边界更清晰
+- [x] scheduler summary / profile sweep 现已纳入 background worker 指标，可直接比较后台 worker 的 tick、work ratio 与 decode 吞吐的关系
 
 ## 阻塞项
 
