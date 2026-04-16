@@ -9,6 +9,7 @@ PROFILE_SWEEP_SORT_KEYS = (
     "pipeline_promotion_non_cold_ratio",
     "background_worker_work_ratio",
     "apply_queue_utilization",
+    "apply_queue_commit_batch_size_avg",
     "prepared_cache_utilization",
     "effective_prepared_cache_utilization",
     "prepared_cache_budget_backoff_avg",
@@ -44,6 +45,7 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "pipeline_promotion_non_cold_ratio": "max",
     "background_worker_work_ratio": "max",
     "apply_queue_utilization": "max",
+    "apply_queue_commit_batch_size_avg": "max",
     "pipeline_apply_batches": "max",
     "pipeline_apply_batch_size_avg": "max",
     "pipeline_apply_batch_evictions": "min",
@@ -216,11 +218,15 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "apply_queue_committed": 0,
         "apply_queue_pruned": 0,
         "apply_queue_evictions": 0,
+        "apply_queue_commit_batches": 0,
+        "apply_queue_commit_experts": 0,
         "apply_queue_pressure": 0.0,
         "apply_queue_pressure_step": 0.0,
         "apply_queue_pressure_ema": 0.0,
         "apply_queue_budget_backoff": 0,
         "background_apply_queue_enqueued": 0,
+        "background_apply_commit_batches": 0,
+        "background_apply_commit_experts": 0,
         "activated_cache_hits": 0,
         "activated_cache_stores": 0,
         "activated_cache_evictions": 0,
@@ -322,11 +328,15 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["apply_queue_committed"] += int(layer.get("apply_queue_committed", 0))
         summary["apply_queue_pruned"] += int(layer.get("apply_queue_pruned", 0))
         summary["apply_queue_evictions"] += int(layer.get("apply_queue_evictions", 0))
+        summary["apply_queue_commit_batches"] += int(layer.get("apply_queue_commit_batches", 0))
+        summary["apply_queue_commit_experts"] += int(layer.get("apply_queue_commit_experts", 0))
         summary["apply_queue_pressure"] += float(layer.get("apply_queue_pressure", 0.0))
         summary["apply_queue_pressure_step"] += float(layer.get("apply_queue_pressure_step", 0.0))
         summary["apply_queue_pressure_ema"] += float(layer.get("apply_queue_pressure_ema", 0.0))
         summary["apply_queue_budget_backoff"] += int(layer.get("apply_queue_budget_backoff", 0))
         summary["background_apply_queue_enqueued"] += int(layer.get("background_apply_queue_enqueued", 0))
+        summary["background_apply_commit_batches"] += int(layer.get("background_apply_commit_batches", 0))
+        summary["background_apply_commit_experts"] += int(layer.get("background_apply_commit_experts", 0))
         summary["activated_cache_hits"] += int(layer.get("activated_cache_hits", 0))
         summary["activated_cache_stores"] += int(layer.get("activated_cache_stores", 0))
         summary["activated_cache_evictions"] += int(layer.get("activated_cache_evictions", 0))
@@ -533,6 +543,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
     else:
         summary["apply_queue_utilization"] = None
+    if summary["apply_queue_commit_batches"] > 0:
+        summary["apply_queue_commit_batch_size_avg"] = (
+            summary["apply_queue_commit_experts"] / summary["apply_queue_commit_batches"]
+        )
+    else:
+        summary["apply_queue_commit_batch_size_avg"] = None
     if summary["offload_background_ticks"] > 0:
         summary["offload_background_work_items_avg"] = (
             summary["offload_background_work_items_total"] / summary["offload_background_ticks"]
@@ -615,10 +631,21 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
                 "background_worker_work_ratio"
             ),
             "apply_queue_utilization": scheduler_summary.get("apply_queue_utilization"),
+            "apply_queue_commit_batch_size_avg": scheduler_summary.get(
+                "apply_queue_commit_batch_size_avg"
+            ),
             "apply_queue_pressure_avg": scheduler_summary.get("apply_queue_pressure_avg"),
             "apply_queue_pressure_step_avg": scheduler_summary.get("apply_queue_pressure_step_avg"),
             "apply_queue_pressure_ema_avg": scheduler_summary.get("apply_queue_pressure_ema_avg"),
             "apply_queue_budget_backoff_avg": scheduler_summary.get("apply_queue_budget_backoff_avg"),
+            "apply_queue_commit_batches": int(scheduler_summary.get("apply_queue_commit_batches", 0)),
+            "apply_queue_commit_experts": int(scheduler_summary.get("apply_queue_commit_experts", 0)),
+            "background_apply_commit_batches": int(
+                scheduler_summary.get("background_apply_commit_batches", 0)
+            ),
+            "background_apply_commit_experts": int(
+                scheduler_summary.get("background_apply_commit_experts", 0)
+            ),
             "offload_background_work_items_total": int(
                 scheduler_summary.get("offload_background_work_items_total", 0)
             ),

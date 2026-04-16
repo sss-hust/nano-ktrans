@@ -22,6 +22,9 @@ tags: [changelog]
 - <!-- updated: 2026-04-17 16:20 --> **[apply-queue-controller]** apply queue 现新增 `apply_queue_pressure / step / ema / budget_backoff`，并把这组信号接回 prepared-tier controller；当 resident commit 阶段持续拥塞时，系统会主动收缩 activation/prebuild/prefetch aggressiveness，避免 prepared tier 继续向后半段无效堆积。
 - <!-- updated: 2026-04-17 16:20 --> **[apply-queue-summaries]** scheduler summary / profile sweep 新增 `apply_queue_pressure_avg / apply_queue_pressure_ema_avg / apply_queue_budget_backoff_avg`，可以直接比较不同 profile 在 apply queue 拥塞下的 controller 反应。
 - <!-- updated: 2026-04-17 16:20 --> **[tests]** 新增 apply queue pressure/backoff 行为测试与 summary/profile sweep 聚合覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `115 passed, 1 warning`。
+- <!-- updated: 2026-04-17 16:45 --> **[apply-queue-commit-batches]** apply queue 现新增 `apply_queue_commit_batches / experts` 和 `background_apply_commit_batches / experts`，可以直接量化后台和前台 staged commit 的批次大小，不再只能看 enqueue/committed 总数。
+- <!-- updated: 2026-04-17 16:45 --> **[apply-queue-commit-limit]** `HybridMoE` 新增 `adaptive_apply_commit_limit()`，apply queue staged commit 开始根据 apply queue 压力、EMA、cold penalty 和 profile aggressiveness 自适应调整每批 commit 的大小。
+- <!-- updated: 2026-04-17 16:45 --> **[tests]** 新增 apply queue commit batch 指标和 adaptive commit path 的覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `116 passed, 1 warning`。
 
 - <!-- updated: 2026-04-17 15:18 --> **[pipeline-lock]** `HybridMoE` 新增内部 `RLock`，background worker 与前台 `refresh/advance/forward/diagnostics` 对 prepared-tier cache、migration lifecycle 和 resident set 的共享状态访问开始串行化，降低后台推进接入真实生成后出现竞态的风险。
 - <!-- updated: 2026-04-17 15:18 --> **[tests]** 并发边界收口后重新回归 `tests/test_core.py + tests/test_pim_runtime.py`，当前为 `111 passed, 1 warning`。

@@ -552,6 +552,17 @@ tags: [architecture]
       - `adaptive_prefetch_pending_limit`
       - `adaptive_prefetch_candidate_budget`
     这意味着系统开始形成真正的“前半段 prepared tier 和后半段 resident commit 阶段联动控流”，不再只是 prepared cache 自己感知自己的压力。
+87. apply queue staged commit 现在也开始具备独立批次控制：
+    - 系统会分别记录：
+      - `apply_queue_commit_batches / apply_queue_commit_experts`
+      - `background_apply_commit_batches / background_apply_commit_experts`
+    - 并通过 `adaptive_apply_commit_limit()` 根据：
+      - apply queue 压力
+      - apply queue pressure EMA
+      - cold promotion penalty
+      - profile aggressiveness
+      动态调节每批 commit 尺寸
+    这让后半段 resident commit 不再只是“有个队列再逐 expert 提交”，而开始具备独立的批次控制面，为后续真正的 per-layer batch commit 做准备。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

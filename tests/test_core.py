@@ -1003,6 +1003,7 @@ class TestDynamicScheduler:
         assert summary["metric_directions"]["cold_promotion_penalty_avg"] == "min"
         assert summary["metric_directions"]["migration_activation_eviction_regressions"] == "min"
         assert summary["metric_directions"]["apply_queue_pressure_avg"] == "min"
+        assert summary["metric_directions"]["apply_queue_commit_batch_size_avg"] == "max"
         assert "pipeline_apply_batch_size_avg" in summary["sort_keys"]
         assert "pipeline_promotion_non_cold_ratio" in summary["sort_keys"]
         assert summary["best_by_decode_tokens_per_second"]["runtime_offload_pipeline_apply_batch_count_total"] == 3
@@ -3215,6 +3216,8 @@ class TestDynamicScheduler:
         assert diagnostics["apply_queue_enqueued"] == 1
         assert diagnostics["apply_queue_committed"] == 0
         assert diagnostics["apply_queue_size"] == 1
+        assert diagnostics["background_apply_commit_batches"] == 0
+        assert diagnostics["background_apply_commit_experts"] == 0
 
     def test_hybrid_moe_apply_queue_rebalances_cold_candidates(self, tmp_path):
         from safetensors.torch import save_file
@@ -3341,12 +3344,116 @@ class TestDynamicScheduler:
         assert summary["apply_queue_pruned"] == 1
         assert summary["apply_queue_evictions"] == 2
         assert summary["background_apply_queue_enqueued"] == 3
+        assert summary["apply_queue_commit_batch_size_avg"] is None
         assert summary["apply_queue_utilization"] == pytest.approx(0.5)
         assert summary["apply_queue_pressure_avg"] == pytest.approx(1.5)
         assert summary["apply_queue_pressure_step_avg"] == pytest.approx(0.5)
         assert summary["apply_queue_pressure_ema_avg"] == pytest.approx(0.75)
         assert summary["apply_queue_budget_backoff_avg"] == 1.0
         assert summary["offload_background_apply_queue_enqueued_total"] == 3
+
+    def test_apply_queue_commit_batch_metrics_track_background_and_foreground_commits(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(3):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=3,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+            ),
+        )
+        hybrid = HybridMoE(
+            num_experts=3,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=2,
+            expert_prepared_cache_size=2,
+            prepared_controller_aggressiveness=1.0,
+        ).to(dtype=torch.float32)
+
+        for expert_idx in (1, 2):
+            hybrid.offload_backend.queue_migration_plan(
+                [
+                    ExpertMigrationOp(
+                        layer_idx=0,
+                        expert_idx=expert_idx,
+                        src=ExpertResidency.PIM,
+                        dst=ExpertResidency.GPU,
+                        reason="apply_commit_metrics",
+                    )
+                ],
+                phase="decode",
+            )
+            hybrid.offload_backend.migration_manager.mark_state(
+                0,
+                expert_idx,
+                state=MigrationLifecycle.ACTIVATED,
+                phase="decode",
+            )
+            hybrid.activated_expert_cache[str(expert_idx)] = hybrid._build_runtime_expert(
+                expert_idx,
+                torch.device("cpu"),
+                torch.float32,
+            )
+
+        hybrid._enqueue_activated_apply_candidates(phase="decode")
+        background_applied = hybrid._background_apply_activated_experts(
+            phase="decode",
+            eligible_expert_ids={1},
+        )
+        diagnostics = hybrid.diagnostics()
+
+        assert background_applied == 1
+        assert diagnostics["background_apply_commit_batches"] == 1
+        assert diagnostics["background_apply_commit_experts"] == 1
+        assert diagnostics["apply_queue_commit_batches"] == 1
+        assert diagnostics["apply_queue_commit_experts"] == 1
+
+        hybrid._enqueue_activated_apply_candidates(phase="decode")
+        hybrid._commit_apply_candidate_queue(
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            phase="decode",
+            max_commits=2,
+            allow_eviction=False,
+            count_batch=False,
+            background=False,
+        )
+        diagnostics = hybrid.diagnostics()
+
+        assert diagnostics["apply_queue_commit_batches"] == 2
+        assert diagnostics["apply_queue_commit_experts"] == 2
 
     def test_hybrid_moe_promotion_prefers_activated_cache(self, tmp_path):
         from safetensors.torch import save_file
