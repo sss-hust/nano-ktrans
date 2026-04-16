@@ -354,6 +354,11 @@ tags: [architecture]
     - activated cache 增长时，warm cache 的有效上限会动态收缩
     - 因而系统开始从“两个独立缓存”演化成“同一 prepared tier 的两段式表示”
     这使后续做统一 per-layer cache policy 或自适应 budget 调整更自然，不必再分别管理两套完全独立的容量逻辑。
+59. prepared-cache 预算进一步从“共享上限”推进到了“统一重平衡”：
+    - 当 `warm cache + activated cache` 的 prepared experts 总数超过预算时
+    - 系统会把两层候选放到同一个 victim 选择逻辑里
+    - 依据 hotness、lifecycle 和 cache stage 统一挑选应回退的对象
+    这样 prepared tier 的控制语义开始更接近一个真正的分层缓存系统，而不是两个各自裁剪、偶尔共享上限的临时容器。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

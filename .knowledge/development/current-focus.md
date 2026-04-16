@@ -72,6 +72,7 @@ updated: 2026-04-16 03:22
 - [x] warm cache eviction 现在会按 lifecycle 优先级和 hotness 选 victim，不再只按 FIFO/LRU 式最旧对象回退
 - [x] activated cache eviction 现在也会按 lifecycle 优先级和 hotness 选 victim，device-side 激活预算开始与 warm cache 保持一致的热点保留语义
 - [x] warm/activated 两级准备缓存现在支持统一 prepared-cache 预算，warm cache 的有效容量会随 activated cache 占用动态收缩
+- [x] prepared-cache 预算现在会做跨层级统一重平衡，activated 和 warm candidates 会在同一个保留策略下竞争 prepared slots
 
 ## 阻塞项
 
@@ -123,6 +124,7 @@ updated: 2026-04-16 03:22
 - 当前 activated cache 已按 hotness 裁剪、warm cache 也已按 hotness 选 victim，但两级 cache 之间还没有统一的全局 budget policy
 - 当前 activated cache 虽已改成 hotness/lifecycle-aware victim 选择，但 warm/activated 两级 cache 仍是分开裁剪，还没有统一的 per-layer cache budget policy
 - 当前 warm/activated 两级 cache 已开始共享 prepared-cache 总预算，但 budget 还没有和最近几步的回退压力、source mix 联动成自适应策略
+- 当前 prepared-cache 已开始跨 warm/activated 统一重平衡，但 victim policy 还没有直接利用 recent source mix / eviction regression 做自适应预算调整
 - 当前 runtime batch totals 已是按 tick 增量统计，但还没有接入真实宿主机 benchmark 结果做长期趋势归档
 - 当前 strict ready-only 语义已经覆盖 resident staging，但 `prefetching -> ready` 仍然依赖前台 refresh，而不是真 completion event 驱动
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总

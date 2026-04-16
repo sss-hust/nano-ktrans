@@ -7,6 +7,8 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-16 06:56 --> **[prepared-cache-rebalance]** prepared-cache 预算现在会在 `warm cache` 和 `activated cache` 两层之间统一重平衡；当总 prepared slots 超限时，系统会在两层候选中按 hotness 与 lifecycle 统一选 victim，而不再只先压 warm cache。
+- <!-- updated: 2026-04-16 06:56 --> **[prepared-cache-rebalance-tests]** 新增 prepared-cache 重平衡测试，验证高 hotness 的 activated candidate 会优先保留，较冷的 warm candidate 会被回退到 `READY`；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `80 passed, 1 warning`。
 - <!-- updated: 2026-04-16 06:44 --> **[prepared-cache-budget]** `HybridMoE` 新增统一的 `expert_prepared_cache_size`，用于约束 `warm cache + activated cache` 的总 prepared expert 数；activated cache 占用上升时，warm cache 的有效容量会动态收缩。
 - <!-- updated: 2026-04-16 06:44 --> **[prepared-cache-tests]** 新增测试覆盖 unified prepared-cache budget，验证 activated cache 占满总预算时，较冷的 warm candidate 会被回退到 `READY`；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `79 passed, 1 warning`。
 - <!-- updated: 2026-04-16 06:30 --> **[activated-cache-victims]** activated cache 的 victim 选择已从简单 FIFO/LRU 收敛为“lifecycle 优先级 + hotness”排序；更冷的 activated candidate 会优先回退到 warm cache，并把 lifecycle 从 `ACTIVATED` 降到 `WARMED`，与 warm cache 的热点保留策略保持一致。

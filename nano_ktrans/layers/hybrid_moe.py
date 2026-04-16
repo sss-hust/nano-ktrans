@@ -296,15 +296,18 @@ class HybridMoE(nn.Module):
             )
         return len(ready_keys)
 
-    def _store_warm_module(self, expert_idx: int, module: nn.Module, *, count_store: bool) -> None:
-        if self.expert_warm_cache_size <= 0:
-            return
+    def _insert_warm_module(self, expert_idx: int, module: nn.Module) -> None:
         expert_key = str(expert_idx)
         self.warm_expert_cache[expert_key] = module.to(device="cpu")
         self.warm_expert_cache.move_to_end(expert_key)
+
+    def _store_warm_module(self, expert_idx: int, module: nn.Module, *, count_store: bool) -> None:
+        if self.expert_warm_cache_size <= 0:
+            return
+        self._insert_warm_module(expert_idx, module)
         if count_store:
             self.warm_cache_stores += 1
-        self._trim_warm_cache_to_budget()
+        self._rebalance_prepared_caches()
 
     def _effective_warm_cache_limit(self) -> int:
         limit = self.expert_warm_cache_size
@@ -315,6 +318,42 @@ class HybridMoE(nn.Module):
 
     def _prepared_cache_size(self) -> int:
         return len(self.warm_expert_cache) + len(self.activated_expert_cache)
+
+    def _prepared_cache_retention_score(self, expert_idx: int, cache_kind: str) -> float:
+        stage_bonus = 0.5 if cache_kind == "activated" else 0.0
+        return self._hotness_score(expert_idx) + stage_bonus
+
+    def _pick_prepared_cache_victim(self) -> tuple[str, str] | None:
+        candidates: list[tuple[str, str, float, int, int]] = []
+        for order, expert_key in enumerate(self.warm_expert_cache.keys()):
+            expert_idx = int(expert_key)
+            candidates.append(
+                (
+                    "warm",
+                    expert_key,
+                    self._prepared_cache_retention_score(expert_idx, "warm"),
+                    self._migration_state_priority(expert_idx),
+                    order,
+                )
+            )
+        for order, expert_key in enumerate(self.activated_expert_cache.keys()):
+            expert_idx = int(expert_key)
+            candidates.append(
+                (
+                    "activated",
+                    expert_key,
+                    self._prepared_cache_retention_score(expert_idx, "activated"),
+                    self._migration_state_priority(expert_idx),
+                    order,
+                )
+            )
+        if not candidates:
+            return None
+        cache_kind, expert_key, *_ = min(
+            candidates,
+            key=lambda item: (item[2], item[3], item[4]),
+        )
+        return cache_kind, expert_key
 
     def _trim_warm_cache_to_budget(self) -> None:
         limit = self._effective_warm_cache_limit()
@@ -334,6 +373,43 @@ class HybridMoE(nn.Module):
                         state=MigrationLifecycle.READY,
                     )
             self.warm_cache_evictions += 1
+
+    def _rebalance_prepared_caches(self) -> None:
+        if self.expert_prepared_cache_size is None:
+            self._trim_warm_cache_to_budget()
+            return
+
+        while self._prepared_cache_size() > self.expert_prepared_cache_size:
+            victim = self._pick_prepared_cache_victim()
+            if victim is None:
+                break
+            cache_kind, expert_key = victim
+            expert_idx = int(expert_key)
+            if cache_kind == "activated":
+                module = self.activated_expert_cache.pop(expert_key)
+                if self.offload_backend is not None:
+                    state = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+                    if state == MigrationLifecycle.ACTIVATED:
+                        self.offload_backend.migration_manager.mark_state(
+                            self.layer_idx,
+                            expert_idx,
+                            state=MigrationLifecycle.WARMED,
+                        )
+                self.activated_cache_evictions += 1
+                self._insert_warm_module(expert_idx, module)
+                continue
+            self.warm_expert_cache.pop(expert_key)
+            if self.offload_backend is not None:
+                state = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+                if state == MigrationLifecycle.WARMED:
+                    self.offload_backend.migration_manager.mark_state(
+                        self.layer_idx,
+                        expert_idx,
+                        state=MigrationLifecycle.READY,
+                    )
+            self.warm_cache_evictions += 1
+
+        self._trim_warm_cache_to_budget()
 
     def _pick_warm_cache_victim_key(self) -> str | None:
         if not self.warm_expert_cache:
@@ -445,7 +521,7 @@ class HybridMoE(nn.Module):
                 evicted_key, evicted_module = self.activated_expert_cache.popitem(last=False)
             else:
                 evicted_module = self.activated_expert_cache.pop(evicted_key)
-            self._store_warm_module(int(evicted_key), evicted_module, count_store=False)
+            self._insert_warm_module(int(evicted_key), evicted_module)
             if self.offload_backend is not None:
                 evicted_idx = int(evicted_key)
                 state = self.offload_backend.migration_manager.state_for(self.layer_idx, evicted_idx)
@@ -456,7 +532,7 @@ class HybridMoE(nn.Module):
                         state=MigrationLifecycle.WARMED,
                     )
             self.activated_cache_evictions += 1
-        self._trim_warm_cache_to_budget()
+        self._rebalance_prepared_caches()
 
     def _activate_warm_module(self, module: nn.Module, device: torch.device, dtype: torch.dtype) -> nn.Module:
         non_blocking = device.type == "cuda"
