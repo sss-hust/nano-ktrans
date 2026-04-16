@@ -32,6 +32,7 @@ Notes:
   - overlap hits and promotion source breakdown
   - layer-level apply batch metrics
   - step-level runtime apply batch totals
+  - cache eviction regression pressure (`activated -> warmed`, `warmed -> ready`)
   - deferred-for-prefetch counts
   - a ranked `comparison_table` and `best_by_metric` summary for quick profile selection
 
