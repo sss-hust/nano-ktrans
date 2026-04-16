@@ -365,6 +365,7 @@ class HybridMoE(nn.Module):
             activation_ready = 0
             activation_applied = 0
             apply_queue_enqueued = 0
+            prev_background_apply_commit_queue_enqueued = self.background_apply_commit_queue_enqueued
             if phase == "decode":
                 preexisting_apply_candidate_ids = {
                     int(expert_idx) for expert_idx in self.apply_candidate_queue.keys()
@@ -390,6 +391,9 @@ class HybridMoE(nn.Module):
                 "activation_ready": int(activation_ready),
                 "activation_applied": int(activation_applied),
                 "apply_queue_enqueued": int(apply_queue_enqueued),
+                "apply_commit_queue_enqueued": int(
+                    self.background_apply_commit_queue_enqueued - prev_background_apply_commit_queue_enqueued
+                ),
             }
 
     def _insert_warm_module(self, expert_idx: int, module: nn.Module) -> None:

@@ -1086,6 +1086,7 @@ class TestDynamicScheduler:
                     "ready_polled": 3,
                     "warm_prebuilt": 2,
                     "activation_ready": 1,
+                    "apply_commit_queue_enqueued": 4,
                 }
 
         runtime = MigrationPipelineRuntime()
@@ -1099,6 +1100,7 @@ class TestDynamicScheduler:
         assert diagnostics["offload_pipeline_background_ready_callback_total"] == 3
         assert diagnostics["offload_background_warm_prebuilt_total"] == 2
         assert diagnostics["offload_background_activation_ready_total"] == 1
+        assert diagnostics["offload_background_apply_commit_queue_enqueued_total"] == 4
 
     def test_hybrid_moe_advance_pipeline_reports_incremental_batch_metrics(self, tmp_path):
         from safetensors.torch import save_file
@@ -3326,6 +3328,7 @@ class TestDynamicScheduler:
                 "layer_count": 1,
                 "offload_refresh": {
                     "offload_background_apply_queue_enqueued_total": 3,
+                    "offload_background_apply_commit_queue_enqueued_total": 2,
                 },
                 "dynamic_scheduler": {"enabled": True},
                 "layers": [
@@ -3373,6 +3376,7 @@ class TestDynamicScheduler:
         assert summary["apply_queue_pressure_ema_avg"] == pytest.approx(0.75)
         assert summary["apply_queue_budget_backoff_avg"] == 1.0
         assert summary["offload_background_apply_queue_enqueued_total"] == 3
+        assert summary["offload_background_apply_commit_queue_enqueued_total"] == 2
 
     def test_apply_queue_commit_batch_metrics_track_background_and_foreground_commits(self, tmp_path):
         from safetensors.torch import save_file

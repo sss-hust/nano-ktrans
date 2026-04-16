@@ -33,6 +33,8 @@ tags: [changelog]
 - <!-- updated: 2026-04-17 19:35 --> **[apply-commit-queue-controller]** apply commit queue 现在新增 `pressure / step / ema / budget_backoff`，并把这组信号反向接回 prepared-tier controller；当 staged commit queue 持续拥塞时，activation/prebuild/prefetch aggressiveness 也会一并收缩。
 - <!-- updated: 2026-04-17 19:35 --> **[sweep]** scheduler summary / profile sweep 现已补充 `apply_commit_queue_pressure_avg / ema_avg / budget_backoff_avg`，可以直接比较不同 profile 在后半段 staged commit 压力下的反应。
 - <!-- updated: 2026-04-17 19:35 --> **[tests]** 新增 apply commit queue pressure/backoff 行为与 summary/profile sweep 聚合覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `118 passed, 1 warning`。
+- <!-- updated: 2026-04-17 20:00 --> **[background-commit-queue-runtime]** `MigrationPipelineRuntime` 现在会单独累计 `offload_background_apply_commit_queue_enqueued_total`，background worker 往 staged commit queue 推进的 resident commit 候选量已能与 `apply_queue enqueue` 分开观测。
+- <!-- updated: 2026-04-17 20:00 --> **[tests]** 补充 background apply commit queue runtime totals 与 summary 覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `118 passed, 1 warning`。
 
 - <!-- updated: 2026-04-17 15:18 --> **[pipeline-lock]** `HybridMoE` 新增内部 `RLock`，background worker 与前台 `refresh/advance/forward/diagnostics` 对 prepared-tier cache、migration lifecycle 和 resident set 的共享状态访问开始串行化，降低后台推进接入真实生成后出现竞态的风险。
 - <!-- updated: 2026-04-17 15:18 --> **[tests]** 并发边界收口后重新回归 `tests/test_core.py + tests/test_pim_runtime.py`，当前为 `111 passed, 1 warning`。

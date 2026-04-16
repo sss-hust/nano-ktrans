@@ -238,6 +238,10 @@ tags: [architecture]
     - `apply_commit_queue_pressure_ema`
     - `apply_commit_queue_budget_backoff`
     这些信号会与 candidate queue / prepared tier 一起作用于 activation、prebuild 和 prefetch 的 aggressiveness，因此系统现在已经不只感知“前半段 prepared tier 是否拥塞”，也开始感知“后半段 staged commit 是否拥塞”。
+43. runtime 诊断现在也显式区分 background worker 对两段 queue 的推进量：
+    - `offload_background_apply_queue_enqueued_total`
+    - `offload_background_apply_commit_queue_enqueued_total`
+    因而 benchmark/sweep 已能分辨后台线程究竟是在把 expert 推到 activated candidate queue，还是已经继续推进到了 staged commit queue。
 39. prepared tier 当前不再只有静态预算：
     - `prepared_cache_limit` 表示配置上的 prepared 总预算
     - `effective_prepared_cache_limit` 表示运行时在当前压力下真正允许保留的 prepared expert 数
