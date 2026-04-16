@@ -130,6 +130,7 @@ class HybridMoE(nn.Module):
         self.prepared_cache_rebalance_demoted_to_warm = 0
         self.prepared_cache_rebalance_dropped_to_ready = 0
         self.prepared_cache_activation_stage_bonus = 0.5
+        self.cold_promotion_penalty = 0.0
         self.expert_warm_cache_size = max(0, int(expert_warm_cache_size))
         self.expert_prepared_cache_size = (
             None if expert_prepared_cache_size is None else max(0, int(expert_prepared_cache_size))
@@ -506,6 +507,8 @@ class HybridMoE(nn.Module):
             return base_limit
         if self._prepared_cache_pressure() >= 1.0 and self.prepared_cache_activation_stage_bonus <= 0.25:
             return max(1, base_limit - 1)
+        if self.cold_promotion_penalty >= 1.0:
+            return min(base_limit + 1, max(base_limit, int(self.expert_prepared_cache_size)))
         if self.prepared_cache_activation_stage_bonus >= 1.0:
             return min(base_limit + 1, max(base_limit, int(self.expert_prepared_cache_size)))
         return base_limit
@@ -517,9 +520,23 @@ class HybridMoE(nn.Module):
         pressure = self._prepared_cache_pressure()
         if pressure >= 1.0:
             return max(1, min(base_limit, int(self.expert_prepared_cache_size)))
+        if self.cold_promotion_penalty >= 1.0:
+            return min(base_limit + 2, max(base_limit, int(self.expert_prepared_cache_size) + 2))
         if self.prepared_cache_activation_stage_bonus >= 1.0:
             return min(base_limit + 1, max(base_limit, int(self.expert_prepared_cache_size) + 1))
         return base_limit
+
+    def _update_cold_promotion_penalty(self, cold_promotions: int, total_promotions: int) -> None:
+        if total_promotions <= 0:
+            self.cold_promotion_penalty = max(0.0, self.cold_promotion_penalty - 0.1)
+            return
+        cold_ratio = cold_promotions / max(1, total_promotions)
+        if cold_ratio >= 0.5:
+            self.cold_promotion_penalty = min(2.0, self.cold_promotion_penalty + 0.5)
+        elif cold_ratio == 0:
+            self.cold_promotion_penalty = max(0.0, self.cold_promotion_penalty - 0.25)
+        else:
+            self.cold_promotion_penalty = max(0.0, self.cold_promotion_penalty - 0.1)
 
     def _activation_target_ids(self) -> set[int]:
         if self.offload_backend is None:
@@ -962,6 +979,10 @@ class HybridMoE(nn.Module):
         self.pipeline_apply_batch_activated += source_counts["activated"]
         self.pipeline_apply_batch_warm += source_counts["warm"]
         self.pipeline_apply_batch_cold += source_counts["cold"]
+        self._update_cold_promotion_penalty(
+            cold_promotions=source_counts["cold"],
+            total_promotions=applied,
+        )
         return applied, completed_expert_ids, source_counts
 
     def _demote_expert_from_gpu(self, expert_idx: int, dst: ExpertResidency) -> bool:
@@ -1439,6 +1460,7 @@ class HybridMoE(nn.Module):
             "prepared_cache_rebalance_demoted_to_warm": self.prepared_cache_rebalance_demoted_to_warm,
             "prepared_cache_rebalance_dropped_to_ready": self.prepared_cache_rebalance_dropped_to_ready,
             "prepared_cache_activation_stage_bonus": self.prepared_cache_activation_stage_bonus,
+            "cold_promotion_penalty": self.cold_promotion_penalty,
             "adaptive_activation_limit": self._adaptive_activation_limit(),
             "adaptive_prebuild_limit": self._adaptive_prebuild_limit(),
             "warm_cache_hits": self.warm_cache_hits,

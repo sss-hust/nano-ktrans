@@ -384,6 +384,11 @@ tags: [architecture]
     - 同时也会调整 `adaptive_prebuild_limit`
     - 当 prepared tier 已经吃满且 activated 偏置较低时，pipeline 会自动降低后续准备动作的激进程度
     这样 prepared-cache 不再只是事后淘汰，而开始对前向的 prebuild / activation 候选规模形成闭环约束。
+65. prepared tier 现在还开始显式感知冷路径 promotion 压力：
+    - 每次 batch apply 后都会统计本轮 `cold` promotion 比例
+    - 若冷路径比例偏高，系统会提升 `cold_promotion_penalty`
+    - 这个 penalty 会进一步抬高后续的 adaptive activation/prebuild limit
+    也就是说，prepared tier 已不只是“被 cache 压力压缩”，也开始在“冷启动太多”时主动尝试扩大准备动作，形成一个最小的双向反馈回路。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

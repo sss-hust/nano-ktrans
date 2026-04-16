@@ -7,6 +7,8 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-16 08:12 --> **[cold-promotion-penalty]** prepared tier controller 现在会跟踪 `cold_promotion_penalty`：当 ready apply 中冷路径 promotion 占比偏高时，会提高后续 adaptive activation/prebuild limit，尝试增加 prepared overlap 以减少下一轮冷启动。
+- <!-- updated: 2026-04-16 08:12 --> **[tests]** 新增 cold-promotion penalty 的摘要与行为测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `85 passed, 1 warning`。
 - <!-- updated: 2026-04-16 07:54 --> **[adaptive-prepared-limits]** `HybridMoE` 现在会根据 prepared-cache 压力和 `prepared_cache_activation_stage_bonus` 动态调整 activation/prebuild 候选上限；在 prepared tier 吃紧且 activated 偏置较低时，会主动收缩 `adaptive_activation_limit` 和 `adaptive_prebuild_limit`。
 - <!-- updated: 2026-04-16 07:54 --> **[tests]** 新增 adaptive activation/prebuild limit 的诊断与压力测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `84 passed, 1 warning`。
 - <!-- updated: 2026-04-16 07:40 --> **[prepared-cache-stage-bonus]** prepared-cache retention policy 现在带最小自适应 stage bonus：当重平衡更频繁地打在 activated tier 或 warm tier 时，`prepared_cache_activation_stage_bonus` 会随之调整，开始为后续自适应 prepared-cache policy 预留动态信号。

@@ -162,6 +162,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "prepared_cache_rebalance_demoted_to_warm": 0,
         "prepared_cache_rebalance_dropped_to_ready": 0,
         "prepared_cache_activation_stage_bonus": 0.0,
+        "cold_promotion_penalty": 0.0,
         "adaptive_activation_limit": 0,
         "adaptive_prebuild_limit": 0,
         "decode_prefetch_hits": 0,
@@ -250,6 +251,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["prepared_cache_activation_stage_bonus"] += float(
             layer.get("prepared_cache_activation_stage_bonus", 0.0)
         )
+        summary["cold_promotion_penalty"] += float(layer.get("cold_promotion_penalty", 0.0))
         summary["adaptive_activation_limit"] += int(layer.get("adaptive_activation_limit", 0))
         summary["adaptive_prebuild_limit"] += int(layer.get("adaptive_prebuild_limit", 0))
         summary["decode_prefetch_hits"] += int(layer.get("decode_prefetch_hits", 0))
@@ -320,6 +322,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["prepared_cache_activation_stage_bonus_avg"] = (
             summary["prepared_cache_activation_stage_bonus"] / summary["layer_count"]
         )
+        summary["cold_promotion_penalty_avg"] = (
+            summary["cold_promotion_penalty"] / summary["layer_count"]
+        )
         summary["adaptive_activation_limit_avg"] = (
             summary["adaptive_activation_limit"] / summary["layer_count"]
         )
@@ -328,6 +333,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
     else:
         summary["prepared_cache_activation_stage_bonus_avg"] = None
+        summary["cold_promotion_penalty_avg"] = None
         summary["adaptive_activation_limit_avg"] = None
         summary["adaptive_prebuild_limit_avg"] = None
     total_rebalance_events = (
@@ -476,6 +482,7 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             "prepared_cache_activation_stage_bonus_avg": scheduler_summary.get(
                 "prepared_cache_activation_stage_bonus_avg"
             ),
+            "cold_promotion_penalty_avg": scheduler_summary.get("cold_promotion_penalty_avg"),
             "adaptive_activation_limit_avg": scheduler_summary.get(
                 "adaptive_activation_limit_avg"
             ),

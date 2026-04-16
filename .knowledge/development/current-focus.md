@@ -78,6 +78,7 @@ updated: 2026-04-16 03:22
 - [x] prepared-cache 重平衡事件现在也会进入 scheduler summary/profile sweep，可直接区分 warm/activated 哪一层在挤压 prepared budget
 - [x] prepared-cache retention policy 现在开始带最小自适应倾向，activated stage bonus 会随重平衡方向调整
 - [x] prepared tier 现在开始用最小自适应限额驱动 activation/prebuild 候选数，prepared-cache 压力会反向收缩 activation/prebuild aggressiveness
+- [x] cold promotion 现在会反馈回 prepared tier controller，冷路径比例偏高时会抬高 adaptive activation/prebuild limit
 
 ## 阻塞项
 
@@ -135,6 +136,7 @@ updated: 2026-04-16 03:22
 - 当前 prepared-cache 重平衡压力已可观测，但 scheduler 还没有利用这些指标动态调节 prepared budget 或 prebuild/activation aggressiveness
 - 当前 prepared-cache 已有最小自适应 stage bonus，但还没有真正把 recent source mix / regression pressure 接进完整的 budget controller
 - 当前 adaptive activation/prebuild limit 已接上 prepared-cache 压力与 stage bonus，但还没有把它和 profile/scheduler 参数形成可学习或可调的 controller
+- 当前 prepared tier 已开始同时感知 prepared-cache 压力和 cold-promotion 惩罚，但还没有把这些信号统一成稳定的多步 controller
 - 当前 runtime batch totals 已是按 tick 增量统计，但还没有接入真实宿主机 benchmark 结果做长期趋势归档
 - 当前 strict ready-only 语义已经覆盖 resident staging，但 `prefetching -> ready` 仍然依赖前台 refresh，而不是真 completion event 驱动
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总

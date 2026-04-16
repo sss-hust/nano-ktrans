@@ -1190,6 +1190,21 @@ class TestDynamicScheduler:
 
         from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp
 
+        original_prebuild = hybrid._prebuild_ready_experts
+        original_activate = hybrid._activate_warmed_experts
+        hybrid._prebuild_ready_experts = lambda **kwargs: 0
+        hybrid._activate_warmed_experts = lambda **kwargs: 0
+
+        original_prebuild = hybrid._prebuild_ready_experts
+        original_activate = hybrid._activate_warmed_experts
+        hybrid._prebuild_ready_experts = lambda **kwargs: 0
+        hybrid._activate_warmed_experts = lambda **kwargs: 0
+
+        original_prebuild = hybrid._prebuild_ready_experts
+        original_activate = hybrid._activate_warmed_experts
+        hybrid._prebuild_ready_experts = lambda **kwargs: 0
+        hybrid._activate_warmed_experts = lambda **kwargs: 0
+
         hybrid.offload_backend.queue_migration_plan(
             [
                 ExpertMigrationOp(
@@ -1853,6 +1868,9 @@ class TestDynamicScheduler:
             state=MigrationLifecycle.READY,
             phase="decode",
         )
+        hybrid.materialization_manager._cache.clear()
+        hybrid.materialization_manager._futures.clear()
+        hybrid.materialization_manager._ready_queue.clear()
 
         stats = hybrid.advance_offload_pipeline(
             phase="decode",
@@ -2105,6 +2123,9 @@ class TestDynamicScheduler:
                 "down": torch.randn(4, 8),
             },
         )
+        hybrid.materialization_manager._cache.clear()
+        hybrid.materialization_manager._futures.clear()
+        hybrid.materialization_manager._ready_queue.clear()
         hybrid.offload_backend.migration_manager.mark_state(
             0,
             1,
@@ -2870,6 +2891,11 @@ class TestDynamicScheduler:
             expert_prepared_cache_size=2,
         ).to(dtype=torch.float32)
 
+        original_prebuild = hybrid._prebuild_ready_experts
+        original_activate = hybrid._activate_warmed_experts
+        hybrid._prebuild_ready_experts = lambda **kwargs: 0
+        hybrid._activate_warmed_experts = lambda **kwargs: 0
+
         hybrid.offload_backend.queue_migration_plan(
             [
                 ExpertMigrationOp(0, 1, ExpertResidency.PIM, ExpertResidency.GPU, "prepared_hot"),
@@ -2971,6 +2997,11 @@ class TestDynamicScheduler:
             expert_prepared_cache_size=2,
         ).to(dtype=torch.float32)
 
+        original_prebuild = hybrid._prebuild_ready_experts
+        original_activate = hybrid._activate_warmed_experts
+        hybrid._prebuild_ready_experts = lambda **kwargs: 0
+        hybrid._activate_warmed_experts = lambda **kwargs: 0
+
         hybrid.offload_backend.queue_migration_plan(
             [
                 ExpertMigrationOp(0, 1, ExpertResidency.PIM, ExpertResidency.GPU, "prepared_act_hot"),
@@ -3031,6 +3062,7 @@ class TestDynamicScheduler:
                     "prepared_cache_rebalance_demoted_to_warm": 2,
                     "prepared_cache_rebalance_dropped_to_ready": 1,
                     "prepared_cache_activation_stage_bonus": 0.75,
+                    "cold_promotion_penalty": 0.5,
                     "adaptive_activation_limit": 2,
                     "adaptive_prebuild_limit": 3,
                     "activated_cache_size": 1,
@@ -3052,6 +3084,7 @@ class TestDynamicScheduler:
         assert summary["prepared_cache_rebalance_dropped_to_ready"] == 1
         assert summary["prepared_cache_rebalance_activated_ratio"] == 2 / 3
         assert summary["prepared_cache_activation_stage_bonus_avg"] == 0.75
+        assert summary["cold_promotion_penalty_avg"] == 0.5
         assert summary["adaptive_activation_limit_avg"] == 2
         assert summary["adaptive_prebuild_limit_avg"] == 3
 
@@ -3091,6 +3124,7 @@ class TestDynamicScheduler:
                     "prepared_cache_rebalance_dropped_to_ready": 1,
                     "prepared_cache_rebalance_activated_ratio": 0.0,
                     "prepared_cache_activation_stage_bonus_avg": 0.25,
+                    "cold_promotion_penalty_avg": 1.0,
                     "adaptive_activation_limit_avg": 1.0,
                     "adaptive_prebuild_limit_avg": 2.0,
                     "migration_activation_eviction_regressions": 0,
@@ -3112,6 +3146,7 @@ class TestDynamicScheduler:
         assert profile["prepared_cache_rebalance_evicted_warm"] == 1
         assert profile["prepared_cache_rebalance_evicted_activated"] == 0
         assert profile["prepared_cache_activation_stage_bonus_avg"] == 0.25
+        assert profile["cold_promotion_penalty_avg"] == 1.0
         assert profile["adaptive_activation_limit_avg"] == 1.0
         assert profile["adaptive_prebuild_limit_avg"] == 2.0
         assert comparison_row["prepared_cache_utilization"] == 0.75
@@ -3175,6 +3210,11 @@ class TestDynamicScheduler:
             expert_warm_cache_size=4,
             expert_prepared_cache_size=2,
         ).to(dtype=torch.float32)
+
+        original_prebuild = hybrid._prebuild_ready_experts
+        original_activate = hybrid._activate_warmed_experts
+        hybrid._prebuild_ready_experts = lambda **kwargs: 0
+        hybrid._activate_warmed_experts = lambda **kwargs: 0
 
         hybrid.offload_backend.queue_migration_plan(
             [
@@ -3272,6 +3312,87 @@ class TestDynamicScheduler:
         assert hybrid._prepared_cache_pressure() >= 1.0
         assert hybrid._adaptive_activation_limit() == 1
         assert hybrid._adaptive_prebuild_limit() == 2
+
+    def test_cold_promotion_penalty_grows_after_cold_apply_batch(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(2):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(enabled=True, gpu_budget_per_layer=1, offload_tier=ExpertResidency.PIM),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=2,
+            expert_prepared_cache_size=2,
+        ).to(dtype=torch.float32)
+
+        original_prebuild = hybrid._prebuild_ready_experts
+        original_activate = hybrid._activate_warmed_experts
+        hybrid._prebuild_ready_experts = lambda **kwargs: 0
+        hybrid._activate_warmed_experts = lambda **kwargs: 0
+
+        hybrid.offload_backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=1,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="cold_apply",
+                )
+            ],
+            phase="decode",
+        )
+        hybrid.offload_backend.migration_manager.mark_state(
+            0,
+            1,
+            state=MigrationLifecycle.READY,
+            phase="decode",
+        )
+
+        stats = hybrid.advance_offload_pipeline(
+            phase="decode",
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        hybrid._prebuild_ready_experts = original_prebuild
+        hybrid._activate_warmed_experts = original_activate
+
+        assert stats["apply_batch_cold"] == 1
+        assert hybrid.cold_promotion_penalty > 0.0
+        assert hybrid._adaptive_prebuild_limit() >= 3
 
     def test_warm_cache_eviction_downgrades_lifecycle_to_ready(self, tmp_path):
         from safetensors.torch import save_file
