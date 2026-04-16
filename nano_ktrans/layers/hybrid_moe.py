@@ -76,6 +76,7 @@ class HybridMoE(nn.Module):
         expert_prefetch_cache_size: int = 8,
         expert_prefetch_workers: int = 1,
         expert_warm_cache_size: int = 4,
+        expert_prepared_cache_size: Optional[int] = None,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -125,6 +126,9 @@ class HybridMoE(nn.Module):
         self.pipeline_apply_batch_warm = 0
         self.pipeline_apply_batch_cold = 0
         self.expert_warm_cache_size = max(0, int(expert_warm_cache_size))
+        self.expert_prepared_cache_size = (
+            None if expert_prepared_cache_size is None else max(0, int(expert_prepared_cache_size))
+        )
         self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.warm_cache_hits = 0
@@ -300,7 +304,21 @@ class HybridMoE(nn.Module):
         self.warm_expert_cache.move_to_end(expert_key)
         if count_store:
             self.warm_cache_stores += 1
-        while len(self.warm_expert_cache) > self.expert_warm_cache_size:
+        self._trim_warm_cache_to_budget()
+
+    def _effective_warm_cache_limit(self) -> int:
+        limit = self.expert_warm_cache_size
+        if self.expert_prepared_cache_size is None:
+            return limit
+        remaining_budget = max(0, self.expert_prepared_cache_size - len(self.activated_expert_cache))
+        return min(limit, remaining_budget)
+
+    def _prepared_cache_size(self) -> int:
+        return len(self.warm_expert_cache) + len(self.activated_expert_cache)
+
+    def _trim_warm_cache_to_budget(self) -> None:
+        limit = self._effective_warm_cache_limit()
+        while len(self.warm_expert_cache) > limit:
             evicted_key = self._pick_warm_cache_victim_key()
             if evicted_key is None:
                 evicted_key, _ = self.warm_expert_cache.popitem(last=False)
@@ -438,6 +456,7 @@ class HybridMoE(nn.Module):
                         state=MigrationLifecycle.WARMED,
                     )
             self.activated_cache_evictions += 1
+        self._trim_warm_cache_to_budget()
 
     def _activate_warm_module(self, module: nn.Module, device: torch.device, dtype: torch.dtype) -> nn.Module:
         non_blocking = device.type == "cuda"
@@ -1276,6 +1295,9 @@ class HybridMoE(nn.Module):
             "pipeline_apply_batch_activated": self.pipeline_apply_batch_activated,
             "pipeline_apply_batch_warm": self.pipeline_apply_batch_warm,
             "pipeline_apply_batch_cold": self.pipeline_apply_batch_cold,
+            "prepared_cache_limit": self.expert_prepared_cache_size,
+            "prepared_cache_size": self._prepared_cache_size(),
+            "effective_warm_cache_limit": self._effective_warm_cache_limit(),
             "warm_cache_hits": self.warm_cache_hits,
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,

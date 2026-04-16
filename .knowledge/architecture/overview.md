@@ -349,6 +349,11 @@ tags: [architecture]
     - 被逐出的 activated expert 会回退到 CPU warm cache
     - 同时 migration lifecycle 会从 `ACTIVATED` 降级为 `WARMED`
     这样 activated cache 开始具备和 warm cache 一致的热点保留语义，不再只是一个短暂的过渡列表。
+58. warm cache 和 activated cache 现在还开始共享统一的 prepared-cache 总预算：
+    - `expert_prepared_cache_size` 限制的是 `warm cache + activated cache` 两层合计可保留的 prepared experts 数量
+    - activated cache 增长时，warm cache 的有效上限会动态收缩
+    - 因而系统开始从“两个独立缓存”演化成“同一 prepared tier 的两段式表示”
+    这使后续做统一 per-layer cache policy 或自适应 budget 调整更自然，不必再分别管理两套完全独立的容量逻辑。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

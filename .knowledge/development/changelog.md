@@ -7,6 +7,8 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-16 06:44 --> **[prepared-cache-budget]** `HybridMoE` 新增统一的 `expert_prepared_cache_size`，用于约束 `warm cache + activated cache` 的总 prepared expert 数；activated cache 占用上升时，warm cache 的有效容量会动态收缩。
+- <!-- updated: 2026-04-16 06:44 --> **[prepared-cache-tests]** 新增测试覆盖 unified prepared-cache budget，验证 activated cache 占满总预算时，较冷的 warm candidate 会被回退到 `READY`；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `79 passed, 1 warning`。
 - <!-- updated: 2026-04-16 06:30 --> **[activated-cache-victims]** activated cache 的 victim 选择已从简单 FIFO/LRU 收敛为“lifecycle 优先级 + hotness”排序；更冷的 activated candidate 会优先回退到 warm cache，并把 lifecycle 从 `ACTIVATED` 降到 `WARMED`，与 warm cache 的热点保留策略保持一致。
 - <!-- updated: 2026-04-16 06:30 --> **[tests]** 新增 activated cache eviction 测试，验证在容量不足时更冷的 activated expert 会被逐出到 warm cache，同时回归 `tests/test_core.py + tests/test_pim_runtime.py` 为 `78 passed, 1 warning`。
 - <!-- updated: 2026-04-16 03:22 --> **[benchmark-sweep]** `profile_sweep_summary` 新增自动对比层，输出 `comparison_table`、`best_by_metric`、`metric_directions`，并补充 `pipeline_promotion_non_cold_total/ratio` 与 `runtime_apply_batch_size_avg`，便于直接比较 overlap 质量而不只看 decode TPS。
