@@ -108,6 +108,12 @@ def main():
         help="Number of offloaded experts per layer to proactively prefetch based on hotness, even without an immediate migration op.",
     )
     parser.add_argument(
+        "--scheduler-prepared-cache-budget-per-layer",
+        type=int,
+        default=None,
+        help="Unified warm+activated prepared-cache budget per layer. Defaults to a decode-promote-aware heuristic.",
+    )
+    parser.add_argument(
         "--scheduler-profile",
         default="baseline",
         choices=list(SCHEDULER_PROFILE_NAMES),
@@ -142,6 +148,7 @@ def main():
         scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
         scheduler_decode_require_prefetch_ready=args.scheduler_decode_require_prefetch_ready,
         scheduler_prefetch_candidate_budget_per_layer=args.scheduler_prefetch_candidate_budget_per_layer,
+        scheduler_prepared_cache_budget_per_layer=args.scheduler_prepared_cache_budget_per_layer,
         scheduler_profile=args.scheduler_profile,
     )
     

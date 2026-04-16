@@ -359,6 +359,11 @@ tags: [architecture]
     - 系统会把两层候选放到同一个 victim 选择逻辑里
     - 依据 hotness、lifecycle 和 cache stage 统一挑选应回退的对象
     这样 prepared tier 的控制语义开始更接近一个真正的分层缓存系统，而不是两个各自裁剪、偶尔共享上限的临时容器。
+60. prepared-cache 预算现在也已经打通到用户入口和观测面：
+    - `LLM`、`example.py`、`benchmark_inference.py` 都可以显式配置 per-layer prepared-cache budget
+    - scheduler summary 会输出 `prepared_cache_limit / prepared_cache_size / effective_warm_cache_limit / prepared_cache_utilization`
+    - 因此后续 benchmark 已可以直接比较不同 prepared-cache 预算对 overlap、cold-path 比例和 eviction regression 的影响
+    这使 prepared tier 不再只是内部实现细节，而是成为可调、可测、可比较的系统参数。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

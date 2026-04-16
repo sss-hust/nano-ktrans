@@ -102,6 +102,7 @@ def benchmark_backend(
     scheduler_migration_cooldown_steps: int | None,
     scheduler_decode_require_prefetch_ready: bool | None,
     scheduler_prefetch_candidate_budget_per_layer: int | None,
+    scheduler_prepared_cache_budget_per_layer: int | None,
     scheduler_profile: str,
 ) -> dict[str, Any]:
     llm = None
@@ -172,6 +173,7 @@ def benchmark_backend(
             scheduler_migration_cooldown_steps=scheduler_migration_cooldown_steps,
             scheduler_decode_require_prefetch_ready=scheduler_decode_require_prefetch_ready,
             scheduler_prefetch_candidate_budget_per_layer=scheduler_prefetch_candidate_budget_per_layer,
+            scheduler_prepared_cache_budget_per_layer=scheduler_prepared_cache_budget_per_layer,
             scheduler_profile=scheduler_profile,
         )
         synchronize_if_needed(llm.device)
@@ -326,6 +328,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument("--scheduler-prefetch-candidate-budget-per-layer", type=int, default=None)
+    parser.add_argument("--scheduler-prepared-cache-budget-per-layer", type=int, default=None)
     parser.add_argument(
         "--scheduler-profile",
         default="baseline",
@@ -387,6 +390,7 @@ def main() -> None:
                 scheduler_migration_cooldown_steps=args.scheduler_migration_cooldown_steps,
                 scheduler_decode_require_prefetch_ready=args.scheduler_decode_require_prefetch_ready,
                 scheduler_prefetch_candidate_budget_per_layer=args.scheduler_prefetch_candidate_budget_per_layer,
+                scheduler_prepared_cache_budget_per_layer=args.scheduler_prepared_cache_budget_per_layer,
                 scheduler_profile=scheduler_profile,
             )
             result["scheduler_profile"] = scheduler_profile

@@ -54,6 +54,7 @@ class LLM:
         scheduler_migration_cooldown_steps: Optional[int] = None,
         scheduler_decode_require_prefetch_ready: Optional[bool] = None,
         scheduler_prefetch_candidate_budget_per_layer: Optional[int] = None,
+        scheduler_prepared_cache_budget_per_layer: Optional[int] = None,
         scheduler_profile: str = SCHEDULER_PROFILE_BASELINE,
     ):
         if device is None or device == "auto":
@@ -169,6 +170,15 @@ class LLM:
             residency_plan=residency_plan,
             config=resolved_scheduler_config,
         )
+        prepared_cache_budget = (
+            scheduler_prepared_cache_budget_per_layer
+            if scheduler_prepared_cache_budget_per_layer is not None
+            else max(
+                int(self.dynamic_expert_scheduler.config.decode_promote_k) * 2,
+                int(self.dynamic_expert_scheduler.config.prefetch_candidate_budget_per_layer),
+                2,
+            )
+        )
 
         # DEBUG: 仅测试一层以排查崩溃原因
         # config.num_hidden_layers = 1
@@ -183,6 +193,7 @@ class LLM:
             offload_backend_kwargs=self.offload_backend_kwargs,
             residency_plan=self.dynamic_expert_scheduler.residency_plan,
             dynamic_expert_scheduler=self.dynamic_expert_scheduler,
+            expert_prepared_cache_size=prepared_cache_budget,
         )
         self.model = self.model.to(device=device, dtype=model_dtype)
             

@@ -152,6 +152,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "activated_cache_stores": 0,
         "activated_cache_evictions": 0,
         "activated_cache_size": 0,
+        "prepared_cache_limit": 0,
+        "prepared_cache_size": 0,
+        "effective_warm_cache_limit": 0,
         "decode_prefetch_hits": 0,
         "decode_prefetch_misses": 0,
         "runtime_evictions": 0,
@@ -220,6 +223,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["activated_cache_stores"] += int(layer.get("activated_cache_stores", 0))
         summary["activated_cache_evictions"] += int(layer.get("activated_cache_evictions", 0))
         summary["activated_cache_size"] += int(layer.get("activated_cache_size", 0))
+        summary["prepared_cache_limit"] += int(layer.get("prepared_cache_limit") or 0)
+        summary["prepared_cache_size"] += int(layer.get("prepared_cache_size", 0))
+        summary["effective_warm_cache_limit"] += int(layer.get("effective_warm_cache_limit", 0))
         summary["decode_prefetch_hits"] += int(layer.get("decode_prefetch_hits", 0))
         summary["decode_prefetch_misses"] += int(layer.get("decode_prefetch_misses", 0))
         summary["runtime_evictions"] += int(layer.get("runtime_evictions", 0))
@@ -278,6 +284,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
     else:
         summary["pipeline_apply_batch_size_avg"] = None
+    if summary["prepared_cache_limit"] > 0:
+        summary["prepared_cache_utilization"] = (
+            summary["prepared_cache_size"] / summary["prepared_cache_limit"]
+        )
+    else:
+        summary["prepared_cache_utilization"] = None
     if summary["pipeline_apply_batch_experts"] > 0:
         summary["pipeline_apply_batch_activated_ratio"] = (
             summary["pipeline_apply_batch_activated"] / summary["pipeline_apply_batch_experts"]

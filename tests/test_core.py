@@ -3013,6 +3013,33 @@ class TestDynamicScheduler:
         assert lifecycle[2] == MigrationLifecycle.WARMED.value
         assert lifecycle[3] == MigrationLifecycle.READY.value
 
+    def test_scheduler_summary_reports_prepared_cache_metrics(self):
+        from nano_ktrans.scheduler.diagnostics import summarize_offload_diagnostics
+
+        offload_diagnostics = {
+            "layer_count": 1,
+            "scheduler_profile": {"profile": "baseline"},
+            "offload_refresh": {},
+            "dynamic_scheduler": {"enabled": True},
+            "layers": [
+                {
+                    "prepared_cache_limit": 3,
+                    "prepared_cache_size": 2,
+                    "effective_warm_cache_limit": 1,
+                    "activated_cache_size": 1,
+                    "warm_cache_size": 1,
+                    "backend": {"migration_manager": {"layers": []}},
+                }
+            ],
+        }
+
+        summary = summarize_offload_diagnostics(offload_diagnostics)
+
+        assert summary["prepared_cache_limit"] == 3
+        assert summary["prepared_cache_size"] == 2
+        assert summary["effective_warm_cache_limit"] == 1
+        assert summary["prepared_cache_utilization"] == 2 / 3
+
     def test_warm_cache_eviction_downgrades_lifecycle_to_ready(self, tmp_path):
         from safetensors.torch import save_file
 

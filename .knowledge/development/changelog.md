@@ -7,6 +7,9 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-16 07:08 --> **[prepared-cache-plumbing]** `scheduler_prepared_cache_budget_per_layer` 已打通到 `LLM`、`example.py` 和 `benchmark_inference.py`，prepared-cache 预算不再只能在代码内硬编码测试。
+- <!-- updated: 2026-04-16 07:08 --> **[prepared-cache-summary]** scheduler summary 现新增 `prepared_cache_limit / prepared_cache_size / effective_warm_cache_limit / prepared_cache_utilization`，便于在 benchmark/profile sweep 中直接观察 prepared tier 是否吃满、warm budget 是否被 activated 层挤压。
+- <!-- updated: 2026-04-16 07:08 --> **[tests]** 新增 prepared-cache summary 聚合测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `81 passed, 1 warning`。
 - <!-- updated: 2026-04-16 06:56 --> **[prepared-cache-rebalance]** prepared-cache 预算现在会在 `warm cache` 和 `activated cache` 两层之间统一重平衡；当总 prepared slots 超限时，系统会在两层候选中按 hotness 与 lifecycle 统一选 victim，而不再只先压 warm cache。
 - <!-- updated: 2026-04-16 06:56 --> **[prepared-cache-rebalance-tests]** 新增 prepared-cache 重平衡测试，验证高 hotness 的 activated candidate 会优先保留，较冷的 warm candidate 会被回退到 `READY`；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `80 passed, 1 warning`。
 - <!-- updated: 2026-04-16 06:44 --> **[prepared-cache-budget]** `HybridMoE` 新增统一的 `expert_prepared_cache_size`，用于约束 `warm cache + activated cache` 的总 prepared expert 数；activated cache 占用上升时，warm cache 的有效容量会动态收缩。

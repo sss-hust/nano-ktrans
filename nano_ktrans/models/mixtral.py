@@ -107,6 +107,7 @@ class MixtralDecoderLayer(nn.Module):
         offload_backend_kwargs: dict | None = None,
         residency_plan: Optional[ExpertResidencyPlan] = None,
         dynamic_expert_scheduler: Optional[DynamicExpertScheduler] = None,
+        expert_prepared_cache_size: int | None = None,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -155,6 +156,7 @@ class MixtralDecoderLayer(nn.Module):
                 expert_proj_names=config.arch.expert_proj_names,
                 experts_are_packed=config.arch.experts_are_packed,
                 hidden_act=config.hidden_act,
+                expert_prepared_cache_size=expert_prepared_cache_size,
             )
 
             if config.arch.has_shared_expert and config.shared_expert_intermediate_size:
