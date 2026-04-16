@@ -333,3 +333,7 @@ updated: 2026-04-17 03:53
 - `decode` 阶段现在会在应用 promotion 前检查 GPU budget，并按 hotness 驱逐非活跃的冷 resident expert，保证 GPU resident set 始终受控。
 - `decode` 阶段现在也会对计划中的 future promotions 发起预取，并对 promotion 队列做“active first, hottest first”排序。
 - `decode` promotion 现在会优先提升 staging cache 已就绪的 expert，并暴露 `decode_prefetch_hits/misses` 诊断。
+- resident commit 的最后一段现在新增了 `resident_commit_batch_queue`，后半段链路已明确成：
+  `apply_candidate_queue -> apply_commit_queue -> apply_commit_batch_queue -> resident_commit_batch_queue -> resident set`
+- `resident_commit_batch_queue` 现在已经接入 `HybridMoE.diagnostics()`、runtime background tick 汇总、`LLM.reset_offload_diagnostics()` 和 scheduler summary。
+- 这意味着系统已经开始把最终 resident commit 从“apply batch buffer”再推进到“final resident commit buffer”，更接近真正后台 batch commit worker 的结构。

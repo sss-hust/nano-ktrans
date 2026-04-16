@@ -641,6 +641,11 @@ tags: [architecture]
     - staged budget：控制 `apply_commit_queue -> apply_commit_batch_queue`
     - final batch budget：控制 `apply_commit_batch_queue -> resident set`
     这让后半段不仅按 batch 组织，还能对“准备多少 batch”和“每轮真正 commit 多少 batch”分别施加控制，为后续后台 batch commit worker 留出接口。
+94. resident commit 的最后一段现在又明确拆出了一层 `resident_commit_batch_queue`：
+    - `apply_commit_batch_queue` 负责把 staged commit 按 batch 准备好
+    - `resident_commit_batch_queue` 负责保存“已经进入 final resident-commit buffer 的 batch”
+    - resident set commit 只从 `resident_commit_batch_queue` 消费
+    这样后半段已经从“batch buffer + finalize”推进成了“staged batch buffer + final resident-commit buffer + finalize”的三段结构，更接近真正后台 batch commit worker。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

@@ -147,6 +147,7 @@ class HybridMoE(nn.Module):
         self.apply_candidate_queue: "OrderedDict[str, object]" = OrderedDict()
         self.apply_commit_queue: "OrderedDict[str, object]" = OrderedDict()
         self.apply_commit_batch_queue: "OrderedDict[str, list[tuple[object, dict[str, object]]]]" = OrderedDict()
+        self.resident_commit_batch_queue: "OrderedDict[str, list[tuple[object, dict[str, object]]]]" = OrderedDict()
         self.apply_commit_ready_cache: "OrderedDict[str, dict[str, object]]" = OrderedDict()
         self.warm_cache_hits = 0
         self.warm_cache_stores = 0
@@ -175,6 +176,11 @@ class HybridMoE(nn.Module):
         self.background_apply_commit_batch_queue_enqueued = 0
         self.background_apply_commit_batch_queue_committed_batches = 0
         self.background_apply_commit_batch_queue_prefinalized_batches = 0
+        self.resident_commit_batch_queue_enqueued = 0
+        self.resident_commit_batch_queue_batches = 0
+        self.resident_commit_batch_queue_pruned = 0
+        self.resident_commit_batch_queue_evictions = 0
+        self.background_resident_commit_batch_queue_enqueued = 0
         self.apply_commit_ready_hits = 0
         self.apply_commit_ready_stores = 0
         self.apply_commit_ready_pruned = 0
@@ -387,6 +393,11 @@ class HybridMoE(nn.Module):
             prev_background_apply_commit_batch_queue_prefinalized = (
                 self.background_apply_commit_batch_queue_prefinalized_batches
             )
+            prev_background_resident_commit_batch_queue_enqueued = (
+                self.background_resident_commit_batch_queue_enqueued
+            )
+            background_apply_commit_batch_queue_enqueued = 0
+            resident_commit_batch_queue_enqueued = 0
             if phase == "decode":
                 preexisting_apply_commit_batch_keys = set(self.apply_commit_batch_queue.keys())
                 warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
@@ -415,10 +426,23 @@ class HybridMoE(nn.Module):
                     max_commits=self._adaptive_apply_commit_limit(background=True),
                     background=True,
                 )
+                background_apply_commit_batch_queue_enqueued = int(
+                    self.background_apply_commit_batch_queue_enqueued
+                    - prev_background_apply_commit_batch_queue_enqueued
+                )
                 self.background_apply_commit_batch_queue_prefinalized_batches += sum(
                     1
                     for batch_key in self.apply_commit_batch_queue.keys()
                     if batch_key not in preexisting_apply_commit_batch_keys
+                )
+                self._stage_resident_commit_batches(
+                    eligible_batch_keys=preexisting_apply_commit_batch_keys,
+                    max_batches=self._adaptive_apply_commit_batch_limit(background=True),
+                    background=True,
+                )
+                resident_commit_batch_queue_enqueued = int(
+                    self.background_resident_commit_batch_queue_enqueued
+                    - prev_background_resident_commit_batch_queue_enqueued
                 )
                 activation_applied = self._background_apply_activated_experts(
                     phase=phase,
@@ -433,13 +457,12 @@ class HybridMoE(nn.Module):
                 "apply_commit_queue_enqueued": int(
                     self.background_apply_commit_queue_enqueued - prev_background_apply_commit_queue_enqueued
                 ),
-                "apply_commit_batch_queue_enqueued": int(
-                    self.background_apply_commit_batch_queue_enqueued - prev_background_apply_commit_batch_queue_enqueued
-                ),
+                "apply_commit_batch_queue_enqueued": background_apply_commit_batch_queue_enqueued,
                 "apply_commit_batch_queue_prefinalized": int(
                     self.background_apply_commit_batch_queue_prefinalized_batches
                     - prev_background_apply_commit_batch_queue_prefinalized
                 ),
+                "resident_commit_batch_queue_enqueued": resident_commit_batch_queue_enqueued,
             }
 
     def _insert_warm_module(self, expert_idx: int, module: nn.Module) -> None:
@@ -713,6 +736,10 @@ class HybridMoE(nn.Module):
         base_limit = self._apply_commit_queue_limit()
         return max(1, base_limit)
 
+    def _resident_commit_batch_queue_limit(self) -> int:
+        base_limit = self._apply_commit_batch_queue_limit()
+        return max(1, base_limit)
+
     def _pick_apply_commit_queue_victim_key(self) -> str | None:
         if not self.apply_commit_queue:
             return None
@@ -745,6 +772,25 @@ class HybridMoE(nn.Module):
             ),
         )
 
+    def _pick_resident_commit_batch_queue_victim_key(self) -> str | None:
+        if not self.resident_commit_batch_queue:
+            return None
+        ordered_keys = list(self.resident_commit_batch_queue.keys())
+        return min(
+            ordered_keys,
+            key=lambda batch_key: (
+                max(
+                    self._hotness_score(int(op.expert_idx))
+                    for op, _resolved in self.resident_commit_batch_queue[batch_key]
+                ),
+                max(
+                    self._migration_state_priority(int(op.expert_idx))
+                    for op, _resolved in self.resident_commit_batch_queue[batch_key]
+                ),
+                ordered_keys.index(batch_key),
+            ),
+        )
+
     def _rebalance_apply_commit_queue(self) -> None:
         limit = self._apply_commit_queue_limit()
         while len(self.apply_commit_queue) > limit:
@@ -772,6 +818,16 @@ class HybridMoE(nn.Module):
             else:
                 self.apply_commit_batch_queue.pop(evicted_key, None)
             self.apply_commit_batch_queue_evictions += 1
+
+    def _rebalance_resident_commit_batch_queue(self) -> None:
+        limit = self._resident_commit_batch_queue_limit()
+        while len(self.resident_commit_batch_queue) > limit:
+            evicted_key = self._pick_resident_commit_batch_queue_victim_key()
+            if evicted_key is None:
+                evicted_key, _ = self.resident_commit_batch_queue.popitem(last=False)
+            else:
+                self.resident_commit_batch_queue.pop(evicted_key, None)
+            self.resident_commit_batch_queue_evictions += 1
 
     def _prune_apply_commit_ready_cache(self) -> int:
         stale_keys: list[str] = []
@@ -867,6 +923,54 @@ class HybridMoE(nn.Module):
                 self.background_apply_commit_batch_queue_enqueued += 1
 
         self._rebalance_apply_commit_batch_queue()
+        return enqueued
+
+    def _stage_resident_commit_batches(
+        self,
+        *,
+        eligible_batch_keys: Optional[set[str]] = None,
+        max_batches: Optional[int],
+        background: bool,
+    ) -> int:
+        if not self.apply_commit_batch_queue:
+            return 0
+
+        batch_limit = (
+            self._adaptive_apply_commit_batch_limit(background=background)
+            if max_batches is None
+            else max(1, int(max_batches))
+        )
+        candidate_batches: list[tuple[str, list[tuple[object, dict[str, object]]]]] = []
+        for batch_key, batch_entries in list(self.apply_commit_batch_queue.items()):
+            if eligible_batch_keys is not None and batch_key not in eligible_batch_keys:
+                continue
+            if not batch_entries:
+                continue
+            candidate_batches.append((batch_key, batch_entries))
+
+        if not candidate_batches:
+            return 0
+
+        candidate_batches.sort(
+            key=lambda item: min(
+                self._promotion_sort_key(op, set(), "decode")
+                for op, _resolved in item[1]
+            )
+        )
+        selected_batches = candidate_batches[:batch_limit]
+        enqueued = 0
+        for batch_key, batch_entries in selected_batches:
+            was_present = batch_key in self.resident_commit_batch_queue
+            self.resident_commit_batch_queue[batch_key] = batch_entries
+            self.resident_commit_batch_queue.move_to_end(batch_key)
+            if not was_present:
+                self.resident_commit_batch_queue_enqueued += 1
+                self.resident_commit_batch_queue_batches += 1
+                enqueued += 1
+                if background:
+                    self.background_resident_commit_batch_queue_enqueued += 1
+
+        self._rebalance_resident_commit_batch_queue()
         return enqueued
 
     def _rebalance_apply_candidate_queue(self) -> None:
@@ -1573,6 +1677,32 @@ class HybridMoE(nn.Module):
         self.apply_commit_batch_queue_pruned += len(stale_keys)
         return len(stale_keys)
 
+    def _prune_resident_commit_batch_queue(self) -> int:
+        stale_keys: list[str] = []
+        for batch_key, batch_entries in list(self.resident_commit_batch_queue.items()):
+            retained_entries: list[tuple[object, dict[str, object]]] = []
+            for op, resolved in batch_entries:
+                expert_idx = int(op.expert_idx)
+                expert_key = str(expert_idx)
+                lifecycle = None
+                if self.offload_backend is not None:
+                    lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+                if (
+                    expert_key in self.apply_commit_ready_cache
+                    and not bool(self.gpu_experts_mask[expert_idx].item())
+                    and lifecycle in {MigrationLifecycle.ACTIVATED, MigrationLifecycle.APPLIED}
+                ):
+                    retained_entries.append((op, resolved))
+            if retained_entries:
+                self.resident_commit_batch_queue[batch_key] = retained_entries
+            else:
+                stale_keys.append(batch_key)
+
+        for batch_key in stale_keys:
+            self.resident_commit_batch_queue.pop(batch_key, None)
+        self.resident_commit_batch_queue_pruned += len(stale_keys)
+        return len(stale_keys)
+
     def _commit_apply_candidate_queue(
         self,
         *,
@@ -1599,6 +1729,7 @@ class HybridMoE(nn.Module):
         self._prune_apply_candidate_queue()
         self._prune_apply_commit_queue()
         self._prune_apply_commit_batch_queue()
+        self._prune_resident_commit_batch_queue()
         self._prune_apply_commit_ready_cache()
         if not self.apply_commit_queue:
             return 0, 0
@@ -1626,8 +1757,13 @@ class HybridMoE(nn.Module):
             max_commits=batch_limit,
             background=background,
         )
+        self._stage_resident_commit_batches(
+            eligible_batch_keys=eligible_batch_keys,
+            max_batches=batch_limit,
+            background=background,
+        )
         ready_batches: list[tuple[str, list[tuple[object, dict[str, object]]]]] = []
-        for batch_key, batch_entries in self.apply_commit_batch_queue.items():
+        for batch_key, batch_entries in self.resident_commit_batch_queue.items():
             if eligible_batch_keys is not None and batch_key not in eligible_batch_keys:
                 continue
             filtered_batch: list[tuple[object, dict[str, object]]] = []
@@ -1642,12 +1778,6 @@ class HybridMoE(nn.Module):
                 ready_batches.append((batch_key, filtered_batch))
         if not ready_batches:
             return 0, 0
-        ready_batches.sort(
-            key=lambda item: min(
-                self._promotion_sort_key(op, active_experts, phase)
-                for op, _resolved in item[1]
-            )
-        )
 
         selected_batch_entries = ready_batches[:batch_limit]
         selected_ops = [
@@ -1720,6 +1850,7 @@ class HybridMoE(nn.Module):
                 self.apply_commit_ready_cache.pop(str(expert_idx), None)
             for batch_key, _batch_entries in promotable_batch_entries:
                 self.apply_commit_batch_queue.pop(batch_key, None)
+                self.resident_commit_batch_queue.pop(batch_key, None)
             self.offload_backend.migration_manager.take_layer(
                 self.layer_idx,
                 lambda op: (
@@ -2706,6 +2837,16 @@ class HybridMoE(nn.Module):
                 for batch_entries in self.apply_commit_batch_queue.values()
                 for op, _resolved in batch_entries
             ],
+            "resident_commit_batch_queue_size": len(self.resident_commit_batch_queue),
+            "resident_commit_batch_queue_limit": self._resident_commit_batch_queue_limit(),
+            "resident_commit_batch_queue_utilization": (
+                len(self.resident_commit_batch_queue) / max(1, self._resident_commit_batch_queue_limit())
+            ),
+            "resident_commit_batch_queue_pending_experts": [
+                int(op.expert_idx)
+                for batch_entries in self.resident_commit_batch_queue.values()
+                for op, _resolved in batch_entries
+            ],
             "apply_commit_ready_cache_size": len(self.apply_commit_ready_cache),
             "apply_queue_enqueued": self.apply_queue_enqueued,
             "apply_queue_committed": self.apply_queue_committed,
@@ -2721,6 +2862,10 @@ class HybridMoE(nn.Module):
             "apply_commit_batch_queue_committed_batches": self.apply_commit_batch_queue_committed_batches,
             "apply_commit_batch_queue_pruned": self.apply_commit_batch_queue_pruned,
             "apply_commit_batch_queue_evictions": self.apply_commit_batch_queue_evictions,
+            "resident_commit_batch_queue_enqueued": self.resident_commit_batch_queue_enqueued,
+            "resident_commit_batch_queue_batches": self.resident_commit_batch_queue_batches,
+            "resident_commit_batch_queue_pruned": self.resident_commit_batch_queue_pruned,
+            "resident_commit_batch_queue_evictions": self.resident_commit_batch_queue_evictions,
             "apply_commit_ready_hits": self.apply_commit_ready_hits,
             "apply_commit_ready_stores": self.apply_commit_ready_stores,
             "apply_commit_ready_pruned": self.apply_commit_ready_pruned,
@@ -2742,6 +2887,7 @@ class HybridMoE(nn.Module):
             "background_apply_commit_batch_queue_enqueued": self.background_apply_commit_batch_queue_enqueued,
             "background_apply_commit_batch_queue_committed_batches": self.background_apply_commit_batch_queue_committed_batches,
             "background_apply_commit_batch_queue_prefinalized_batches": self.background_apply_commit_batch_queue_prefinalized_batches,
+            "background_resident_commit_batch_queue_enqueued": self.background_resident_commit_batch_queue_enqueued,
             "background_apply_commit_batches": self.background_apply_commit_batches,
             "background_apply_commit_experts": self.background_apply_commit_experts,
             "materialization_manager": self.materialization_manager.diagnostics(),
