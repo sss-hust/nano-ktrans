@@ -174,6 +174,7 @@ class HybridMoE(nn.Module):
         self.apply_commit_batch_queue_pruned = 0
         self.background_apply_commit_batch_queue_enqueued = 0
         self.background_apply_commit_batch_queue_committed_batches = 0
+        self.background_apply_commit_batch_queue_prefinalized_batches = 0
         self.apply_commit_ready_hits = 0
         self.apply_commit_ready_stores = 0
         self.apply_commit_ready_pruned = 0
@@ -383,12 +384,11 @@ class HybridMoE(nn.Module):
             apply_queue_enqueued = 0
             prev_background_apply_commit_queue_enqueued = self.background_apply_commit_queue_enqueued
             prev_background_apply_commit_batch_queue_enqueued = self.background_apply_commit_batch_queue_enqueued
+            prev_background_apply_commit_batch_queue_prefinalized = (
+                self.background_apply_commit_batch_queue_prefinalized_batches
+            )
             if phase == "decode":
-                preexisting_apply_commit_batch_ids = {
-                    int(op.expert_idx)
-                    for batch_entries in self.apply_commit_batch_queue.values()
-                    for op, _resolved in batch_entries
-                }
+                preexisting_apply_commit_batch_keys = set(self.apply_commit_batch_queue.keys())
                 warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
                 activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
                 apply_queue_enqueued = self._enqueue_activated_apply_candidates(phase=phase)
@@ -415,9 +415,14 @@ class HybridMoE(nn.Module):
                     max_commits=self._adaptive_apply_commit_limit(background=True),
                     background=True,
                 )
+                self.background_apply_commit_batch_queue_prefinalized_batches += sum(
+                    1
+                    for batch_key in self.apply_commit_batch_queue.keys()
+                    if batch_key not in preexisting_apply_commit_batch_keys
+                )
                 activation_applied = self._background_apply_activated_experts(
                     phase=phase,
-                    eligible_expert_ids=preexisting_apply_commit_batch_ids,
+                    eligible_batch_keys=preexisting_apply_commit_batch_keys,
                 )
             return {
                 "ready_polled": int(ready_polled),
@@ -430,6 +435,10 @@ class HybridMoE(nn.Module):
                 ),
                 "apply_commit_batch_queue_enqueued": int(
                     self.background_apply_commit_batch_queue_enqueued - prev_background_apply_commit_batch_queue_enqueued
+                ),
+                "apply_commit_batch_queue_prefinalized": int(
+                    self.background_apply_commit_batch_queue_prefinalized_batches
+                    - prev_background_apply_commit_batch_queue_prefinalized
                 ),
             }
 
@@ -1572,6 +1581,7 @@ class HybridMoE(nn.Module):
         phase: str,
         active_experts: Optional[set[int]] = None,
         eligible_expert_ids: Optional[set[int]] = None,
+        eligible_batch_keys: Optional[set[str]] = None,
         max_commits: Optional[int] = None,
         max_batch_commits: Optional[int] = None,
         allow_eviction: bool,
@@ -1618,6 +1628,8 @@ class HybridMoE(nn.Module):
         )
         ready_batches: list[tuple[str, list[tuple[object, dict[str, object]]]]] = []
         for batch_key, batch_entries in self.apply_commit_batch_queue.items():
+            if eligible_batch_keys is not None and batch_key not in eligible_batch_keys:
+                continue
             filtered_batch: list[tuple[object, dict[str, object]]] = []
             for op, resolved in batch_entries:
                 expert_idx = int(op.expert_idx)
@@ -1731,6 +1743,7 @@ class HybridMoE(nn.Module):
         *,
         phase: str,
         eligible_expert_ids: Optional[set[int]] = None,
+        eligible_batch_keys: Optional[set[str]] = None,
     ) -> int:
         if (
             phase != "decode"
@@ -1745,6 +1758,7 @@ class HybridMoE(nn.Module):
             dtype=torch.float32,
             phase=phase,
             eligible_expert_ids=eligible_expert_ids,
+            eligible_batch_keys=eligible_batch_keys,
             max_commits=self._adaptive_apply_commit_limit(background=True),
             max_batch_commits=self._adaptive_apply_commit_batch_limit(background=True),
             allow_eviction=False,
@@ -2727,6 +2741,7 @@ class HybridMoE(nn.Module):
             "background_apply_commit_queue_enqueued": self.background_apply_commit_queue_enqueued,
             "background_apply_commit_batch_queue_enqueued": self.background_apply_commit_batch_queue_enqueued,
             "background_apply_commit_batch_queue_committed_batches": self.background_apply_commit_batch_queue_committed_batches,
+            "background_apply_commit_batch_queue_prefinalized_batches": self.background_apply_commit_batch_queue_prefinalized_batches,
             "background_apply_commit_batches": self.background_apply_commit_batches,
             "background_apply_commit_experts": self.background_apply_commit_experts,
             "materialization_manager": self.materialization_manager.diagnostics(),

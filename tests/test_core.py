@@ -3234,6 +3234,8 @@ class TestDynamicScheduler:
         assert stats["activation_applied"] == 0
         assert diagnostics["background_apply_queue_enqueued"] == 1
         assert diagnostics["background_apply_commit_queue_enqueued"] == 1
+        assert stats["apply_commit_batch_queue_prefinalized"] == 1
+        assert diagnostics["background_apply_commit_batch_queue_prefinalized_batches"] == 1
         assert diagnostics["apply_queue_enqueued"] == 1
         assert diagnostics["apply_queue_committed"] == 0
         assert diagnostics["apply_queue_size"] == 1
@@ -5440,6 +5442,8 @@ class TestDynamicScheduler:
         assert diagnostics["background_apply_commit_resolved"] == 1
         assert diagnostics["apply_commit_ready_stores"] == 1
         assert diagnostics["apply_commit_ready_hits"] == 0
+        assert stats["apply_commit_batch_queue_prefinalized"] == 1
+        assert diagnostics["background_apply_commit_batch_queue_prefinalized_batches"] == 1
 
     def test_warm_cache_eviction_downgrades_lifecycle_to_ready(self, tmp_path):
         from safetensors.torch import save_file

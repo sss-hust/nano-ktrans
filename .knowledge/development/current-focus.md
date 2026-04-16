@@ -18,6 +18,7 @@ updated: 2026-04-17 21:35
 updated: 2026-04-17 22:20
 updated: 2026-04-17 22:45
 updated: 2026-04-17 23:05
+updated: 2026-04-17 23:25
 updated: 2026-04-17 03:38
 updated: 2026-04-17 03:50
 updated: 2026-04-17 03:53
@@ -149,6 +150,8 @@ updated: 2026-04-17 03:53
 - [x] resident commit 现已拆分 staged resolve 与 final batch commit 的独立自适应预算，`apply_commit_batch_queue -> resident set` 拥有单独的 batch-limit 控制面
 - [x] `apply_commit_batch_queue` 现已从逐 expert staged buffer 收敛成按 batch 组织的 commit buffer，resident commit 的最后一段开始以 batch 作为一等调度对象
 - [x] resident commit 现已支持分离的 staged-queue budget 与 final batch-queue budget，后台/前台都能按 batch 粒度推进 commit buffer
+- [x] resident commit 的 background 路径现已显式区分 `batch queue enqueue` 与 `batch prefinalize`，后台 worker 对最终 commit buffer 的推进开始可单独量化
+- [x] resident commit 的 background 路径现在只会消费 tick 开始前已存在的 `apply_commit_batch_queue` batch，后台 enqueue 与 final commit prefinalize 已显式分离，避免同一 tick 内新入队 batch 被立即提交
 
 ## 阻塞项
 
@@ -229,6 +232,8 @@ updated: 2026-04-17 03:53
 - 当前 resident commit 已拆出独立 batch-limit，但后台 worker 仍主要负责 staged batch 准备，`apply_commit_batch_queue -> resident set` 还没有变成真正后台 batch commit worker
 - 当前 `apply_commit_batch_queue` 已经是 batch 级 commit buffer，但后台 worker 还没有直接消费 batch buffer 做真正后台 batch commit，前台仍承担最后的 finalize
 - 当前 resident commit 虽已进入 batch 粒度控制，但后台 worker 仍主要推进 batch buffer staging，真正的后台 batch commit worker 仍未形成
+- 当前后台 worker 已能量化 batch buffer prefinalize，但真正的 resident set commit 仍未下沉成后台 batch commit worker，前台仍承担最终 finalize
+- 当前后台 worker 虽已把 `batch queue enqueue` 与 `batch prefinalize` 拆开，但真正的 resident set final commit 仍未成为独立后台 batch commit worker，前台 decode 仍负责最后 finalize
 - 当前 promotion batch 虽然已先统一 resolve source/module，再进入 apply，但 resident set 注入仍是 batch 内逐 expert 提交，不是真正底层 batched apply
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总
 - 当前 prebuild 已做候选裁剪，但 warm cache 还没有独立的“低优先级淘汰”策略，仍然主要依赖容量上限和 LRU
