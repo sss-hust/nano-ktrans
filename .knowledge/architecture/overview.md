@@ -632,6 +632,11 @@ tags: [architecture]
     - `_adaptive_apply_commit_limit()` 负责 `apply_commit_queue` 的 staged resolve / staging
     - `_adaptive_apply_commit_batch_limit()` 负责 `apply_commit_batch_queue -> resident set` 的 final batch commit
     这让后半段 resident commit 从“单一 staged commit 预算”推进成了“staged resolve 与 final commit 分离控制”的结构，更接近真正的后台 batch commit worker。
+92. `apply_commit_batch_queue` 现在已经按 batch 而不是按 expert 存储 staged commit：
+    - stage 阶段直接把 hot ready entries 组装成 batch
+    - resident commit 消费 batch entries 做模块提交
+    - 后续 finalize 再逐 expert 写回 residency / lifecycle
+    这意味着 resident commit 的最后一段已经不再是“逐 expert 的 staged buffer”，而是“batch commit buffer + per-expert finalize”的结构。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

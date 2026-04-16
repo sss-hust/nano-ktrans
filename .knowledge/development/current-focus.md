@@ -16,6 +16,7 @@ updated: 2026-04-17 20:00
 updated: 2026-04-17 21:05
 updated: 2026-04-17 21:35
 updated: 2026-04-17 22:20
+updated: 2026-04-17 22:45
 updated: 2026-04-17 03:38
 updated: 2026-04-17 03:50
 updated: 2026-04-17 03:53
@@ -145,6 +146,7 @@ updated: 2026-04-17 03:53
 - [x] background pipeline 现已允许“同一 tick 内新入队的 apply candidate 进入 apply commit queue 并完成 ready resolve”，但 resident set commit 仍只消费 tick 开始前已存在的 staged commit 候选，后台 enqueue / resolve / commit 边界更清晰
 - [x] `_apply_promotion_batch()` 现已先批量将 ready-entry 中的 module 提交到 `gpu_experts` / `gpu_experts_mask`，再统一写回 residency 与 lifecycle，resident commit 的最后一段开始具备真正的 per-layer batch commit 语义
 - [x] resident commit 现已拆分 staged resolve 与 final batch commit 的独立自适应预算，`apply_commit_batch_queue -> resident set` 拥有单独的 batch-limit 控制面
+- [x] `apply_commit_batch_queue` 现已从逐 expert staged buffer 收敛成按 batch 组织的 commit buffer，resident commit 的最后一段开始以 batch 作为一等调度对象
 
 ## 阻塞项
 
@@ -223,6 +225,7 @@ updated: 2026-04-17 03:53
 - 当前 apply queue commit 已有独立 batch 指标和 adaptive commit limit，但 resident 注入本身仍是 batch 内逐 expert 提交；下一步仍要继续压成真正底层 batched resident commit
 - 当前虽然已有 `HybridMoE` 级 pipeline 锁，但锁粒度仍偏粗；background apply 还只是“线程安全地 opportunistic apply”，不是独立 commit queue，也还没有真正 batched resident commit
 - 当前 resident commit 已拆出独立 batch-limit，但后台 worker 仍主要负责 staged batch 准备，`apply_commit_batch_queue -> resident set` 还没有变成真正后台 batch commit worker
+- 当前 `apply_commit_batch_queue` 已经是 batch 级 commit buffer，但后台 worker 还没有直接消费 batch buffer 做真正后台 batch commit，前台仍承担最后的 finalize
 - 当前 promotion batch 虽然已先统一 resolve source/module，再进入 apply，但 resident set 注入仍是 batch 内逐 expert 提交，不是真正底层 batched apply
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总
 - 当前 prebuild 已做候选裁剪，但 warm cache 还没有独立的“低优先级淘汰”策略，仍然主要依赖容量上限和 LRU
