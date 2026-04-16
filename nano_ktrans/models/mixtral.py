@@ -266,6 +266,7 @@ class MixtralModel(nn.Module):
             self.offload_worker = BackgroundOffloadWorker(
                 lambda: int(self.background_tick_offload_state(phase="decode")),
                 poll_interval_seconds=self.background_offload_poll_interval_seconds,
+                auto_start=False,
             )
 
     def refresh_offload_state(self, *, phase: str = "decode") -> int:

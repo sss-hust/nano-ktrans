@@ -1965,6 +1965,29 @@ class TestDynamicScheduler:
         assert called["start"] == 1
         assert called["stop"] == 1
 
+    def test_mixtral_model_background_worker_is_not_running_by_default(self):
+        from nano_ktrans.models.mixtral import MixtralConfig, MixtralModel
+
+        config = MixtralConfig(
+            vocab_size=32,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            num_local_experts=0,
+        )
+        model = MixtralModel(
+            config,
+            [torch.zeros(0, dtype=torch.bool)],
+            enable_background_offload_worker=True,
+        )
+        try:
+            assert model.offload_worker is not None
+            assert model.offload_worker_running() is False
+        finally:
+            model.shutdown_offload_worker()
+
     def test_scheduler_summary_reports_background_offload_tick_metrics(self):
         from nano_ktrans.scheduler.diagnostics import summarize_offload_diagnostics
 

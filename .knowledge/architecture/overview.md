@@ -495,6 +495,11 @@ tags: [architecture]
     - `LLM.generate()` 在生成前启动 worker，在 `finally` 中停止并清理
     - 因此后台推进不再只是“模型里有个可选线程对象”，而是正式进入端到端 decode 路径
     这一步的意义是把后台 worker 从纯骨架推进成了真正会参与运行的 runtime 组件，为后续继续把 `READY -> WARMED/ACTIVATED` 甚至部分 apply 从前台主路径挪走打下基础。
+80. background worker 现在默认显式启动：
+    - `MixtralModel` 构造时只创建 worker 对象，不自动起线程
+    - 真正进入生成路径时，再由 `SimpleEngine/LLM` 显式启动
+    - 生成结束后立即停止
+    这使后台迁移执行器的生命周期边界更清晰，也避免了“模型一构造就常驻后台线程”的隐式资源占用。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

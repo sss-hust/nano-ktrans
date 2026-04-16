@@ -233,6 +233,11 @@ tags: [changelog]
 - `LLM.generate()` 现在会在生成前启动 background offload worker，并在 `finally` 中停止 worker 与执行 shutdown，后台推进首次接入真实生成路径。
 - `MixtralModel` 新增 `start_offload_worker()` / `offload_worker_running()`，后台 worker 从“模型里可选对象”进一步收敛成了正式 runtime 组件。
 
+<!-- updated: 2026-04-17 14:05 -->
+
+- `MixtralModel` 中的 background offload worker 现在默认 `auto_start=False`，模型构造时不再隐式起线程。
+- worker 生命周期已明确改成“构造对象 -> 生成前显式启动 -> 生成后停止”，避免后台线程在未进入 decode 路径前就提前占用资源。
+
 ## 2026-04-16
 
 - <!-- updated: 2026-04-16 00:40 --> **[migration-pipeline-runtime]** 新增 `MigrationPipelineRuntime`，将 token-step 级 offload refresh 提升为最小流水线运行时；ready prefetch 轮询与 ready promotion 现在可在进入模型前统一推进，不再依赖层内 forward 临时收敛。
