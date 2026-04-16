@@ -321,6 +321,11 @@ class HybridMoE(nn.Module):
             )
         return int(callback_ready) + len(ready_keys)
 
+    def background_tick_offload_state(self) -> int:
+        if self.offload_backend is None:
+            return 0
+        return int(self.materialization_manager.drain_ready_callbacks())
+
     def _insert_warm_module(self, expert_idx: int, module: nn.Module) -> None:
         expert_key = str(expert_idx)
         self.warm_expert_cache[expert_key] = module.to(device="cpu")

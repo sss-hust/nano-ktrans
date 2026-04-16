@@ -463,6 +463,11 @@ tags: [architecture]
     - 这样 materialization 后台线程可以直接推进 `READY`
     - 同时不会和前台 token-step pipeline 的 `peek + selective consume` 语义互相踩状态
     这还不是完整后台 migration worker，但已经让 migration lifecycle 从“默认前台单线程结构”转成了“允许后台事件进入的线程安全结构”。
+74. token-step runtime 现在又拆出了一条更轻的 background offload tick：
+    - 每次真正执行主 refresh/advance 之前，会先单独推进一轮后台 ready callback
+    - background tick 只负责消费后台 ready 事件，不负责完整的 pipeline apply
+    - 主 refresh 仍负责 `READY -> WARMED/ACTIVATED/APPLIED`
+    这让系统从“所有 offload 推进都挤在一个 refresh hook”进一步演进成了“背景事件推进 + 主流水线推进”两段式结构，虽然都还是 token-step 触发，但边界已经接近以后引入独立 migration worker 的形态。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

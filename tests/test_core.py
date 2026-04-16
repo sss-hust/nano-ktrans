@@ -1737,6 +1737,11 @@ class TestDynamicScheduler:
             def __init__(self, ready_count):
                 self.ready_count = ready_count
                 self.advanced = []
+                self.background_ticks = 0
+
+            def background_tick_offload_state(self):
+                self.background_ticks += 1
+                return self.ready_count
 
             def advance_offload_pipeline(self, *, phase, device, dtype):
                 self.advanced.append((phase, str(device), str(dtype)))
@@ -1761,6 +1766,7 @@ class TestDynamicScheduler:
         assert model.refresh_offload_state(phase="decode") == 5
         diagnostics = model.offload_refresh_diagnostics()
         assert diagnostics["offload_refresh_calls"] == 1
+        assert diagnostics["offload_background_ticks"] == 0
         assert diagnostics["offload_refresh_ready_total"] == 5
         assert diagnostics["offload_pipeline_prefetch_submitted_total"] == 4
         assert diagnostics["offload_pipeline_activation_ready_total"] == 2
@@ -1768,6 +1774,46 @@ class TestDynamicScheduler:
         assert diagnostics["offload_pipeline_last_phase"] == "decode"
         assert layer0.hybrid_moe.advanced[0][0] == "decode"
         assert layer2.hybrid_moe.advanced[0][0] == "decode"
+
+    def test_mixtral_model_background_tick_runs_before_refresh(self):
+        from nano_ktrans.models.mixtral import MixtralModel
+
+        class DummyHybrid:
+            def __init__(self):
+                self.background_ticks = 0
+                self.refresh_calls = 0
+
+            def background_tick_offload_state(self):
+                self.background_ticks += 1
+                return 2
+
+            def advance_offload_pipeline(self, *, phase, device, dtype):
+                self.refresh_calls += 1
+                return {
+                    "prefetch_submitted": 0,
+                    "ready_polled": 1,
+                    "activation_ready": 0,
+                    "ready_applied": 0,
+                    "ready_deferred": 0,
+                    "apply_batch_count": 0,
+                    "apply_batch_experts": 0,
+                    "apply_batch_evictions": 0,
+                    "apply_batch_activated": 0,
+                    "apply_batch_warm": 0,
+                    "apply_batch_cold": 0,
+                }
+
+        model = MixtralModel.__new__(MixtralModel)
+        layer = type("Layer", (), {"hybrid_moe": DummyHybrid()})()
+        linear = torch.nn.Linear(2, 2, bias=False).to(dtype=torch.float32)
+        layer.parameters = linear.parameters
+        model.layers = [layer]
+
+        assert model.background_tick_offload_state(phase="decode") == 2
+        assert model.refresh_offload_state(phase="decode") == 1
+        diagnostics = model.offload_refresh_diagnostics()
+        assert diagnostics["offload_background_ticks"] == 1
+        assert diagnostics["offload_pipeline_background_ready_callback_total"] == 2
 
     def test_materialization_manager_poll_ready(self, tmp_path):
         from safetensors.torch import save_file

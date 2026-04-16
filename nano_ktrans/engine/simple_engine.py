@@ -43,6 +43,9 @@ class SimpleEngine:
             self.v_caches.append(v_cache)
 
     def _refresh_offload_state(self, *, phase: str = "decode") -> int:
+        background_fn = getattr(self.model.model, "background_tick_offload_state", None)
+        if background_fn is not None:
+            background_fn(phase=phase)
         refresh_fn = getattr(self.model.model, "refresh_offload_state", None)
         if refresh_fn is None:
             return 0
