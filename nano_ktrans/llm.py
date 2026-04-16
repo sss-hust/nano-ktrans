@@ -288,6 +288,7 @@ class LLM:
             runtime.background_warm_prebuilt_total = 0
             runtime.background_activation_ready_total = 0
             runtime.background_activation_applied_total = 0
+            runtime.background_apply_queue_enqueued_total = 0
             runtime.ready_polled_total = 0
             runtime.activation_ready_total = 0
             runtime.ready_applied_total = 0
@@ -351,6 +352,10 @@ class LLM:
             hybrid_moe.activation_ready = 0
             hybrid_moe.activation_applied = 0
             hybrid_moe.background_activation_applied = 0
+            hybrid_moe.apply_queue_enqueued = 0
+            hybrid_moe.apply_queue_committed = 0
+            hybrid_moe.apply_queue_pruned = 0
+            hybrid_moe.background_apply_queue_enqueued = 0
 
     def shutdown(self) -> None:
         shutdown_fn = getattr(self.model.model, "shutdown_offload_worker", None)

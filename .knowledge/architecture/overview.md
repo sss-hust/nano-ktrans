@@ -244,6 +244,11 @@ tags: [architecture]
     - 现在改为优先按 `pipeline_ticks` 归一，更接近“每步平均回退压力”
     - 这样在长 decode 运行中，controller 读到的是更稳定的 step-level 压力，而不是单纯随时间累计放大的总量
     这为后续把 controller 从静态 heuristic 推进到真正的滑动窗口或 EMA 反馈打下了基础。
+46. 当前后台 worker 的后半段路径也开始显式化：
+    - `ACTIVATED` expert 现在会先进入 `apply_candidate_queue`
+    - background pipeline 负责 `activated -> apply queue enqueue`
+    - resident commit 再由前台/后台从 apply queue 消费
+    这让系统从“看到 ACTIVATED 就 opportunistic apply”推进成“显式 staged commit”的结构，更接近后续真正的 apply queue / batched resident commit。
 44. 当前 prepared pressure 已进一步拆成三类信号：
     - `prepared_cache_rebalance_pressure`：累计平均压力，反映长期拥塞
     - `prepared_cache_rebalance_pressure_step`：本步压力，反映瞬时抖动

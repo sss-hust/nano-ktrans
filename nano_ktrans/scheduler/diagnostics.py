@@ -129,6 +129,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "offload_background_activation_applied_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_background_activation_applied_total", 0)
         ),
+        "offload_background_apply_queue_enqueued_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_background_apply_queue_enqueued_total", 0)
+        ),
         "offload_refresh_ready_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_refresh_ready_total", 0)
         ),
@@ -199,6 +202,11 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "activation_submitted": 0,
         "activation_ready": 0,
         "activation_applied": 0,
+        "apply_queue_size": 0,
+        "apply_queue_enqueued": 0,
+        "apply_queue_committed": 0,
+        "apply_queue_pruned": 0,
+        "background_apply_queue_enqueued": 0,
         "activated_cache_hits": 0,
         "activated_cache_stores": 0,
         "activated_cache_evictions": 0,
@@ -294,6 +302,11 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["activation_submitted"] += int(layer.get("activation_submitted", 0))
         summary["activation_ready"] += int(layer.get("activation_ready", 0))
         summary["activation_applied"] += int(layer.get("activation_applied", 0))
+        summary["apply_queue_size"] += int(layer.get("apply_queue_size", 0))
+        summary["apply_queue_enqueued"] += int(layer.get("apply_queue_enqueued", 0))
+        summary["apply_queue_committed"] += int(layer.get("apply_queue_committed", 0))
+        summary["apply_queue_pruned"] += int(layer.get("apply_queue_pruned", 0))
+        summary["background_apply_queue_enqueued"] += int(layer.get("background_apply_queue_enqueued", 0))
         summary["activated_cache_hits"] += int(layer.get("activated_cache_hits", 0))
         summary["activated_cache_stores"] += int(layer.get("activated_cache_stores", 0))
         summary["activated_cache_evictions"] += int(layer.get("activated_cache_evictions", 0))

@@ -3108,6 +3108,105 @@ class TestDynamicScheduler:
         assert diagnostics["pipeline_apply_batch_activated"] == 1
         assert diagnostics["pipeline_apply_batch_warm"] == 0
         assert diagnostics["pipeline_apply_batch_cold"] == 0
+        assert diagnostics["apply_queue_enqueued"] == 1
+        assert diagnostics["apply_queue_committed"] == 1
+        assert diagnostics["background_apply_queue_enqueued"] == 0
+
+    def test_hybrid_moe_background_pipeline_enqueues_apply_candidates(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=2,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=2,
+        ).to(dtype=torch.float32)
+
+        hybrid.offload_backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=1,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="background_apply_queue",
+                )
+            ],
+            phase="decode",
+        )
+        hybrid.materialization_manager.stage_expert(
+            0,
+            1,
+            {
+                "gate": torch.randn(8, 4),
+                "up": torch.randn(8, 4),
+                "down": torch.randn(4, 8),
+            },
+        )
+        hybrid.offload_backend.migration_manager.mark_state(
+            0,
+            1,
+            state=MigrationLifecycle.READY,
+            phase="decode",
+        )
+
+        stats = hybrid.background_advance_offload_pipeline(
+            phase="decode",
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        diagnostics = hybrid.diagnostics()
+
+        assert stats["apply_queue_enqueued"] == 1
+        assert stats["activation_applied"] == 1
+        assert diagnostics["background_apply_queue_enqueued"] == 1
+        assert diagnostics["apply_queue_enqueued"] == 1
+        assert diagnostics["apply_queue_committed"] == 1
+        assert diagnostics["apply_queue_size"] == 0
 
     def test_hybrid_moe_promotion_prefers_activated_cache(self, tmp_path):
         from safetensors.torch import save_file

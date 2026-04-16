@@ -7,6 +7,15 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-17 01:53 --> **[apply-queue]** `HybridMoE` 新增显式 `apply_candidate_queue`，将 `ACTIVATED` expert 的 resident commit 从 opportunistic background apply 收敛为 staged commit 路径；background pipeline 现先执行 `ACTIVATED -> apply queue enqueue`，再由前台/后台从 apply queue 提交到 GPU resident set。
+- <!-- updated: 2026-04-17 01:53 --> **[apply-queue-metrics]** 新增诊断：
+  - `apply_queue_size`
+  - `apply_queue_enqueued`
+  - `apply_queue_committed`
+  - `apply_queue_pruned`
+  - `background_apply_queue_enqueued`
+  以及 runtime 级 `offload_background_apply_queue_enqueued_total`，可以单独量化后台将激活 expert 推入 apply queue 的工作量。
+
 - <!-- updated: 2026-04-17 15:18 --> **[pipeline-lock]** `HybridMoE` 新增内部 `RLock`，background worker 与前台 `refresh/advance/forward/diagnostics` 对 prepared-tier cache、migration lifecycle 和 resident set 的共享状态访问开始串行化，降低后台推进接入真实生成后出现竞态的风险。
 - <!-- updated: 2026-04-17 15:18 --> **[tests]** 并发边界收口后重新回归 `tests/test_core.py + tests/test_pim_runtime.py`，当前为 `111 passed, 1 warning`。
 - <!-- updated: 2026-04-17 15:05 --> **[background-apply-metrics]** background offload runtime 现已显式累计 `offload_background_work_items_total` 与 `offload_background_activation_applied_total`；`MixtralModel.background_tick_offload_state()` 返回值也已从“ready callback 数”扩展为“后台 tick 总 work items”。

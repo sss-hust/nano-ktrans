@@ -144,6 +144,7 @@ class HybridMoE(nn.Module):
         self._pipeline_lock = RLock()
         self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
+        self.apply_candidate_queue: "OrderedDict[str, object]" = OrderedDict()
         self.warm_cache_hits = 0
         self.warm_cache_stores = 0
         self.warm_cache_evictions = 0
@@ -156,6 +157,10 @@ class HybridMoE(nn.Module):
         self.activation_ready = 0
         self.activation_applied = 0
         self.background_activation_applied = 0
+        self.apply_queue_enqueued = 0
+        self.apply_queue_committed = 0
+        self.apply_queue_pruned = 0
+        self.background_apply_queue_enqueued = 0
         self.materialization_manager = ExpertMaterializationManager(
             weight_path=weight_path,
             expert_key_template=self.expert_key_template,
@@ -343,15 +348,19 @@ class HybridMoE(nn.Module):
             warm_prebuilt = 0
             activation_ready = 0
             activation_applied = 0
+            apply_queue_enqueued = 0
             if phase == "decode":
                 warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
                 activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
+                apply_queue_enqueued = self._enqueue_activated_apply_candidates(phase=phase)
+                self.background_apply_queue_enqueued += apply_queue_enqueued
                 activation_applied = self._background_apply_activated_experts(phase=phase)
             return {
                 "ready_polled": int(ready_polled),
                 "warm_prebuilt": int(warm_prebuilt),
                 "activation_ready": int(activation_ready),
                 "activation_applied": int(activation_applied),
+                "apply_queue_enqueued": int(apply_queue_enqueued),
             }
 
     def _insert_warm_module(self, expert_idx: int, module: nn.Module) -> None:
@@ -895,6 +904,126 @@ class HybridMoE(nn.Module):
         self.activation_ready += activated
         return activated
 
+    def _enqueue_activated_apply_candidates(self, *, phase: str) -> int:
+        if phase != "decode" or self.offload_backend is None:
+            return 0
+
+        enqueued = 0
+        for op in self._coalesce_migration_ops(self.offload_backend.migration_manager.peek_layer(self.layer_idx)):
+            if op.dst != ExpertResidency.GPU:
+                continue
+            expert_idx = int(op.expert_idx)
+            expert_key = str(expert_idx)
+            if bool(self.gpu_experts_mask[expert_idx].item()):
+                self.apply_candidate_queue.pop(expert_key, None)
+                continue
+            lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+            if lifecycle != MigrationLifecycle.ACTIVATED:
+                continue
+            was_present = expert_key in self.apply_candidate_queue
+            self.apply_candidate_queue[expert_key] = op
+            self.apply_candidate_queue.move_to_end(expert_key)
+            if not was_present:
+                self.apply_queue_enqueued += 1
+                enqueued += 1
+        return enqueued
+
+    def _prune_apply_candidate_queue(self) -> int:
+        stale_keys: list[str] = []
+        for expert_key in list(self.apply_candidate_queue.keys()):
+            expert_idx = int(expert_key)
+            lifecycle = None
+            if self.offload_backend is not None:
+                lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+            if bool(self.gpu_experts_mask[expert_idx].item()) or lifecycle != MigrationLifecycle.ACTIVATED:
+                stale_keys.append(expert_key)
+
+        for expert_key in stale_keys:
+            self.apply_candidate_queue.pop(expert_key, None)
+        self.apply_queue_pruned += len(stale_keys)
+        return len(stale_keys)
+
+    def _commit_apply_candidate_queue(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        phase: str,
+        active_experts: Optional[set[int]] = None,
+        allow_eviction: bool,
+        count_batch: bool,
+    ) -> tuple[int, int]:
+        if (
+            phase != "decode"
+            or self.offload_backend is None
+            or self.dynamic_expert_scheduler is None
+            or not self.dynamic_expert_scheduler.enabled
+        ):
+            return 0, 0
+
+        self._prune_apply_candidate_queue()
+        if not self.apply_candidate_queue:
+            return 0, 0
+
+        active_experts = active_experts or set()
+        max_promotions = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+        candidate_ops = list(self.apply_candidate_queue.values())
+        candidate_ops.sort(key=lambda op: self._promotion_sort_key(op, active_experts, phase))
+
+        if count_batch:
+            selected_ops, deferred = self._select_ready_promotion_batch(
+                candidate_ops,
+                max_promotions=max_promotions,
+            )
+        else:
+            selected_ops = candidate_ops[:max_promotions]
+            deferred = max(0, len(candidate_ops) - len(selected_ops))
+
+        if not selected_ops:
+            return 0, deferred
+
+        gpu_budget = self._runtime_gpu_budget()
+        current_gpu_residents = int(self.gpu_experts_mask.bool().sum().item())
+        free_slots = max(0, gpu_budget - current_gpu_residents)
+
+        if allow_eviction and gpu_budget > 0 and len(selected_ops) > free_slots:
+            protected_experts = set(active_experts)
+            protected_experts.update(int(op.expert_idx) for op in selected_ops)
+            required_slots = max(0, len(selected_ops) - free_slots)
+            evicted = self._evict_for_promotion_batch(
+                protected_experts=protected_experts,
+                fallback_dst=self.dynamic_expert_scheduler.config.offload_tier,
+                required_slots=required_slots,
+                phase=phase,
+            )
+            promotable = min(len(selected_ops), free_slots + evicted)
+        else:
+            promotable = min(len(selected_ops), free_slots)
+
+        deferred += max(0, len(selected_ops) - promotable)
+        selected_ops = selected_ops[:promotable]
+        if not selected_ops:
+            return 0, deferred
+
+        applied, completed_expert_ids, _source_counts = self._apply_promotion_batch(
+            selected_ops,
+            device=device,
+            dtype=dtype,
+            phase=phase,
+        )
+        if completed_expert_ids:
+            for expert_idx in completed_expert_ids:
+                self.apply_candidate_queue.pop(str(expert_idx), None)
+            self.offload_backend.migration_manager.take_layer(
+                self.layer_idx,
+                lambda op: (
+                    op.dst == ExpertResidency.GPU
+                    and int(op.expert_idx) in completed_expert_ids
+                ),
+            )
+        self.apply_queue_committed += applied
+        return applied, deferred
+
     def _background_apply_activated_experts(self, *, phase: str) -> int:
         if (
             phase != "decode"
@@ -904,51 +1033,13 @@ class HybridMoE(nn.Module):
         ):
             return 0
 
-        queued_ops = self.offload_backend.migration_manager.peek_layer(self.layer_idx)
-        if not queued_ops:
-            return 0
-
-        gpu_budget = self._runtime_gpu_budget()
-        if gpu_budget <= 0:
-            return 0
-
-        promotion_ops = []
-        for op in self._coalesce_migration_ops(queued_ops):
-            if op.dst != ExpertResidency.GPU:
-                continue
-            expert_idx = int(op.expert_idx)
-            if bool(self.gpu_experts_mask[expert_idx].item()):
-                continue
-            lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
-            if lifecycle != MigrationLifecycle.ACTIVATED:
-                continue
-            promotion_ops.append(op)
-
-        if not promotion_ops:
-            return 0
-
-        batch_budget = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
-        free_slots = max(0, gpu_budget - int(self.gpu_experts_mask.bool().sum().item()))
-        if free_slots <= 0:
-            return 0
-        promotion_ops = promotion_ops[: min(batch_budget, free_slots)]
-        if not promotion_ops:
-            return 0
-
-        applied, completed_expert_ids, _source_counts = self._apply_promotion_batch(
-            promotion_ops,
+        applied, _deferred = self._commit_apply_candidate_queue(
             device=torch.device("cpu"),
             dtype=torch.float32,
             phase=phase,
+            allow_eviction=False,
+            count_batch=False,
         )
-        if completed_expert_ids:
-            self.offload_backend.migration_manager.take_layer(
-                self.layer_idx,
-                lambda op: (
-                    op.dst == ExpertResidency.GPU
-                    and int(op.expert_idx) in completed_expert_ids
-                ),
-            )
         if applied:
             self.background_activation_applied += applied
             self._synchronize_gpu_mask()
@@ -1004,19 +1095,40 @@ class HybridMoE(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
         phase: str,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         if (
             self.offload_backend is None
             or self.dynamic_expert_scheduler is None
             or not self.dynamic_expert_scheduler.enabled
             or phase != "decode"
         ):
-            return 0, 0
+            return 0, 0, 0
 
+        apply_queue_enqueued = self._enqueue_activated_apply_candidates(phase=phase)
         max_promotions = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+        applied_from_queue, deferred_from_queue = self._commit_apply_candidate_queue(
+            device=device,
+            dtype=dtype,
+            phase=phase,
+            allow_eviction=True,
+            count_batch=True,
+        )
+        remaining_promotions = max(0, max_promotions - applied_from_queue)
         queued_ops = self.offload_backend.migration_manager.peek_layer(self.layer_idx)
         if not queued_ops:
-            return 0, 0
+            return applied_from_queue, deferred_from_queue, apply_queue_enqueued
+        if remaining_promotions <= 0:
+            deferred_ready = 0
+            for op in self._coalesce_migration_ops(queued_ops):
+                if op.dst != ExpertResidency.GPU:
+                    continue
+                expert_idx = int(op.expert_idx)
+                if bool(self.gpu_experts_mask[expert_idx].item()):
+                    continue
+                lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, expert_idx)
+                if lifecycle in {MigrationLifecycle.READY, MigrationLifecycle.WARMED}:
+                    deferred_ready += 1
+            return applied_from_queue, deferred_from_queue + deferred_ready, apply_queue_enqueued
 
         queued_ops = self._coalesce_migration_ops(queued_ops)
         promotion_ops = []
@@ -1024,29 +1136,30 @@ class HybridMoE(nn.Module):
             if op.dst != ExpertResidency.GPU:
                 continue
             lifecycle = self.offload_backend.migration_manager.state_for(self.layer_idx, int(op.expert_idx))
+            if lifecycle == MigrationLifecycle.ACTIVATED:
+                continue
             if lifecycle not in {
                 MigrationLifecycle.READY,
                 MigrationLifecycle.WARMED,
-                MigrationLifecycle.ACTIVATED,
             }:
                 continue
             promotion_ops.append(op)
         if not promotion_ops:
-            return 0, 0
+            return applied_from_queue, deferred_from_queue, apply_queue_enqueued
 
         promotion_ops.sort(key=lambda op: self._promotion_sort_key(op, set(), phase))
         promotion_ops, deferred = self._select_ready_promotion_batch(
             promotion_ops,
-            max_promotions=max_promotions,
+            max_promotions=remaining_promotions,
         )
         if not promotion_ops:
-            return 0, deferred
+            return applied_from_queue, deferred + deferred_from_queue, apply_queue_enqueued
         gpu_budget = self._runtime_gpu_budget()
         protected_experts = {int(op.expert_idx) for op in promotion_ops}
         resident_ops = [op for op in promotion_ops if bool(self.gpu_experts_mask[int(op.expert_idx)].item())]
         pending_ops = [op for op in promotion_ops if not bool(self.gpu_experts_mask[int(op.expert_idx)].item())]
 
-        applied = 0
+        applied = applied_from_queue
         completed_expert_ids: set[int] = set()
         for op in resident_ops:
             expert_idx = int(op.expert_idx)
@@ -1091,14 +1204,14 @@ class HybridMoE(nn.Module):
             self._synchronize_gpu_mask()
         if completed_expert_ids:
             self.offload_backend.migration_manager.take_layer(
-                self.layer_idx,
-                lambda op: (
-                    op.dst == ExpertResidency.GPU
-                    and int(op.expert_idx) in completed_expert_ids
-                ),
-            )
+                    self.layer_idx,
+                    lambda op: (
+                        op.dst == ExpertResidency.GPU
+                        and int(op.expert_idx) in completed_expert_ids
+                    ),
+                )
         self.applied_migration_history = self.applied_migration_history[-64:]
-        return applied, deferred
+        return applied, deferred + deferred_from_queue, apply_queue_enqueued
 
     def advance_offload_pipeline(
         self,
@@ -1120,8 +1233,9 @@ class HybridMoE(nn.Module):
             activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
             ready_applied = 0
             ready_deferred = 0
+            apply_queue_enqueued = 0
             if phase == "decode":
-                ready_applied, ready_deferred = self._promote_ready_migrations(
+                ready_applied, ready_deferred, apply_queue_enqueued = self._promote_ready_migrations(
                     device=device,
                     dtype=dtype,
                     phase=phase,
@@ -1135,6 +1249,7 @@ class HybridMoE(nn.Module):
                 "ready_applied": int(ready_applied),
                 "ready_deferred": int(ready_deferred),
                 "prefetch_submitted": int(prefetch_submitted),
+                "apply_queue_enqueued": int(apply_queue_enqueued),
                 "warm_prebuilt": int(warm_prebuilt),
                 "activation_ready": int(activation_ready),
                 "apply_batch_count": int(self.pipeline_apply_batches - prev_apply_batches),
@@ -1808,11 +1923,16 @@ class HybridMoE(nn.Module):
             "activated_cache_evictions": self.activated_cache_evictions,
             "activated_cache_size": len(self.activated_expert_cache),
             "activation_submitted": self.activation_submitted,
-            "activation_ready": self.activation_ready,
-            "activation_applied": self.activation_applied,
-            "background_activation_applied": self.background_activation_applied,
-            "materialization_manager": self.materialization_manager.diagnostics(),
-            "layer_residency": layer_residency,
-            "pending_migrations": pending_migrations,
-            "backend": None if self.offload_backend is None else self.offload_backend.diagnostics(),
-        }
+                "activation_ready": self.activation_ready,
+                "activation_applied": self.activation_applied,
+                "background_activation_applied": self.background_activation_applied,
+                "apply_queue_size": len(self.apply_candidate_queue),
+                "apply_queue_enqueued": self.apply_queue_enqueued,
+                "apply_queue_committed": self.apply_queue_committed,
+                "apply_queue_pruned": self.apply_queue_pruned,
+                "background_apply_queue_enqueued": self.background_apply_queue_enqueued,
+                "materialization_manager": self.materialization_manager.diagnostics(),
+                "layer_residency": layer_residency,
+                "pending_migrations": pending_migrations,
+                "backend": None if self.offload_backend is None else self.offload_backend.diagnostics(),
+            }
