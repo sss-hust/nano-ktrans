@@ -148,6 +148,8 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "prefetch_candidate_scans": 0,
         "prefetch_polled_ready": 0,
         "prefetch_completion_events": 0,
+        "prefetch_background_resolved": 0,
+        "prefetch_background_failures": 0,
         "pipeline_ticks": 0,
         "pipeline_ready_applied": 0,
         "pipeline_ready_deferred": 0,
@@ -231,6 +233,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
         summary["prefetch_completion_events"] += int(
             (layer.get("materialization_manager") or {}).get("prefetch_completion_events", 0)
+        )
+        summary["prefetch_background_resolved"] += int(
+            (layer.get("materialization_manager") or {}).get("prefetch_background_resolved", 0)
+        )
+        summary["prefetch_background_failures"] += int(
+            (layer.get("materialization_manager") or {}).get("prefetch_background_failures", 0)
         )
         summary["pipeline_ticks"] += int(layer.get("pipeline_ticks", 0))
         summary["pipeline_ready_applied"] += int(layer.get("pipeline_ready_applied", 0))

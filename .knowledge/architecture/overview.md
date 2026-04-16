@@ -444,6 +444,15 @@ tags: [architecture]
     - `overlap_safe` 会给 controller 一个中等 aggressiveness，主要帮助 strict ready-only 场景减少 cold promotion
     - `eager` 会进一步提高 prepared-tier 推进力度，使 activation / prebuild / prefetch 都更积极
     这意味着 profile 不再只决定“预算多大”，也开始决定“预算用得有多激进”，prepared tier 已开始具备 profile-driven 控制语义，而不是仅靠运行时局部 heuristic 自行漂移。
+70. materialization 路径现在新增了一个真正的后台 resolve worker：
+    - prefetch future 完成后不再等前台 `poll_ready()` 去执行 `future.result()`
+    - 解析、取回张量和写入 staging cache 会在后台 resolver 线程完成
+    - 前台 refresh/poll 只需要消费轻量 ready 通知
+    这虽然还不是真正的后台 migration worker，但已经把 `prefetching -> ready` 路径上的重活从 decode 主路径上挪开了一部分。
+71. promotion batch 现在已经显式拆成两段：
+    - 第一段先统一 resolve 每个 expert 的来源：`activated / warm / cold`
+    - 第二段再统一 apply 到 GPU resident set
+    当前 resident 注入还不是底层真正 batched apply，但系统边界已经从“批量选目标、逐 expert 一边查来源一边 apply”推进到“batch resolve -> batch commit”的形态，这为后续把 `activated/warm -> resident set` 做成真正批处理提供了清晰接口。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

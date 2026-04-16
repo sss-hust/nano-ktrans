@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-16 09:08
+updated: 2026-04-17 11:40
 ---
 
 # 🔥 当前工作焦点
@@ -90,6 +90,8 @@ updated: 2026-04-16 09:08
 - [x] prepared-cache budget 现在已从 profile heuristic 打通到诊断输出，`scheduler_profile_summary` 和 `LLM.get_offload_diagnostics()` 都会显式暴露 `prepared_cache_budget(_heuristic)`，便于 profile sweep 对照“控制器动作”和“静态预算基线”
 - [x] prepared-cache budget heuristic 现在已开始随 scheduler profile 变化：`overlap_safe` 和 `eager` 会在 baseline 预算之上进一步抬高 prepared budget，为 strict ready-only 和更激进预热提供更稳定的 prepared tier
 - [x] scheduler profile 现在也开始显式控制 prepared-tier aggressiveness：`baseline / overlap_safe / eager` 会分别对应不同的 `prepared_controller_aggressiveness`，直接影响 activation/prebuild/prefetch 三段的推进力度
+- [x] materialization manager 已新增后台 resolve worker，`future.result() + cache store` 会在后台完成，前台 `poll_ready()` 基本只负责消费轻量 ready 通知
+- [x] promotion batch 已收口成“先 batch resolve source/module，再 batch apply resident set”的骨架，后续继续做真正 batched apply 时边界更清晰
 
 ## 阻塞项
 
@@ -150,6 +152,8 @@ updated: 2026-04-16 09:08
 - 当前 prepared tier 已开始同时感知 prepared-cache 压力和 cold-promotion 惩罚，但还没有把这些信号统一成稳定的多步 controller
 - 当前 runtime batch totals 已是按 tick 增量统计，但还没有接入真实宿主机 benchmark 结果做长期趋势归档
 - 当前 strict ready-only 语义已经覆盖 resident staging，但 `prefetching -> ready` 仍然依赖前台 refresh，而不是真 completion event 驱动
+- 当前 materialization ready 的重活已下沉到后台 resolver，但 migration lifecycle 的 `READY` 标记仍通过前台 refresh hook 对齐，尚未变成真正后台 migration worker
+- 当前 promotion batch 虽然已先统一 resolve source/module，再进入 apply，但 resident set 注入仍是 batch 内逐 expert 提交，不是真正底层 batched apply
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总
 - 当前 prebuild 已做候选裁剪，但 warm cache 还没有独立的“低优先级淘汰”策略，仍然主要依赖容量上限和 LRU
 - 当前已经能量化 promotion source，但 benchmark 还缺少跨 profile 的自动排名/对比表

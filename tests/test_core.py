@@ -1804,8 +1804,11 @@ class TestDynamicScheduler:
         assert (0, 1) in ready_keys
         assert diagnostics["prefetch_polled_ready"] >= 1
         assert diagnostics["prefetch_completion_events"] >= 1
+        assert diagnostics["background_resolver_enabled"] is True
+        assert diagnostics["prefetch_background_resolved"] >= 1
         assert manager.has_cached(0, 1) is True
         assert manager.has_pending_or_ready() is False
+        manager.shutdown()
 
     def test_materialization_manager_can_stage_resident_expert(self):
         from nano_ktrans.kernels.expert_materialization import ExpertMaterializationManager
@@ -1822,11 +1825,18 @@ class TestDynamicScheduler:
         manager._cache = OrderedDict()
         manager._futures = {}
         manager._ready_queue = deque()
+        from queue import Queue
+        from threading import Event
         manager._lock = Lock()
+        manager._resolve_queue = Queue()
+        manager._stop_event = Event()
+        manager._resolver_thread = None
         manager.prefetch_submitted = 0
         manager.prefetch_resolved = 0
         manager.prefetch_polled_ready = 0
         manager.prefetch_completion_events = 0
+        manager.prefetch_background_resolved = 0
+        manager.prefetch_background_failures = 0
         manager.resident_stage_hits = 0
         manager.cache_hits = 0
         manager.sync_loads = 0
@@ -1844,6 +1854,45 @@ class TestDynamicScheduler:
         assert staged is True
         assert manager.has_cached(0, 3) is True
         assert manager.diagnostics()["prefetch_resolved"] == 1
+
+    def test_materialization_manager_background_resolver_drains_front_path(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_materialization import ExpertMaterializationManager
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        save_file(
+            {
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+            },
+            str(weight_path / "model.safetensors"),
+        )
+
+        manager = ExpertMaterializationManager(
+            weight_path=str(weight_path),
+            expert_key_template="model.layers.{layer}.block_sparse_moe.experts.{expert}.{proj}.weight",
+            max_cached_experts=2,
+            prefetch_workers=1,
+        )
+        assert manager.prefetch(0, 1) is True
+
+        ready_keys = []
+        for _ in range(20):
+            if manager.has_cached(0, 1):
+                ready_keys = manager.poll_ready()
+                break
+            time.sleep(0.01)
+
+        diagnostics = manager.diagnostics()
+        assert ready_keys == [(0, 1)]
+        assert diagnostics["prefetch_background_resolved"] >= 1
+        assert diagnostics["prefetch_polled_ready"] >= 1
+        assert diagnostics["pending_prefetches"] == 0
+        assert manager.has_pending_or_ready() is False
+        manager.shutdown()
 
     def test_hybrid_moe_pipeline_applies_ready_promotions(self, tmp_path):
         from safetensors.torch import save_file

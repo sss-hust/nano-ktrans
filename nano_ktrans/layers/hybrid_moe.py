@@ -1085,28 +1085,56 @@ class HybridMoE(nn.Module):
         expert_key = str(expert_idx)
         source = "cold"
         if expert_key not in self.gpu_experts:
-            activated_module = self.activated_expert_cache.pop(expert_key, None)
-            if activated_module is not None:
-                self.activated_cache_hits += 1
-                self.gpu_experts[expert_key] = activated_module.to(dtype=dtype)
-                source = "activated"
-            else:
-                warm_module = self.warm_expert_cache.pop(expert_key, None)
-                if warm_module is not None:
-                    self.warm_cache_hits += 1
-                    module_device = next(iter(warm_module.parameters())).device
-                    if module_device != device:
-                        self.gpu_experts[expert_key] = self._activate_warm_module(warm_module, device, dtype)
-                    else:
-                        self.gpu_experts[expert_key] = warm_module.to(dtype=dtype)
-                    source = "warm"
-                else:
-                    self.gpu_experts[expert_key] = self._build_runtime_expert(expert_idx, device, dtype)
-                    source = "cold"
+            resolved = self._resolve_promotion_module(expert_idx, device, dtype)
+            self.gpu_experts[expert_key] = resolved["module"]
+            source = str(resolved["source"])
         self.activation_applied += 1
         self.gpu_experts_mask[expert_idx] = True
         self._set_residency(expert_idx, ExpertResidency.GPU)
         return source
+
+    def _resolve_promotion_module(
+        self,
+        expert_idx: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> dict[str, object]:
+        expert_key = str(expert_idx)
+        if expert_key in self.gpu_experts:
+            return {
+                "expert_idx": int(expert_idx),
+                "module": self.gpu_experts[expert_key],
+                "source": "resident",
+            }
+
+        activated_module = self.activated_expert_cache.pop(expert_key, None)
+        if activated_module is not None:
+            self.activated_cache_hits += 1
+            return {
+                "expert_idx": int(expert_idx),
+                "module": activated_module.to(dtype=dtype),
+                "source": "activated",
+            }
+
+        warm_module = self.warm_expert_cache.pop(expert_key, None)
+        if warm_module is not None:
+            self.warm_cache_hits += 1
+            module_device = next(iter(warm_module.parameters())).device
+            if module_device != device:
+                warm_module = self._activate_warm_module(warm_module, device, dtype)
+            else:
+                warm_module = warm_module.to(dtype=dtype)
+            return {
+                "expert_idx": int(expert_idx),
+                "module": warm_module,
+                "source": "warm",
+            }
+
+        return {
+            "expert_idx": int(expert_idx),
+            "module": self._build_runtime_expert(expert_idx, device, dtype),
+            "source": "cold",
+        }
 
     def _apply_promotion_batch(
         self,
@@ -1119,10 +1147,23 @@ class HybridMoE(nn.Module):
         applied = 0
         completed_expert_ids: set[int] = set()
         source_counts = {"activated": 0, "warm": 0, "cold": 0}
+        resolved_batch = [
+            (
+                op,
+                self._resolve_promotion_module(int(op.expert_idx), device, dtype),
+            )
+            for op in promotion_ops
+        ]
 
-        for op in promotion_ops:
+        for op, resolved in resolved_batch:
             expert_idx = int(op.expert_idx)
-            source = self._promote_expert_to_gpu(expert_idx, device, dtype) or "cold"
+            expert_key = str(expert_idx)
+            source = str(resolved.get("source") or "cold")
+            if expert_key not in self.gpu_experts:
+                self.gpu_experts[expert_key] = resolved["module"]  # type: ignore[index]
+            self.activation_applied += 1
+            self.gpu_experts_mask[expert_idx] = True
+            self._set_residency(expert_idx, ExpertResidency.GPU)
             source_counts[source] += 1
             if source == "activated":
                 self.pipeline_promotion_source_activated += 1

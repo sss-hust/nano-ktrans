@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections import deque
-from threading import Lock
+from queue import Empty, Queue
+from threading import Event, Lock, Thread
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -49,12 +50,24 @@ class ExpertMaterializationManager:
         self._cache: OrderedDict[ExpertKey, ExpertWeights] = OrderedDict()
         self._futures: Dict[ExpertKey, Future] = {}
         self._ready_queue = deque()
+        self._resolve_queue: "Queue[ExpertKey | None]" = Queue()
+        self._stop_event = Event()
         self._lock = Lock()
+        self._resolver_thread: Optional[Thread] = None
+        if self.executor is not None:
+            self._resolver_thread = Thread(
+                target=self._resolve_ready_loop,
+                name="expert-prefetch-resolver",
+                daemon=True,
+            )
+            self._resolver_thread.start()
 
         self.prefetch_submitted = 0
         self.prefetch_resolved = 0
         self.prefetch_polled_ready = 0
         self.prefetch_completion_events = 0
+        self.prefetch_background_resolved = 0
+        self.prefetch_background_failures = 0
         self.resident_stage_hits = 0
         self.cache_hits = 0
         self.sync_loads = 0
@@ -116,8 +129,53 @@ class ExpertMaterializationManager:
             tracked = self._futures.get(key)
             if tracked is not future:
                 return
-            self._ready_queue.append(key)
             self.prefetch_completion_events += 1
+        if self._resolver_thread is None:
+            with self._lock:
+                self._ready_queue.append(key)
+            return
+        self._resolve_queue.put(key)
+
+    def _resolve_completed_future(self, key: ExpertKey) -> bool:
+        with self._lock:
+            future = self._futures.get(key)
+        if future is None:
+            return False
+
+        try:
+            weights = future.result()
+        except Exception:
+            with self._lock:
+                tracked = self._futures.get(key)
+                if tracked is future:
+                    self._futures.pop(key, None)
+                    self.prefetch_background_failures += 1
+            return False
+
+        with self._lock:
+            tracked = self._futures.get(key)
+            if tracked is not future:
+                return False
+            self._futures.pop(key, None)
+            self._store_cache(key, weights)
+            self.prefetch_resolved += 1
+            self._ready_queue.append(key)
+        return True
+
+    def _resolve_ready_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                key = self._resolve_queue.get(timeout=0.05)
+            except Empty:
+                continue
+            if key is None:
+                self._resolve_queue.task_done()
+                break
+            resolved = self._resolve_completed_future(key)
+            with self._lock:
+                if resolved:
+                    self.prefetch_background_resolved += 1
+            self._resolve_queue.task_done()
 
     def prefetch(self, layer_idx: int, expert_idx: int) -> bool:
         key = self._cache_key(layer_idx, expert_idx)
@@ -147,11 +205,17 @@ class ExpertMaterializationManager:
             future = self._futures.get(key)
 
         if future is not None:
+            self._resolve_completed_future(key)
+            with self._lock:
+                cached = self._cache.get(key)
+                if cached is not None:
+                    self._cache.move_to_end(key)
+                    return cached
             weights = future.result()
             with self._lock:
                 self._futures.pop(key, None)
                 self._store_cache(key, weights)
-            self.prefetch_resolved += 1
+                self.prefetch_resolved += 1
             return weights
 
         weights = self._load_expert(layer_idx, expert_idx)
@@ -163,23 +227,18 @@ class ExpertMaterializationManager:
     def poll_ready(self) -> list[ExpertKey]:
         ready_keys: list[ExpertKey] = []
         with self._lock:
-            queued_keys = []
             while self._ready_queue:
-                queued_keys.append(self._ready_queue.popleft())
-
-        for key in queued_keys:
-            with self._lock:
-                future = self._futures.get(key)
-            if future is None:
-                continue
-            weights = future.result()
-            with self._lock:
-                self._futures.pop(key, None)
-                self._store_cache(key, weights)
-            self.prefetch_resolved += 1
-            self.prefetch_polled_ready += 1
-            ready_keys.append(key)
+                ready_keys.append(self._ready_queue.popleft())
+            self.prefetch_polled_ready += len(ready_keys)
         return ready_keys
+
+    def shutdown(self) -> None:
+        self._stop_event.set()
+        if self._resolver_thread is not None:
+            self._resolve_queue.put(None)
+            self._resolver_thread.join(timeout=1.0)
+        if self.executor is not None:
+            self.executor.shutdown(wait=False, cancel_futures=True)
 
     def diagnostics(self) -> dict:
         with self._lock:
@@ -188,10 +247,13 @@ class ExpertMaterializationManager:
                 "pending_prefetches": len(self._futures),
                 "max_cached_experts": self.max_cached_experts,
                 "prefetch_workers": self.prefetch_workers,
+                "background_resolver_enabled": self._resolver_thread is not None,
                 "prefetch_submitted": self.prefetch_submitted,
                 "prefetch_resolved": self.prefetch_resolved,
                 "prefetch_polled_ready": self.prefetch_polled_ready,
                 "prefetch_completion_events": self.prefetch_completion_events,
+                "prefetch_background_resolved": self.prefetch_background_resolved,
+                "prefetch_background_failures": self.prefetch_background_failures,
                 "resident_stage_hits": self.resident_stage_hits,
                 "cache_hits": self.cache_hits,
                 "sync_loads": self.sync_loads,
