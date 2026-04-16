@@ -136,6 +136,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "pipeline_apply_batches": 0,
         "pipeline_apply_batch_experts": 0,
         "pipeline_apply_batch_evictions": 0,
+        "pipeline_apply_batch_activated": 0,
+        "pipeline_apply_batch_warm": 0,
+        "pipeline_apply_batch_cold": 0,
         "activation_submitted": 0,
         "activation_ready": 0,
         "activation_applied": 0,
@@ -199,6 +202,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["pipeline_apply_batches"] += int(layer.get("pipeline_apply_batches", 0))
         summary["pipeline_apply_batch_experts"] += int(layer.get("pipeline_apply_batch_experts", 0))
         summary["pipeline_apply_batch_evictions"] += int(layer.get("pipeline_apply_batch_evictions", 0))
+        summary["pipeline_apply_batch_activated"] += int(layer.get("pipeline_apply_batch_activated", 0))
+        summary["pipeline_apply_batch_warm"] += int(layer.get("pipeline_apply_batch_warm", 0))
+        summary["pipeline_apply_batch_cold"] += int(layer.get("pipeline_apply_batch_cold", 0))
         summary["activation_submitted"] += int(layer.get("activation_submitted", 0))
         summary["activation_ready"] += int(layer.get("activation_ready", 0))
         summary["activation_applied"] += int(layer.get("activation_applied", 0))
@@ -258,6 +264,20 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
     else:
         summary["pipeline_apply_batch_size_avg"] = None
+    if summary["pipeline_apply_batch_experts"] > 0:
+        summary["pipeline_apply_batch_activated_ratio"] = (
+            summary["pipeline_apply_batch_activated"] / summary["pipeline_apply_batch_experts"]
+        )
+        summary["pipeline_apply_batch_warm_ratio"] = (
+            summary["pipeline_apply_batch_warm"] / summary["pipeline_apply_batch_experts"]
+        )
+        summary["pipeline_apply_batch_cold_ratio"] = (
+            summary["pipeline_apply_batch_cold"] / summary["pipeline_apply_batch_experts"]
+        )
+    else:
+        summary["pipeline_apply_batch_activated_ratio"] = None
+        summary["pipeline_apply_batch_warm_ratio"] = None
+        summary["pipeline_apply_batch_cold_ratio"] = None
     return summary
 
 
@@ -329,6 +349,24 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             ),
             "pipeline_apply_batch_evictions": int(
                 scheduler_summary.get("pipeline_apply_batch_evictions", 0)
+            ),
+            "pipeline_apply_batch_activated": int(
+                scheduler_summary.get("pipeline_apply_batch_activated", 0)
+            ),
+            "pipeline_apply_batch_warm": int(
+                scheduler_summary.get("pipeline_apply_batch_warm", 0)
+            ),
+            "pipeline_apply_batch_cold": int(
+                scheduler_summary.get("pipeline_apply_batch_cold", 0)
+            ),
+            "pipeline_apply_batch_activated_ratio": scheduler_summary.get(
+                "pipeline_apply_batch_activated_ratio"
+            ),
+            "pipeline_apply_batch_warm_ratio": scheduler_summary.get(
+                "pipeline_apply_batch_warm_ratio"
+            ),
+            "pipeline_apply_batch_cold_ratio": scheduler_summary.get(
+                "pipeline_apply_batch_cold_ratio"
             ),
             "runtime_offload_pipeline_apply_batch_count_total": runtime_apply_batch_count,
             "runtime_offload_pipeline_apply_batch_experts_total": runtime_apply_batch_experts,

@@ -121,6 +121,9 @@ class HybridMoE(nn.Module):
         self.pipeline_apply_batches = 0
         self.pipeline_apply_batch_experts = 0
         self.pipeline_apply_batch_evictions = 0
+        self.pipeline_apply_batch_activated = 0
+        self.pipeline_apply_batch_warm = 0
+        self.pipeline_apply_batch_cold = 0
         self.expert_warm_cache_size = max(0, int(expert_warm_cache_size))
         self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
@@ -574,40 +577,15 @@ class HybridMoE(nn.Module):
             deferred += max(0, len(pending_ops) - promotable)
             pending_ops = pending_ops[:promotable]
 
-        for op in pending_ops:
-            expert_idx = int(op.expert_idx)
-            source = self._promote_expert_to_gpu(expert_idx, device, dtype)
-            if source == "activated":
-                self.pipeline_promotion_source_activated += 1
-            elif source == "warm":
-                self.pipeline_promotion_source_warm += 1
-            else:
-                self.pipeline_promotion_source_cold += 1
-            self.decode_prefetch_hits += 1
-            self.prefetch_materialized += 1
-            self.applied_migration_ops += 1
-            applied += 1
-            if source != "cold":
-                self.pipeline_prefetch_overlap_hits += 1
-            self.applied_migration_history.append(
-                {
-                    "phase": phase,
-                    "expert_idx": expert_idx,
-                    "src": op.src.value,
-                    "dst": op.dst.value,
-                    "reason": op.reason,
-                }
-            )
-            self.offload_backend.migration_manager.mark_state(
-                self.layer_idx,
-                expert_idx,
-                src=op.src.value,
-                dst=op.dst.value,
-                reason=op.reason,
+        if pending_ops:
+            batch_applied, batch_completed, _source_counts = self._apply_promotion_batch(
+                pending_ops,
+                device=device,
+                dtype=dtype,
                 phase=phase,
-                state=MigrationLifecycle.APPLIED,
             )
-            completed_expert_ids.add(expert_idx)
+            applied += batch_applied
+            completed_expert_ids.update(batch_completed)
 
         if applied:
             self.last_applied_migration_phase = phase
@@ -633,6 +611,9 @@ class HybridMoE(nn.Module):
         prev_apply_batches = self.pipeline_apply_batches
         prev_apply_batch_experts = self.pipeline_apply_batch_experts
         prev_apply_batch_evictions = self.pipeline_apply_batch_evictions
+        prev_apply_batch_activated = self.pipeline_apply_batch_activated
+        prev_apply_batch_warm = self.pipeline_apply_batch_warm
+        prev_apply_batch_cold = self.pipeline_apply_batch_cold
         prefetch_submitted = self._prime_pending_promotions(phase=phase)
         ready_polled = self.refresh_offload_state()
         warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
@@ -658,6 +639,9 @@ class HybridMoE(nn.Module):
             "apply_batch_count": int(self.pipeline_apply_batches - prev_apply_batches),
             "apply_batch_experts": int(self.pipeline_apply_batch_experts - prev_apply_batch_experts),
             "apply_batch_evictions": int(self.pipeline_apply_batch_evictions - prev_apply_batch_evictions),
+            "apply_batch_activated": int(self.pipeline_apply_batch_activated - prev_apply_batch_activated),
+            "apply_batch_warm": int(self.pipeline_apply_batch_warm - prev_apply_batch_warm),
+            "apply_batch_cold": int(self.pipeline_apply_batch_cold - prev_apply_batch_cold),
         }
 
     def _request_prefetch_candidates(self, *, phase: str) -> None:
@@ -719,6 +703,59 @@ class HybridMoE(nn.Module):
         self.gpu_experts_mask[expert_idx] = True
         self._set_residency(expert_idx, ExpertResidency.GPU)
         return source
+
+    def _apply_promotion_batch(
+        self,
+        promotion_ops: list,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        phase: str,
+    ) -> tuple[int, set[int], dict[str, int]]:
+        applied = 0
+        completed_expert_ids: set[int] = set()
+        source_counts = {"activated": 0, "warm": 0, "cold": 0}
+
+        for op in promotion_ops:
+            expert_idx = int(op.expert_idx)
+            source = self._promote_expert_to_gpu(expert_idx, device, dtype) or "cold"
+            source_counts[source] += 1
+            if source == "activated":
+                self.pipeline_promotion_source_activated += 1
+            elif source == "warm":
+                self.pipeline_promotion_source_warm += 1
+            else:
+                self.pipeline_promotion_source_cold += 1
+            self.decode_prefetch_hits += 1
+            self.prefetch_materialized += 1
+            self.applied_migration_ops += 1
+            applied += 1
+            if source != "cold":
+                self.pipeline_prefetch_overlap_hits += 1
+            self.applied_migration_history.append(
+                {
+                    "phase": phase,
+                    "expert_idx": expert_idx,
+                    "src": op.src.value,
+                    "dst": op.dst.value,
+                    "reason": op.reason,
+                }
+            )
+            self.offload_backend.migration_manager.mark_state(
+                self.layer_idx,
+                expert_idx,
+                src=op.src.value,
+                dst=op.dst.value,
+                reason=op.reason,
+                phase=phase,
+                state=MigrationLifecycle.APPLIED,
+            )
+            completed_expert_ids.add(expert_idx)
+
+        self.pipeline_apply_batch_activated += source_counts["activated"]
+        self.pipeline_apply_batch_warm += source_counts["warm"]
+        self.pipeline_apply_batch_cold += source_counts["cold"]
+        return applied, completed_expert_ids, source_counts
 
     def _demote_expert_from_gpu(self, expert_idx: int, dst: ExpertResidency) -> bool:
         expert_key = str(expert_idx)
@@ -1184,6 +1221,9 @@ class HybridMoE(nn.Module):
             "pipeline_apply_batches": self.pipeline_apply_batches,
             "pipeline_apply_batch_experts": self.pipeline_apply_batch_experts,
             "pipeline_apply_batch_evictions": self.pipeline_apply_batch_evictions,
+            "pipeline_apply_batch_activated": self.pipeline_apply_batch_activated,
+            "pipeline_apply_batch_warm": self.pipeline_apply_batch_warm,
+            "pipeline_apply_batch_cold": self.pipeline_apply_batch_cold,
             "warm_cache_hits": self.warm_cache_hits,
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,

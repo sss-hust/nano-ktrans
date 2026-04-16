@@ -264,6 +264,11 @@ tags: [architecture]
     - 以及 `best_by_metric` / `metric_directions`
     - 可以直接按 `pipeline_promotion_non_cold_ratio`、`runtime_apply_batch_size_avg`、`runtime_deferred_for_prefetch` 这类 overlap 相关指标比较 profile
     这让后续宿主机真实 sweep 不再只是“哪个快”，而是能看清“为什么快/慢”。
+47. ready promotion 的 batch apply 现在也能区分内部来源构成：
+    - layer 级会记录 `pipeline_apply_batch_activated / warm / cold`
+    - token-step runtime 也会累计 `offload_pipeline_apply_batch_*_total`
+    - summary/profile sweep 会把这些比率透出
+    这让系统不只知道“这一批应用了多少 expert”，还知道“这一批到底有多少已经是 activated 热路径，多少仍在走 cold path”。
 46. benchmark 侧现在也开始按“单次 run”观察流水线：
     - 每次 generation 前会重置 HybridMoE 的 runtime/queue/cache 计数器
     - 每个 run 结果都带自己的 `scheduler_summary`

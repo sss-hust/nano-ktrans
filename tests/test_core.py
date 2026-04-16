@@ -691,6 +691,9 @@ class TestDynamicScheduler:
                         "pipeline_apply_batches": 2,
                         "pipeline_apply_batch_experts": 5,
                         "pipeline_apply_batch_evictions": 1,
+                        "pipeline_apply_batch_activated": 2,
+                        "pipeline_apply_batch_warm": 2,
+                        "pipeline_apply_batch_cold": 1,
                     }
                 ],
             }
@@ -699,7 +702,13 @@ class TestDynamicScheduler:
         assert summary["pipeline_apply_batches"] == 2
         assert summary["pipeline_apply_batch_experts"] == 5
         assert summary["pipeline_apply_batch_evictions"] == 1
+        assert summary["pipeline_apply_batch_activated"] == 2
+        assert summary["pipeline_apply_batch_warm"] == 2
+        assert summary["pipeline_apply_batch_cold"] == 1
         assert summary["pipeline_apply_batch_size_avg"] == pytest.approx(2.5)
+        assert summary["pipeline_apply_batch_activated_ratio"] == pytest.approx(0.4)
+        assert summary["pipeline_apply_batch_warm_ratio"] == pytest.approx(0.4)
+        assert summary["pipeline_apply_batch_cold_ratio"] == pytest.approx(0.2)
         assert summary["offload_pipeline_apply_batch_count_total"] == 3
         assert summary["offload_pipeline_apply_batch_experts_total"] == 7
         assert summary["offload_pipeline_apply_batch_evictions_total"] == 2
@@ -721,6 +730,12 @@ class TestDynamicScheduler:
                         "pipeline_apply_batches": 2,
                         "pipeline_apply_batch_size_avg": 1.5,
                         "pipeline_apply_batch_evictions": 1,
+                        "pipeline_apply_batch_activated": 1,
+                        "pipeline_apply_batch_warm": 1,
+                        "pipeline_apply_batch_cold": 1,
+                        "pipeline_apply_batch_activated_ratio": 1.0 / 3.0,
+                        "pipeline_apply_batch_warm_ratio": 1.0 / 3.0,
+                        "pipeline_apply_batch_cold_ratio": 1.0 / 3.0,
                         "offload_pipeline_apply_batch_count_total": 2,
                         "offload_pipeline_apply_batch_experts_total": 3,
                         "offload_pipeline_apply_batch_evictions_total": 1,
@@ -746,6 +761,12 @@ class TestDynamicScheduler:
                         "pipeline_apply_batches": 3,
                         "pipeline_apply_batch_size_avg": 2.0,
                         "pipeline_apply_batch_evictions": 2,
+                        "pipeline_apply_batch_activated": 3,
+                        "pipeline_apply_batch_warm": 2,
+                        "pipeline_apply_batch_cold": 1,
+                        "pipeline_apply_batch_activated_ratio": 0.5,
+                        "pipeline_apply_batch_warm_ratio": 1.0 / 3.0,
+                        "pipeline_apply_batch_cold_ratio": 1.0 / 6.0,
                         "offload_pipeline_apply_batch_count_total": 3,
                         "offload_pipeline_apply_batch_experts_total": 6,
                         "offload_pipeline_apply_batch_evictions_total": 2,
@@ -772,6 +793,8 @@ class TestDynamicScheduler:
         assert summary["best_by_metric"]["pipeline_promotion_source_cold"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["pipeline_promotion_non_cold_ratio"]["value"] == pytest.approx(0.75)
         assert summary["best_by_metric"]["runtime_apply_batch_size_avg"]["value"] == pytest.approx(2.0)
+        assert summary["comparison_table"][0]["pipeline_apply_batch_activated"] == 3
+        assert summary["comparison_table"][0]["pipeline_apply_batch_cold_ratio"] == pytest.approx(1.0 / 6.0)
         assert summary["comparison_table"][0]["scheduler_profile"] == "overlap_safe"
         assert summary["comparison_table"][0]["rank_by_decode_tokens_per_second"] == 1
         assert summary["comparison_table"][0]["pipeline_promotion_non_cold_total"] == 3
@@ -796,6 +819,9 @@ class TestDynamicScheduler:
                     "apply_batch_count": 2,
                     "apply_batch_experts": 5,
                     "apply_batch_evictions": 1,
+                    "apply_batch_activated": 3,
+                    "apply_batch_warm": 1,
+                    "apply_batch_cold": 1,
                 }
 
         runtime = MigrationPipelineRuntime()
@@ -805,9 +831,15 @@ class TestDynamicScheduler:
         assert tick["apply_batch_count"] == 2
         assert tick["apply_batch_experts"] == 5
         assert tick["apply_batch_evictions"] == 1
+        assert tick["apply_batch_activated"] == 3
+        assert tick["apply_batch_warm"] == 1
+        assert tick["apply_batch_cold"] == 1
         assert diagnostics["offload_pipeline_apply_batch_count_total"] == 2
         assert diagnostics["offload_pipeline_apply_batch_experts_total"] == 5
         assert diagnostics["offload_pipeline_apply_batch_evictions_total"] == 1
+        assert diagnostics["offload_pipeline_apply_batch_activated_total"] == 3
+        assert diagnostics["offload_pipeline_apply_batch_warm_total"] == 1
+        assert diagnostics["offload_pipeline_apply_batch_cold_total"] == 1
 
     def test_hybrid_moe_advance_pipeline_reports_incremental_batch_metrics(self, tmp_path):
         from safetensors.torch import save_file
@@ -2406,6 +2438,9 @@ class TestDynamicScheduler:
 
         assert stats["activation_ready"] == 1
         assert stats["ready_applied"] == 1
+        assert stats["apply_batch_activated"] == 1
+        assert stats["apply_batch_warm"] == 0
+        assert stats["apply_batch_cold"] == 0
         assert diagnostics["activation_submitted"] == 1
         assert diagnostics["activation_ready"] == 1
         assert diagnostics["activation_applied"] == 1
@@ -2422,6 +2457,9 @@ class TestDynamicScheduler:
         assert diagnostics["pipeline_apply_batches"] == 1
         assert diagnostics["pipeline_apply_batch_experts"] == 1
         assert diagnostics["pipeline_apply_batch_evictions"] == 1
+        assert diagnostics["pipeline_apply_batch_activated"] == 1
+        assert diagnostics["pipeline_apply_batch_warm"] == 0
+        assert diagnostics["pipeline_apply_batch_cold"] == 0
 
     def test_hybrid_moe_promotion_prefers_activated_cache(self, tmp_path):
         from safetensors.torch import save_file

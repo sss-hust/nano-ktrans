@@ -26,6 +26,9 @@ class MigrationPipelineRuntime:
         self.apply_batch_count_total = 0
         self.apply_batch_experts_total = 0
         self.apply_batch_evictions_total = 0
+        self.apply_batch_activated_total = 0
+        self.apply_batch_warm_total = 0
+        self.apply_batch_cold_total = 0
         self.layers_touched_total = 0
         self.last_phase = ""
 
@@ -38,6 +41,9 @@ class MigrationPipelineRuntime:
         apply_batch_count = 0
         apply_batch_experts = 0
         apply_batch_evictions = 0
+        apply_batch_activated = 0
+        apply_batch_warm = 0
+        apply_batch_cold = 0
         layers_touched = 0
 
         for decoder_layer in decoder_layers:
@@ -66,6 +72,9 @@ class MigrationPipelineRuntime:
             apply_batch_count += int(stats.get("apply_batch_count", 0))
             apply_batch_experts += int(stats.get("apply_batch_experts", 0))
             apply_batch_evictions += int(stats.get("apply_batch_evictions", 0))
+            apply_batch_activated += int(stats.get("apply_batch_activated", 0))
+            apply_batch_warm += int(stats.get("apply_batch_warm", 0))
+            apply_batch_cold += int(stats.get("apply_batch_cold", 0))
 
         self.tick_calls += 1
         self.prefetch_submitted_total += prefetch_submitted
@@ -76,6 +85,9 @@ class MigrationPipelineRuntime:
         self.apply_batch_count_total += apply_batch_count
         self.apply_batch_experts_total += apply_batch_experts
         self.apply_batch_evictions_total += apply_batch_evictions
+        self.apply_batch_activated_total += apply_batch_activated
+        self.apply_batch_warm_total += apply_batch_warm
+        self.apply_batch_cold_total += apply_batch_cold
         self.layers_touched_total += layers_touched
         self.last_phase = phase
 
@@ -90,6 +102,9 @@ class MigrationPipelineRuntime:
             "apply_batch_count": apply_batch_count,
             "apply_batch_experts": apply_batch_experts,
             "apply_batch_evictions": apply_batch_evictions,
+            "apply_batch_activated": apply_batch_activated,
+            "apply_batch_warm": apply_batch_warm,
+            "apply_batch_cold": apply_batch_cold,
         }
 
     def diagnostics(self) -> dict[str, int | str]:
@@ -104,6 +119,9 @@ class MigrationPipelineRuntime:
             "offload_pipeline_apply_batch_count_total": int(self.apply_batch_count_total),
             "offload_pipeline_apply_batch_experts_total": int(self.apply_batch_experts_total),
             "offload_pipeline_apply_batch_evictions_total": int(self.apply_batch_evictions_total),
+            "offload_pipeline_apply_batch_activated_total": int(self.apply_batch_activated_total),
+            "offload_pipeline_apply_batch_warm_total": int(self.apply_batch_warm_total),
+            "offload_pipeline_apply_batch_cold_total": int(self.apply_batch_cold_total),
             "offload_pipeline_layers_touched_total": int(self.layers_touched_total),
             "offload_pipeline_last_phase": self.last_phase,
         }
