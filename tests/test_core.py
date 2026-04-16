@@ -2815,6 +2815,111 @@ class TestDynamicScheduler:
         layer_diag = hybrid.offload_backend.migration_manager.diagnostics()["layers"][0]
         assert layer_diag["total_warm_eviction_regressions"] == 1
 
+    def test_warm_cache_prefers_colder_victim_on_eviction(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import (
+            ExpertMigrationOp,
+            ExpertResidency,
+            ExpertResidencyPlan,
+        )
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(4):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+            ),
+        )
+        state = residency_plan.layer_state(0)
+        state.hotness[1] = 9.0
+        state.hotness[2] = 1.0
+        state.hotness[3] = 8.0
+
+        hybrid = HybridMoE(
+            num_experts=4,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=2,
+        ).to(dtype=torch.float32)
+
+        hybrid.offload_backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=1,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="warm_hot",
+                ),
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=2,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="warm_cold",
+                ),
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=3,
+                    src=ExpertResidency.PIM,
+                    dst=ExpertResidency.GPU,
+                    reason="warm_new",
+                ),
+            ],
+            phase="decode",
+        )
+
+        for expert_idx in (1, 2, 3):
+            module = hybrid._build_runtime_expert(expert_idx, torch.device("cpu"), torch.float32)
+            hybrid.offload_backend.migration_manager.mark_state(
+                0,
+                expert_idx,
+                state=MigrationLifecycle.WARMED,
+                phase="decode",
+            )
+            hybrid._store_warm_module(expert_idx, module, count_store=False)
+
+        assert "1" in hybrid.warm_expert_cache
+        assert "3" in hybrid.warm_expert_cache
+        assert "2" not in hybrid.warm_expert_cache
+        lifecycle = {
+            expert_idx: hybrid.offload_backend.migration_manager.state_for(0, expert_idx).value
+            for expert_idx in (1, 2, 3)
+        }
+        assert lifecycle[1] == MigrationLifecycle.WARMED.value
+        assert lifecycle[2] == MigrationLifecycle.READY.value
+        assert lifecycle[3] == MigrationLifecycle.WARMED.value
+
     def test_hybrid_moe_prebuild_targets_only_hot_ready_candidates(self, tmp_path):
         from safetensors.torch import save_file
 

@@ -283,6 +283,10 @@ tags: [architecture]
     - `comparison_table` 会带出每个 profile 的 eviction regression 压力
     - `best_by_metric` 也能按更少的 regression 选出更稳的 profile
     这让 profile 对比从“只看快不快”继续推进到“快的同时是不是在靠频繁回退缓存状态硬撑”。
+51. warm cache 的 eviction 策略现在也从“近似 FIFO”收紧成了“生命周期优先级 + hotness”：
+    - 更冷、生命周期更低的 warm candidate 会先被回退到 `READY`
+    - 更热、已经更接近 `APPLIED` 的 candidate 会尽量保留在 warm 层
+    这让 warm cache 开始真正承担“promotion 二级候选池”的职责，而不是普通对象缓存。
 46. benchmark 侧现在也开始按“单次 run”观察流水线：
     - 每次 generation 前会重置 HybridMoE 的 runtime/queue/cache 计数器
     - 每个 run 结果都带自己的 `scheduler_summary`

@@ -301,7 +301,11 @@ class HybridMoE(nn.Module):
         if count_store:
             self.warm_cache_stores += 1
         while len(self.warm_expert_cache) > self.expert_warm_cache_size:
-            evicted_key, _ = self.warm_expert_cache.popitem(last=False)
+            evicted_key = self._pick_warm_cache_victim_key()
+            if evicted_key is None:
+                evicted_key, _ = self.warm_expert_cache.popitem(last=False)
+            else:
+                self.warm_expert_cache.pop(evicted_key)
             if self.offload_backend is not None:
                 evicted_idx = int(evicted_key)
                 state = self.offload_backend.migration_manager.state_for(self.layer_idx, evicted_idx)
@@ -312,6 +316,19 @@ class HybridMoE(nn.Module):
                         state=MigrationLifecycle.READY,
                     )
             self.warm_cache_evictions += 1
+
+    def _pick_warm_cache_victim_key(self) -> str | None:
+        if not self.warm_expert_cache:
+            return None
+        ordered_keys = list(self.warm_expert_cache.keys())
+        return min(
+            ordered_keys,
+            key=lambda expert_key: (
+                self._migration_state_priority(int(expert_key)),
+                self._hotness_score(int(expert_key)),
+                ordered_keys.index(expert_key),
+            ),
+        )
 
     def _activated_cache_limit(self) -> int:
         if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
