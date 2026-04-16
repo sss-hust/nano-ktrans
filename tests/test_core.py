@@ -3040,6 +3040,56 @@ class TestDynamicScheduler:
         assert summary["effective_warm_cache_limit"] == 1
         assert summary["prepared_cache_utilization"] == 2 / 3
 
+    def test_profile_sweep_summary_includes_prepared_cache_metrics(self):
+        from nano_ktrans.scheduler.diagnostics import summarize_profile_sweep_results
+
+        results = [
+            {
+                "backend": "cuda_pim",
+                "scheduler_profile": "baseline",
+                "status": "ok",
+                "runs": [
+                    {
+                        "prefill_seconds": 1.0,
+                        "decode_seconds": 2.0,
+                        "decode_tokens_per_second": 1.5,
+                    }
+                ],
+                "scheduler_summary": {
+                    "pipeline_promotion_source_activated": 2,
+                    "pipeline_promotion_source_warm": 1,
+                    "pipeline_promotion_source_cold": 1,
+                    "pipeline_apply_batches": 1,
+                    "pipeline_apply_batch_size_avg": 2.0,
+                    "pipeline_apply_batch_evictions": 0,
+                    "offload_pipeline_apply_batch_count_total": 1,
+                    "offload_pipeline_apply_batch_experts_total": 2,
+                    "offload_pipeline_apply_batch_evictions_total": 0,
+                    "runtime_deferred_for_prefetch": 0,
+                    "prepared_cache_limit": 4,
+                    "prepared_cache_size": 3,
+                    "effective_warm_cache_limit": 2,
+                    "prepared_cache_utilization": 0.75,
+                    "migration_activation_eviction_regressions": 0,
+                    "migration_warm_eviction_regressions": 0,
+                    "pipeline_prefetch_overlap_hits": 2,
+                },
+            }
+        ]
+
+        summary = summarize_profile_sweep_results(results)
+        profile = summary["profiles"][0]
+        comparison_row = summary["comparison_table"][0]
+        best_by_metric = summary["best_by_metric"]["prepared_cache_utilization"]
+
+        assert profile["prepared_cache_limit"] == 4
+        assert profile["prepared_cache_size"] == 3
+        assert profile["effective_warm_cache_limit"] == 2
+        assert profile["prepared_cache_utilization"] == 0.75
+        assert comparison_row["prepared_cache_utilization"] == 0.75
+        assert best_by_metric["scheduler_profile"] == "baseline"
+        assert best_by_metric["value"] == 0.75
+
     def test_warm_cache_eviction_downgrades_lifecycle_to_ready(self, tmp_path):
         from safetensors.torch import save_file
 

@@ -7,6 +7,7 @@ PROFILE_SWEEP_SORT_KEYS = (
     "decode_tokens_per_second",
     "pipeline_promotion_non_cold_total",
     "pipeline_promotion_non_cold_ratio",
+    "prepared_cache_utilization",
     "pipeline_prefetch_overlap_hits",
     "pipeline_promotion_source_activated",
     "pipeline_promotion_source_warm",
@@ -38,6 +39,7 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "runtime_offload_pipeline_apply_batch_experts_total": "max",
     "runtime_offload_pipeline_apply_batch_evictions_total": "min",
     "runtime_apply_batch_size_avg": "max",
+    "prepared_cache_utilization": "max",
     "migration_activation_eviction_regressions": "min",
     "migration_warm_eviction_regressions": "min",
     "runtime_deferred_for_prefetch": "min",
@@ -404,6 +406,10 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
                 if runtime_apply_batch_count > 0
                 else None
             ),
+            "prepared_cache_limit": scheduler_summary.get("prepared_cache_limit"),
+            "prepared_cache_size": scheduler_summary.get("prepared_cache_size"),
+            "effective_warm_cache_limit": scheduler_summary.get("effective_warm_cache_limit"),
+            "prepared_cache_utilization": scheduler_summary.get("prepared_cache_utilization"),
             "migration_activation_eviction_regressions": int(
                 scheduler_summary.get("migration_activation_eviction_regressions", 0)
             ),

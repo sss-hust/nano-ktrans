@@ -364,6 +364,12 @@ tags: [architecture]
     - scheduler summary 会输出 `prepared_cache_limit / prepared_cache_size / effective_warm_cache_limit / prepared_cache_utilization`
     - 因此后续 benchmark 已可以直接比较不同 prepared-cache 预算对 overlap、cold-path 比例和 eviction regression 的影响
     这使 prepared tier 不再只是内部实现细节，而是成为可调、可测、可比较的系统参数。
+61. profile sweep 现在也已经把 prepared-cache 指标纳入自动比较：
+    - `profiles`
+    - `comparison_table`
+    - `best_by_metric`
+    都会显式保留 prepared-cache utilization 与 budget 相关字段
+    这样 prepared tier 不再只是 benchmark 的附加诊断，而是能直接参与 profile 排序和调度策略评估的一级信号。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
