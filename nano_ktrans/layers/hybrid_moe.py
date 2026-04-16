@@ -333,7 +333,8 @@ class HybridMoE(nn.Module):
             self.prepared_cache_rebalance_evicted_warm
             + self.prepared_cache_rebalance_evicted_activated
         )
-        return rebalance_events / max(1, int(self.expert_prepared_cache_size))
+        normalization = self.pipeline_ticks if self.pipeline_ticks > 0 else int(self.expert_prepared_cache_size)
+        return rebalance_events / max(1, int(normalization))
 
     def _prepared_cache_budget_backoff(self) -> int:
         if self.expert_prepared_cache_size is None:

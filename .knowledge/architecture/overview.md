@@ -239,6 +239,11 @@ tags: [architecture]
     - `adaptive_prebuild_limit` 控制每步最多准备多少 ready candidate
     - 当 prepared budget backoff 提高时，后两者也会同步受到约束；但若 `cold_promotion_penalty` 偏高，又会重新放宽，避免为了节省 prepared slots 反而导致更多 cold promotion
     因此 prepared tier 当前已经形成“容量控制 + 候选推进 aggressiveness”一体化的最小闭环。
+43. `prepared_cache_rebalance_pressure` 的语义也已调整：
+    - 早期版本按静态 prepared budget 归一，更像“累计 eviction 数 / cache 大小”
+    - 现在改为优先按 `pipeline_ticks` 归一，更接近“每步平均回退压力”
+    - 这样在长 decode 运行中，controller 读到的是更稳定的 step-level 压力，而不是单纯随时间累计放大的总量
+    这为后续把 controller 从静态 heuristic 推进到真正的滑动窗口或 EMA 反馈打下了基础。
     这样 `HybridMoE.advance_offload_pipeline()` 现在已经可以按 `queued -> prefetching -> ready -> warmed -> activated -> applied` 的顺序推进一次 promotion。
 39. 这也让“前台 pipeline”里的工作边界更清晰了：
     - resident export / safetensors prefetch 负责准备权重

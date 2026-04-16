@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-16 08:47
+updated: 2026-04-16 08:54
 ---
 
 # 🔥 当前工作焦点
@@ -33,6 +33,7 @@ updated: 2026-04-16 08:47
 - [x] scheduler summary / profile sweep 已补充 `effective_prepared_cache_limit`、`effective_prepared_cache_utilization` 与 `prepared_cache_rebalance_pressure_avg`，prepared tier 的预算收缩行为已可观测
 - [x] prepared tier controller 已新增 `prepared_cache_budget_backoff`，可按重平衡压力分级收缩 effective prepared budget，并在 `cold_promotion_penalty` 偏高时撤销 backoff
 - [x] prepared-tier controller 现在会把 `prepared_cache_budget_backoff` 反馈到 `adaptive_activation_limit / adaptive_prebuild_limit`，prepared budget 收缩与候选准备 aggressiveness 已形成更一致的控制面
+- [x] prepared-cache rebalance pressure 现已按 `pipeline_ticks` 归一，而不是只按静态 prepared budget 归一，长运行时下的回退压力信号更稳定
 - [x] migration queue 已接入 lifecycle 状态：`queued / prefetching / ready / deferred / applied`
 - [x] decode 在 `decode_require_prefetch_ready` 模式下已改成 ready-only 消费，不再先 drain 全队列再回退
 - [x] materialization manager 已支持后台 prefetch completion 轮询，ready 状态可在进入层前被主动刷新
@@ -149,6 +150,7 @@ updated: 2026-04-16 08:47
 - 当前 prepared tier 已开始有“弱自适应 effective budget”语义，但还没有形成真正的 per-layer prepared budget controller；下一步应继续把 `cold_promotion_penalty`、rebalance pressure 与 prepared budget 收缩合成更完整的闭环
 - 当前 prepared budget 已支持多级 backoff，但 activation/prebuild aggressiveness 仍与 budget controller 只做松耦合；下一步可继续把 backoff 直接反馈到 prebuild/activation batch aggressiveness，而不只是影响 effective prepared limit
 - 当前 prepared budget backoff 已开始直接约束 activation/prebuild limits，但仍是 per-layer 局部 heuristic；下一步应继续把这组 controller 信号接到 profile 策略层，开始做更系统的 auto-tuning
+- 当前 rebalance pressure 已按 step 归一，但仍是简单平均信号；下一步可以继续探索窗口化或 EMA 形式，让 controller 更贴近真实 decode 负载变化
 - 将 `activated -> applied` 从当前逐 expert 路径推进到同层小批量提交，继续压 decode 关键路径上的 Python 控制开销
 - 将当前“批次截断 + 逐 expert apply”升级成真正的 per-layer batched activation/apply，尽量减少 batch 内重复的 GPU budget 检查与 Python 字典操作
 - 将当前“批量预腾位 + 逐 expert apply”继续推进成真正的 per-layer batched activation/apply，把 warm/activated 命中后的 resident set 注入也批处理化

@@ -3220,6 +3220,7 @@ class TestDynamicScheduler:
         hybrid.prepared_cache_activation_stage_bonus = 0.0
         hybrid.prepared_cache_rebalance_evicted_warm = 4
         hybrid.prepared_cache_rebalance_evicted_activated = 2
+        hybrid.pipeline_ticks = 3
 
         assert hybrid._prepared_cache_rebalance_pressure() == pytest.approx(2.0)
         assert hybrid._prepared_cache_budget_backoff() == 2
@@ -3279,6 +3280,7 @@ class TestDynamicScheduler:
         hybrid.prepared_cache_activation_stage_bonus = 0.0
         hybrid.prepared_cache_rebalance_evicted_warm = 2
         hybrid.prepared_cache_rebalance_evicted_activated = 1
+        hybrid.pipeline_ticks = 3
 
         assert hybrid._effective_prepared_cache_limit() == 2
         diagnostics = hybrid.diagnostics()
