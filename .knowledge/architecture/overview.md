@@ -234,6 +234,13 @@ tags: [architecture]
     - 并统一批量更新 `gpu_experts_mask`
     - 然后再逐 expert 写回 residency、history 和 migration lifecycle
     因此 `apply_commit_queue -> resident set` 已不再是纯逐 expert 注入，而是“batch module commit + per-expert metadata finalize”的两段式提交。
+42. resident commit 的 staged queue 现在又往前拆出了一层 `apply_commit_batch_queue`：
+    - `apply_commit_queue`：保存 staged commit 候选
+    - `apply_commit_ready_cache`：保存已完成 source/module 解析的 ready entry
+    - `apply_commit_batch_queue`：保存本轮真正可进入 resident commit 的 ready batch
+    这意味着后半段现在已经演化成：
+    `apply_candidate_queue -> apply_commit_queue -> apply_commit_ready_cache -> apply_commit_batch_queue -> resident set`
+    后台 worker 可以先把 ready 的 staged commit 候选推进到 batch queue，resident commit 再消费这批 ready batch。
 39. resident commit 现在也被拆成两段 staged queue：
     - `apply_candidate_queue`：承接所有已经进入 `ACTIVATED` 的候选 expert
     - `apply_commit_queue`：只承接被当前 batch policy 选中的 staged commit 候选
@@ -603,6 +610,12 @@ tags: [architecture]
       - profile aggressiveness
       动态调节每批 commit 尺寸
     这让后半段 resident commit 不再只是“有个队列再逐 expert 提交”，而开始具备独立的批次控制面，为后续真正的 per-layer batch commit 做准备。
+88. apply commit batch queue 现在也已具备独立预算和诊断：
+    - `size / limit / utilization`
+    - `enqueued / pruned / evictions`
+    - `background_apply_commit_batch_queue_enqueued`
+    并且 runtime 会单独累计 `offload_background_apply_commit_batch_queue_enqueued_total`
+    所以后续 benchmark 已可以区分后台 worker 到底是在推进 staged commit queue，还是已经把 ready batch 推进到了最终 resident commit buffer。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

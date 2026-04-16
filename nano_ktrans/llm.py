@@ -360,6 +360,9 @@ class LLM:
             hybrid_moe.apply_commit_queue_enqueued = 0
             hybrid_moe.apply_commit_queue_pruned = 0
             hybrid_moe.background_apply_commit_queue_enqueued = 0
+            hybrid_moe.apply_commit_batch_queue_enqueued = 0
+            hybrid_moe.apply_commit_batch_queue_pruned = 0
+            hybrid_moe.background_apply_commit_batch_queue_enqueued = 0
             hybrid_moe.apply_commit_ready_hits = 0
             hybrid_moe.apply_commit_ready_stores = 0
             hybrid_moe.apply_commit_ready_pruned = 0
@@ -369,6 +372,7 @@ class LLM:
             hybrid_moe.background_apply_commit_batches = 0
             hybrid_moe.background_apply_commit_experts = 0
             hybrid_moe.apply_commit_queue_evictions = 0
+            hybrid_moe.apply_commit_batch_queue_evictions = 0
             hybrid_moe.apply_queue_pressure_ema = 0.0
             hybrid_moe.apply_queue_events_last_tick = 0
             hybrid_moe.apply_queue_events_prev_total = 0
