@@ -23,6 +23,9 @@ PROFILE_SWEEP_SORT_KEYS = (
     "apply_commit_queue_pressure_avg",
     "apply_commit_queue_pressure_ema_avg",
     "apply_commit_queue_budget_backoff_avg",
+    "apply_commit_batch_queue_pressure_avg",
+    "apply_commit_batch_queue_pressure_ema_avg",
+    "apply_commit_batch_queue_budget_backoff_avg",
     "pipeline_prefetch_overlap_hits",
     "pipeline_promotion_source_activated",
     "pipeline_promotion_source_warm",
@@ -70,6 +73,9 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "apply_commit_queue_pressure_avg": "min",
     "apply_commit_queue_pressure_ema_avg": "min",
     "apply_commit_queue_budget_backoff_avg": "min",
+    "apply_commit_batch_queue_pressure_avg": "min",
+    "apply_commit_batch_queue_pressure_ema_avg": "min",
+    "apply_commit_batch_queue_budget_backoff_avg": "min",
     "adaptive_prefetch_pending_limit_avg": "max",
     "adaptive_prefetch_candidate_budget_avg": "max",
     "migration_activation_eviction_regressions": "min",
@@ -263,6 +269,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "apply_commit_queue_pressure_step": 0.0,
         "apply_commit_queue_pressure_ema": 0.0,
         "apply_commit_queue_budget_backoff": 0,
+        "apply_commit_batch_queue_pressure": 0.0,
+        "apply_commit_batch_queue_pressure_step": 0.0,
+        "apply_commit_batch_queue_pressure_ema": 0.0,
+        "apply_commit_batch_queue_budget_backoff": 0,
         "background_apply_queue_enqueued": 0,
         "background_apply_commit_queue_enqueued": 0,
         "background_apply_commit_batch_queue_enqueued": 0,
@@ -404,6 +414,18 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["apply_commit_queue_pressure_step"] += float(layer.get("apply_commit_queue_pressure_step", 0.0))
         summary["apply_commit_queue_pressure_ema"] += float(layer.get("apply_commit_queue_pressure_ema", 0.0))
         summary["apply_commit_queue_budget_backoff"] += int(layer.get("apply_commit_queue_budget_backoff", 0))
+        summary["apply_commit_batch_queue_pressure"] += float(
+            layer.get("apply_commit_batch_queue_pressure", 0.0)
+        )
+        summary["apply_commit_batch_queue_pressure_step"] += float(
+            layer.get("apply_commit_batch_queue_pressure_step", 0.0)
+        )
+        summary["apply_commit_batch_queue_pressure_ema"] += float(
+            layer.get("apply_commit_batch_queue_pressure_ema", 0.0)
+        )
+        summary["apply_commit_batch_queue_budget_backoff"] += int(
+            layer.get("apply_commit_batch_queue_budget_backoff", 0)
+        )
         summary["background_apply_queue_enqueued"] += int(layer.get("background_apply_queue_enqueued", 0))
         summary["background_apply_commit_queue_enqueued"] += int(
             layer.get("background_apply_commit_queue_enqueued", 0)
@@ -580,6 +602,18 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["apply_commit_queue_budget_backoff_avg"] = (
             summary["apply_commit_queue_budget_backoff"] / summary["layer_count"]
         )
+        summary["apply_commit_batch_queue_pressure_avg"] = (
+            summary["apply_commit_batch_queue_pressure"] / summary["layer_count"]
+        )
+        summary["apply_commit_batch_queue_pressure_step_avg"] = (
+            summary["apply_commit_batch_queue_pressure_step"] / summary["layer_count"]
+        )
+        summary["apply_commit_batch_queue_pressure_ema_avg"] = (
+            summary["apply_commit_batch_queue_pressure_ema"] / summary["layer_count"]
+        )
+        summary["apply_commit_batch_queue_budget_backoff_avg"] = (
+            summary["apply_commit_batch_queue_budget_backoff"] / summary["layer_count"]
+        )
     else:
         summary["prepared_cache_activation_stage_bonus_avg"] = None
         summary["prepared_cache_budget_backoff_avg"] = None
@@ -599,6 +633,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["apply_commit_queue_pressure_step_avg"] = None
         summary["apply_commit_queue_pressure_ema_avg"] = None
         summary["apply_commit_queue_budget_backoff_avg"] = None
+        summary["apply_commit_batch_queue_pressure_avg"] = None
+        summary["apply_commit_batch_queue_pressure_step_avg"] = None
+        summary["apply_commit_batch_queue_pressure_ema_avg"] = None
+        summary["apply_commit_batch_queue_budget_backoff_avg"] = None
     total_rebalance_events = (
         summary["prepared_cache_rebalance_evicted_warm"]
         + summary["prepared_cache_rebalance_evicted_activated"]
@@ -750,6 +788,18 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             "apply_commit_queue_pressure_ema_avg": scheduler_summary.get("apply_commit_queue_pressure_ema_avg"),
             "apply_commit_queue_budget_backoff_avg": scheduler_summary.get(
                 "apply_commit_queue_budget_backoff_avg"
+            ),
+            "apply_commit_batch_queue_pressure_avg": scheduler_summary.get(
+                "apply_commit_batch_queue_pressure_avg"
+            ),
+            "apply_commit_batch_queue_pressure_step_avg": scheduler_summary.get(
+                "apply_commit_batch_queue_pressure_step_avg"
+            ),
+            "apply_commit_batch_queue_pressure_ema_avg": scheduler_summary.get(
+                "apply_commit_batch_queue_pressure_ema_avg"
+            ),
+            "apply_commit_batch_queue_budget_backoff_avg": scheduler_summary.get(
+                "apply_commit_batch_queue_budget_backoff_avg"
             ),
             "apply_queue_commit_batches": int(scheduler_summary.get("apply_queue_commit_batches", 0)),
             "apply_queue_commit_experts": int(scheduler_summary.get("apply_queue_commit_experts", 0)),

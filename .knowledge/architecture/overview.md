@@ -616,6 +616,13 @@ tags: [architecture]
     - `background_apply_commit_batch_queue_enqueued`
     并且 runtime 会单独累计 `offload_background_apply_commit_batch_queue_enqueued_total`
     所以后续 benchmark 已可以区分后台 worker 到底是在推进 staged commit queue，还是已经把 ready batch 推进到了最终 resident commit buffer。
+89. apply commit batch queue 现在也进入了 controller 闭环：
+    - `apply_commit_batch_queue_pressure`
+    - `apply_commit_batch_queue_pressure_step`
+    - `apply_commit_batch_queue_pressure_ema`
+    - `apply_commit_batch_queue_budget_backoff`
+    这组信号会继续反向约束 `adaptive_activation_limit / adaptive_prebuild_limit / adaptive_prefetch_*`
+    因而系统现在不只感知 candidate queue 和 staged commit queue 的压力，也开始感知最终 resident commit batch buffer 是否拥塞。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
