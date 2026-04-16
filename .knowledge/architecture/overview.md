@@ -429,6 +429,11 @@ tags: [architecture]
     - 热候选预取会经过 `adaptive_prefetch_candidate_budget`
     - 这两个预算同时受 `prepared_cache_budget_backoff`、rebalance step pressure 和 `cold_promotion_penalty` 影响
     这意味着 prepared tier 不再只调节 `prebuild/activation` 两段，而是开始把 prefetch 也纳入统一控制面，pipeline 的 `queued -> prefetching -> ready` 段现在也开始跟随 prepared pressure 和 cold-path 压力自适应变化。
+67. prepared budget 的“静态基线”现在也已经进入观测面：
+    - profile summary 会给出 `prepared_cache_budget_heuristic`
+    - runtime diagnostics 会给出实际采用的 `prepared_cache_budget`
+    - 因而 benchmark / profile sweep 后面可以直接对照“静态 prepared 预算是多少”与“controller 最终把 effective budget、prefetch/aggressiveness 调到了哪里”
+    这让 prepared-tier controller 不再只是 runtime 黑盒，而开始具备可解释的 baseline-vs-controller 观测能力。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

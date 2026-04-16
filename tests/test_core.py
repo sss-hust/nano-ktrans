@@ -586,6 +586,20 @@ class TestDynamicScheduler:
         assert resolved.prefetch_candidate_budget_per_layer == 6
         assert resolved.prefill_collect_only is False
 
+    def test_scheduler_profile_summary_reports_prepared_budget_heuristic(self):
+        from nano_ktrans.scheduler import SchedulerConfig, scheduler_profile_summary
+
+        summary = scheduler_profile_summary(
+            "baseline",
+            SchedulerConfig(
+                enabled=True,
+                decode_promote_k=3,
+                prefetch_candidate_budget_per_layer=4,
+            ),
+        )
+
+        assert summary["prepared_cache_budget_heuristic"] == 6
+
     def test_normalize_scheduler_profiles_dedupes(self):
         from nano_ktrans.scheduler import normalize_scheduler_profiles
 
@@ -3054,6 +3068,7 @@ class TestDynamicScheduler:
         offload_diagnostics = {
             "layer_count": 1,
             "scheduler_profile": {"profile": "baseline"},
+            "prepared_cache_budget": 3,
             "offload_refresh": {},
             "dynamic_scheduler": {"enabled": True},
             "layers": [
@@ -3083,6 +3098,7 @@ class TestDynamicScheduler:
 
         summary = summarize_offload_diagnostics(offload_diagnostics)
 
+        assert summary["prepared_cache_budget"] == 3
         assert summary["prepared_cache_limit"] == 3
         assert summary["prepared_cache_budget_backoff"] == 1
         assert summary["effective_prepared_cache_limit"] == 2

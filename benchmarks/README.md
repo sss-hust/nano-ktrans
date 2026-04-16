@@ -33,6 +33,7 @@ Notes:
   - layer-level apply batch metrics
   - step-level runtime apply batch totals
   - prepared-tier controller metrics, including:
+    - `prepared_cache_budget` / `prepared_cache_budget_heuristic`
     - `prepared_cache_budget_backoff_avg`
     - `prepared_cache_rebalance_pressure_avg / _ema_avg`
     - `cold_promotion_penalty_avg`

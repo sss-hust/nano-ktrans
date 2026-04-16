@@ -179,6 +179,7 @@ class LLM:
                 2,
             )
         )
+        self.prepared_cache_budget = int(prepared_cache_budget)
 
         # DEBUG: 仅测试一层以排查崩溃原因
         # config.num_hidden_layers = 1
@@ -247,6 +248,7 @@ class LLM:
                 self.scheduler_profile,
                 self.dynamic_expert_scheduler.config,
             ),
+            "prepared_cache_budget": self.prepared_cache_budget,
             "offload_refresh": self.model.model.offload_refresh_diagnostics(),
             "dynamic_scheduler": self.dynamic_expert_scheduler.diagnostics(),
             "layer_count": len(layers),

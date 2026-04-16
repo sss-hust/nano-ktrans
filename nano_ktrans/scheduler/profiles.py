@@ -101,6 +101,11 @@ def apply_scheduler_overrides(
 
 
 def scheduler_profile_summary(profile: str, config: SchedulerConfig) -> dict[str, Any]:
+    prepared_cache_budget = max(
+        int(config.decode_promote_k) * 2,
+        int(config.prefetch_candidate_budget_per_layer),
+        2,
+    )
     return {
         "profile": profile,
         "prefill_collect_only": bool(config.prefill_collect_only),
@@ -110,4 +115,5 @@ def scheduler_profile_summary(profile: str, config: SchedulerConfig) -> dict[str
         "migration_cooldown_steps": int(config.migration_cooldown_steps),
         "decode_require_prefetch_ready": bool(config.decode_require_prefetch_ready),
         "prefetch_candidate_budget_per_layer": int(config.prefetch_candidate_budget_per_layer),
+        "prepared_cache_budget_heuristic": int(prepared_cache_budget),
     }

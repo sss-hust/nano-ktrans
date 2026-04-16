@@ -109,6 +109,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
 
     summary = {
         "profile": offload_diagnostics.get("scheduler_profile", {}),
+        "prepared_cache_budget": offload_diagnostics.get("prepared_cache_budget"),
         "enabled": bool(scheduler.get("enabled", False)),
         "layer_count": int(offload_diagnostics.get("layer_count", 0)),
         "offload_refresh_calls": int((offload_diagnostics.get("offload_refresh") or {}).get("offload_refresh_calls", 0)),
