@@ -86,6 +86,7 @@ updated: 2026-04-16 09:08
 - [x] prepared-cache retention policy 现在开始带最小自适应倾向，activated stage bonus 会随重平衡方向调整
 - [x] prepared tier 现在开始用最小自适应限额驱动 activation/prebuild 候选数，prepared-cache 压力会反向收缩 activation/prebuild aggressiveness
 - [x] cold promotion 现在会反馈回 prepared tier controller，冷路径比例偏高时会抬高 adaptive activation/prebuild limit
+- [x] prepared tier controller 现在也开始直接约束 prefetch aggressiveness，新增 `adaptive_prefetch_pending_limit / adaptive_prefetch_candidate_budget`，prepared 压力与 cold penalty 会同时影响 pending promotion 预取和候选预取规模
 
 ## 阻塞项
 

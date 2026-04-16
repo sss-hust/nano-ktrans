@@ -244,6 +244,7 @@ class HybridMoE(nn.Module):
             return 0
 
         submitted = 0
+        submit_limit = self._adaptive_prefetch_pending_limit(phase=phase)
         require_prefetch_ready = (
             phase == "decode"
             and self.dynamic_expert_scheduler.config.decode_require_prefetch_ready
@@ -267,7 +268,7 @@ class HybridMoE(nn.Module):
                     state=MigrationLifecycle.READY,
                 )
                 continue
-            if state != MigrationLifecycle.PREFETCHING:
+            if state != MigrationLifecycle.PREFETCHING and submitted < submit_limit:
                 before = self.prefetch_enqueued
                 self._request_prefetch(
                     expert_idx,
@@ -626,6 +627,57 @@ class HybridMoE(nn.Module):
             limit = min(limit, max(1, controller_cap))
         return max(1, limit)
 
+    def _adaptive_prefetch_pending_limit(self, *, phase: str) -> int:
+        if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
+            return 0
+        base_limit = (
+            max(1, int(self.dynamic_expert_scheduler.config.prefill_force_gpu_budget_per_layer))
+            if phase == "prefill"
+            else max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+        )
+        limit = max(base_limit, self._adaptive_activation_limit())
+        if self.expert_prepared_cache_size is None:
+            return limit
+
+        if self._prepared_controller_engaged():
+            limit = max(1, limit - self._prepared_cache_budget_backoff())
+            if self._prepared_cache_rebalance_pressure_step() >= 1.0:
+                limit = max(1, limit - 1)
+
+        if self.cold_promotion_penalty >= 1.0:
+            limit += 1
+        if self.cold_promotion_penalty >= 1.5:
+            limit += 1
+
+        return min(max(1, limit), max(1, self._adaptive_prebuild_limit()))
+
+    def _adaptive_prefetch_candidate_budget(self, *, phase: str) -> int:
+        if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
+            return 0
+        base_budget = max(0, int(self.dynamic_expert_scheduler.config.prefetch_candidate_budget_per_layer))
+        if phase == "prefill":
+            base_budget = max(
+                base_budget,
+                int(self.dynamic_expert_scheduler.config.prefill_force_gpu_budget_per_layer),
+            )
+        if base_budget <= 0:
+            return 0
+        if self.expert_prepared_cache_size is None:
+            return base_budget
+
+        budget = base_budget
+        if self._prepared_controller_engaged():
+            budget = max(0, budget - self._prepared_cache_budget_backoff())
+            if self._prepared_cache_rebalance_pressure_step() >= 1.0:
+                budget = max(0, budget - 1)
+
+        if self.cold_promotion_penalty >= 1.0:
+            budget += 1
+        if self.cold_promotion_penalty >= 1.5:
+            budget += 1
+
+        return max(0, budget)
+
     def _update_cold_promotion_penalty(self, cold_promotions: int, total_promotions: int) -> None:
         if total_promotions <= 0:
             self.cold_promotion_penalty = max(0.0, self.cold_promotion_penalty - 0.1)
@@ -975,10 +1027,19 @@ class HybridMoE(nn.Module):
         candidates = self.dynamic_expert_scheduler.prefetch_candidates_layer(self.layer_idx, phase=phase)
         if not candidates:
             return
+        candidate_budget = self._adaptive_prefetch_candidate_budget(phase=phase)
+        if candidate_budget <= 0:
+            return
         self.prefetch_candidate_scans += 1
+        submitted = 0
         for expert_idx in candidates:
             if not self.materialization_manager.has_cached(self.layer_idx, int(expert_idx)):
+                before = self.prefetch_enqueued
                 self._request_prefetch(int(expert_idx))
+                if self.prefetch_enqueued > before:
+                    submitted += 1
+                if submitted >= candidate_budget:
+                    break
 
     def _set_residency(self, expert_idx: int, residency: ExpertResidency) -> None:
         if self.residency_plan is None:
@@ -1570,6 +1631,8 @@ class HybridMoE(nn.Module):
             "cold_promotion_penalty": self.cold_promotion_penalty,
             "adaptive_activation_limit": self._adaptive_activation_limit(),
             "adaptive_prebuild_limit": self._adaptive_prebuild_limit(),
+            "adaptive_prefetch_pending_limit": self._adaptive_prefetch_pending_limit(phase="decode"),
+            "adaptive_prefetch_candidate_budget": self._adaptive_prefetch_candidate_budget(phase="decode"),
             "warm_cache_hits": self.warm_cache_hits,
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,

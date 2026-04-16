@@ -50,6 +50,8 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "cold_promotion_penalty_avg": "min",
     "prepared_cache_rebalance_pressure_avg": "min",
     "prepared_cache_rebalance_pressure_ema_avg": "min",
+    "adaptive_prefetch_pending_limit_avg": "max",
+    "adaptive_prefetch_candidate_budget_avg": "max",
     "migration_activation_eviction_regressions": "min",
     "migration_warm_eviction_regressions": "min",
     "runtime_deferred_for_prefetch": "min",
@@ -180,6 +182,8 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "cold_promotion_penalty": 0.0,
         "adaptive_activation_limit": 0,
         "adaptive_prebuild_limit": 0,
+        "adaptive_prefetch_pending_limit": 0,
+        "adaptive_prefetch_candidate_budget": 0,
         "decode_prefetch_hits": 0,
         "decode_prefetch_misses": 0,
         "runtime_evictions": 0,
@@ -280,6 +284,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["cold_promotion_penalty"] += float(layer.get("cold_promotion_penalty", 0.0))
         summary["adaptive_activation_limit"] += int(layer.get("adaptive_activation_limit", 0))
         summary["adaptive_prebuild_limit"] += int(layer.get("adaptive_prebuild_limit", 0))
+        summary["adaptive_prefetch_pending_limit"] += int(
+            layer.get("adaptive_prefetch_pending_limit", 0)
+        )
+        summary["adaptive_prefetch_candidate_budget"] += int(
+            layer.get("adaptive_prefetch_candidate_budget", 0)
+        )
         summary["decode_prefetch_hits"] += int(layer.get("decode_prefetch_hits", 0))
         summary["decode_prefetch_misses"] += int(layer.get("decode_prefetch_misses", 0))
         summary["runtime_evictions"] += int(layer.get("runtime_evictions", 0))
@@ -375,6 +385,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["adaptive_prebuild_limit_avg"] = (
             summary["adaptive_prebuild_limit"] / summary["layer_count"]
         )
+        summary["adaptive_prefetch_pending_limit_avg"] = (
+            summary["adaptive_prefetch_pending_limit"] / summary["layer_count"]
+        )
+        summary["adaptive_prefetch_candidate_budget_avg"] = (
+            summary["adaptive_prefetch_candidate_budget"] / summary["layer_count"]
+        )
     else:
         summary["prepared_cache_activation_stage_bonus_avg"] = None
         summary["prepared_cache_budget_backoff_avg"] = None
@@ -384,6 +400,8 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["prepared_cache_rebalance_pressure_ema_avg"] = None
         summary["adaptive_activation_limit_avg"] = None
         summary["adaptive_prebuild_limit_avg"] = None
+        summary["adaptive_prefetch_pending_limit_avg"] = None
+        summary["adaptive_prefetch_candidate_budget_avg"] = None
     total_rebalance_events = (
         summary["prepared_cache_rebalance_evicted_warm"]
         + summary["prepared_cache_rebalance_evicted_activated"]
@@ -552,6 +570,12 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             ),
             "adaptive_prebuild_limit_avg": scheduler_summary.get(
                 "adaptive_prebuild_limit_avg"
+            ),
+            "adaptive_prefetch_pending_limit_avg": scheduler_summary.get(
+                "adaptive_prefetch_pending_limit_avg"
+            ),
+            "adaptive_prefetch_candidate_budget_avg": scheduler_summary.get(
+                "adaptive_prefetch_candidate_budget_avg"
             ),
             "migration_activation_eviction_regressions": int(
                 scheduler_summary.get("migration_activation_eviction_regressions", 0)

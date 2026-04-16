@@ -3103,6 +3103,8 @@ class TestDynamicScheduler:
         assert summary["cold_promotion_penalty_avg"] == 0.5
         assert summary["adaptive_activation_limit_avg"] == 2
         assert summary["adaptive_prebuild_limit_avg"] == 3
+        assert summary["adaptive_prefetch_pending_limit_avg"] == 0
+        assert summary["adaptive_prefetch_candidate_budget_avg"] == 0
 
     def test_profile_sweep_summary_includes_prepared_cache_metrics(self):
         from nano_ktrans.scheduler.diagnostics import summarize_profile_sweep_results
@@ -3149,6 +3151,8 @@ class TestDynamicScheduler:
                     "cold_promotion_penalty_avg": 1.0,
                     "adaptive_activation_limit_avg": 1.0,
                     "adaptive_prebuild_limit_avg": 2.0,
+                    "adaptive_prefetch_pending_limit_avg": 2.0,
+                    "adaptive_prefetch_candidate_budget_avg": 3.0,
                     "migration_activation_eviction_regressions": 0,
                     "migration_warm_eviction_regressions": 0,
                     "pipeline_prefetch_overlap_hits": 2,
@@ -3177,6 +3181,8 @@ class TestDynamicScheduler:
         assert profile["cold_promotion_penalty_avg"] == 1.0
         assert profile["adaptive_activation_limit_avg"] == 1.0
         assert profile["adaptive_prebuild_limit_avg"] == 2.0
+        assert profile["adaptive_prefetch_pending_limit_avg"] == 2.0
+        assert profile["adaptive_prefetch_candidate_budget_avg"] == 3.0
         assert comparison_row["prepared_cache_utilization"] == 0.75
         assert best_by_metric["scheduler_profile"] == "baseline"
         assert best_by_metric["value"] == 0.75
@@ -3598,6 +3604,70 @@ class TestDynamicScheduler:
         assert stats["apply_batch_cold"] == 1
         assert hybrid.cold_promotion_penalty > 0.0
         assert hybrid._adaptive_prebuild_limit() >= 3
+
+    def test_adaptive_prefetch_limits_follow_controller_pressure(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(4):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=2,
+                prefill_force_gpu_budget_per_layer=2,
+                prefetch_candidate_budget_per_layer=4,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=4,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=4,
+            expert_prepared_cache_size=2,
+        ).to(dtype=torch.float32)
+
+        hybrid.prepared_cache_activation_stage_bonus = 0.0
+        hybrid.prepared_cache_rebalance_evicted_warm = 2
+        hybrid.prepared_cache_rebalance_evicted_activated = 1
+        hybrid.pipeline_ticks = 1
+        hybrid._update_prepared_cache_rebalance_pressure_signals()
+
+        assert hybrid._adaptive_prefetch_pending_limit(phase="decode") == 1
+        assert hybrid._adaptive_prefetch_candidate_budget(phase="decode") == 2
+
+        hybrid.cold_promotion_penalty = 1.5
+        assert hybrid._adaptive_prefetch_pending_limit(phase="decode") == 4
+        assert hybrid._adaptive_prefetch_candidate_budget(phase="decode") == 6
 
     def test_warm_cache_eviction_downgrades_lifecycle_to_ready(self, tmp_path):
         from safetensors.torch import save_file

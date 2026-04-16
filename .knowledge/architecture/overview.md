@@ -424,6 +424,11 @@ tags: [architecture]
     - 若冷路径比例偏高，系统会提升 `cold_promotion_penalty`
     - 这个 penalty 会进一步抬高后续的 adaptive activation/prebuild limit
     也就是说，prepared tier 已不只是“被 cache 压力压缩”，也开始在“冷启动太多”时主动尝试扩大准备动作，形成一个最小的双向反馈回路。
+66. prepared-tier controller 现在开始直接约束 prefetch aggressiveness：
+    - pending promotion 的预取提交会经过 `adaptive_prefetch_pending_limit`
+    - 热候选预取会经过 `adaptive_prefetch_candidate_budget`
+    - 这两个预算同时受 `prepared_cache_budget_backoff`、rebalance step pressure 和 `cold_promotion_penalty` 影响
+    这意味着 prepared tier 不再只调节 `prebuild/activation` 两段，而是开始把 prefetch 也纳入统一控制面，pipeline 的 `queued -> prefetching -> ready` 段现在也开始跟随 prepared pressure 和 cold-path 压力自适应变化。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

@@ -32,6 +32,12 @@ Notes:
   - overlap hits and promotion source breakdown
   - layer-level apply batch metrics
   - step-level runtime apply batch totals
+  - prepared-tier controller metrics, including:
+    - `prepared_cache_budget_backoff_avg`
+    - `prepared_cache_rebalance_pressure_avg / _ema_avg`
+    - `cold_promotion_penalty_avg`
+    - `adaptive_activation_limit_avg / adaptive_prebuild_limit_avg`
+    - `adaptive_prefetch_pending_limit_avg / adaptive_prefetch_candidate_budget_avg`
   - cache eviction regression pressure (`activated -> warmed`, `warmed -> ready`)
   - deferred-for-prefetch counts
   - a ranked `comparison_table` and `best_by_metric` summary for quick profile selection
