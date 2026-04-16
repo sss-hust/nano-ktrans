@@ -1815,6 +1815,26 @@ class TestDynamicScheduler:
         assert diagnostics["offload_background_ticks"] == 1
         assert diagnostics["offload_pipeline_background_ready_callback_total"] == 2
 
+    def test_scheduler_summary_reports_background_offload_tick_metrics(self):
+        from nano_ktrans.scheduler.diagnostics import summarize_offload_diagnostics
+
+        summary = summarize_offload_diagnostics(
+            {
+                "offload_refresh": {
+                    "offload_refresh_calls": 2,
+                    "offload_background_ticks": 3,
+                    "offload_pipeline_ticks": 2,
+                    "offload_pipeline_background_ready_callback_total": 5,
+                },
+                "layer_count": 0,
+                "layers": [],
+                "dynamic_scheduler": {"enabled": True},
+            }
+        )
+
+        assert summary["offload_background_ticks"] == 3
+        assert summary["offload_pipeline_background_ready_callback_total"] == 5
+
     def test_materialization_manager_poll_ready(self, tmp_path):
         from safetensors.torch import save_file
 

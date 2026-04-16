@@ -468,6 +468,10 @@ tags: [architecture]
     - background tick 只负责消费后台 ready 事件，不负责完整的 pipeline apply
     - 主 refresh 仍负责 `READY -> WARMED/ACTIVATED/APPLIED`
     这让系统从“所有 offload 推进都挤在一个 refresh hook”进一步演进成了“背景事件推进 + 主流水线推进”两段式结构，虽然都还是 token-step 触发，但边界已经接近以后引入独立 migration worker 的形态。
+75. background offload tick 现在也进入了 scheduler summary：
+    - `offload_background_ticks`
+    - `offload_pipeline_background_ready_callback_total`
+    这样 benchmark 已经能单独观察“后台事件推进量”和“前台主流水线推进量”，两条路径终于可以分开对比，而不再都折叠进同一个 refresh 计数里。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
