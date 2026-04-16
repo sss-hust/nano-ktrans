@@ -337,3 +337,7 @@ updated: 2026-04-17 03:53
   `apply_candidate_queue -> apply_commit_queue -> apply_commit_batch_queue -> resident_commit_batch_queue -> resident set`
 - `resident_commit_batch_queue` 现在已经接入 `HybridMoE.diagnostics()`、runtime background tick 汇总、`LLM.reset_offload_diagnostics()` 和 scheduler summary。
 - 这意味着系统已经开始把最终 resident commit 从“apply batch buffer”再推进到“final resident commit buffer”，更接近真正后台 batch commit worker 的结构。
+- background tick 现在还会区分：
+  - 本轮开始前已经存在的 `resident_commit_batch_queue` batch：可进入本轮 background apply
+  - 本轮新推进到 `resident_commit_batch_queue` 的 batch：只记为 `prefinalized`，留到下一轮再 commit
+- 这让 resident commit 的最后一段也开始具备稳定的流水线边界，而不是在同一 tick 里边入队边消费。

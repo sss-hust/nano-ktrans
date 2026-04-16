@@ -646,6 +646,10 @@ tags: [architecture]
     - `resident_commit_batch_queue` 负责保存“已经进入 final resident-commit buffer 的 batch”
     - resident set commit 只从 `resident_commit_batch_queue` 消费
     这样后半段已经从“batch buffer + finalize”推进成了“staged batch buffer + final resident-commit buffer + finalize”的三段结构，更接近真正后台 batch commit worker。
+95. background tick 现在对 `resident_commit_batch_queue` 也采用“上一轮可消费、本轮新入队只 prefinalize”的规则：
+    - tick 开始前已经存在的 resident-commit batch，允许进入本轮 background apply
+    - 同一 tick 新推进到 `resident_commit_batch_queue` 的 batch，只会被标成 prefinalized，不会立即 commit
+    这样最终 resident commit 也具备了稳定的流水线边界，避免同一轮里既组最终 batch 又立刻消费。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

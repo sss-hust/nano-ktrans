@@ -180,6 +180,11 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
                 "offload_background_resident_commit_batch_queue_enqueued_total", 0
             )
         ),
+        "offload_background_resident_commit_batch_queue_prefinalized_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get(
+                "offload_background_resident_commit_batch_queue_prefinalized_total", 0
+            )
+        ),
         "offload_refresh_ready_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_refresh_ready_total", 0)
         ),
@@ -278,6 +283,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "apply_commit_batch_queue_evictions": 0,
         "resident_commit_batch_queue_enqueued": 0,
         "resident_commit_batch_queue_batches": 0,
+        "resident_commit_batch_queue_committed_batches": 0,
         "resident_commit_batch_queue_pruned": 0,
         "resident_commit_batch_queue_evictions": 0,
         "apply_commit_ready_hits": 0,
@@ -302,6 +308,8 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "background_apply_commit_batch_queue_committed_batches": 0,
         "background_apply_commit_batch_queue_prefinalized_batches": 0,
         "background_resident_commit_batch_queue_enqueued": 0,
+        "background_resident_commit_batch_queue_committed_batches": 0,
+        "background_resident_commit_batch_queue_prefinalized_batches": 0,
         "background_apply_commit_batches": 0,
         "background_apply_commit_experts": 0,
         "activated_cache_hits": 0,
@@ -451,6 +459,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["resident_commit_batch_queue_batches"] += int(
             layer.get("resident_commit_batch_queue_batches", 0)
         )
+        summary["resident_commit_batch_queue_committed_batches"] += int(
+            layer.get("resident_commit_batch_queue_committed_batches", 0)
+        )
         summary["resident_commit_batch_queue_pruned"] += int(
             layer.get("resident_commit_batch_queue_pruned", 0)
         )
@@ -496,6 +507,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
         summary["background_resident_commit_batch_queue_enqueued"] += int(
             layer.get("background_resident_commit_batch_queue_enqueued", 0)
+        )
+        summary["background_resident_commit_batch_queue_committed_batches"] += int(
+            layer.get("background_resident_commit_batch_queue_committed_batches", 0)
+        )
+        summary["background_resident_commit_batch_queue_prefinalized_batches"] += int(
+            layer.get("background_resident_commit_batch_queue_prefinalized_batches", 0)
         )
         summary["background_apply_commit_batches"] += int(layer.get("background_apply_commit_batches", 0))
         summary["background_apply_commit_experts"] += int(layer.get("background_apply_commit_experts", 0))
@@ -995,6 +1012,9 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             ),
             "offload_background_resident_commit_batch_queue_enqueued_total": int(
                 scheduler_summary.get("offload_background_resident_commit_batch_queue_enqueued_total", 0)
+            ),
+            "offload_background_resident_commit_batch_queue_prefinalized_total": int(
+                scheduler_summary.get("offload_background_resident_commit_batch_queue_prefinalized_total", 0)
             ),
             "migration_activation_eviction_regressions": int(
                 scheduler_summary.get("migration_activation_eviction_regressions", 0)

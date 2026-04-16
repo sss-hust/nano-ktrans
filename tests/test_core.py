@@ -1097,6 +1097,7 @@ class TestDynamicScheduler:
                     "apply_commit_queue_enqueued": 4,
                     "apply_commit_batch_queue_enqueued": 2,
                     "resident_commit_batch_queue_enqueued": 1,
+                    "resident_commit_batch_queue_prefinalized": 1,
                 }
 
         runtime = MigrationPipelineRuntime()
@@ -1113,6 +1114,7 @@ class TestDynamicScheduler:
         assert diagnostics["offload_background_apply_commit_queue_enqueued_total"] == 4
         assert diagnostics["offload_background_apply_commit_batch_queue_enqueued_total"] == 2
         assert diagnostics["offload_background_resident_commit_batch_queue_enqueued_total"] == 1
+        assert diagnostics["offload_background_resident_commit_batch_queue_prefinalized_total"] == 1
 
     def test_hybrid_moe_advance_pipeline_reports_incremental_batch_metrics(self, tmp_path):
         from safetensors.torch import save_file
@@ -3345,6 +3347,7 @@ class TestDynamicScheduler:
                     "offload_background_apply_commit_queue_enqueued_total": 2,
                     "offload_background_apply_commit_batch_queue_enqueued_total": 1,
                     "offload_background_resident_commit_batch_queue_enqueued_total": 1,
+                    "offload_background_resident_commit_batch_queue_prefinalized_total": 1,
                 },
                 "dynamic_scheduler": {"enabled": True},
                 "layers": [
@@ -3371,6 +3374,7 @@ class TestDynamicScheduler:
                         "apply_commit_batch_queue_pruned": 0,
                         "apply_commit_batch_queue_evictions": 0,
                         "resident_commit_batch_queue_enqueued": 1,
+                        "resident_commit_batch_queue_committed_batches": 1,
                         "resident_commit_batch_queue_pruned": 0,
                         "resident_commit_batch_queue_evictions": 0,
                         "apply_queue_pressure": 1.5,
@@ -3388,6 +3392,8 @@ class TestDynamicScheduler:
                         "background_apply_queue_enqueued": 3,
                         "background_apply_commit_batch_queue_enqueued": 1,
                         "background_resident_commit_batch_queue_enqueued": 1,
+                        "background_resident_commit_batch_queue_committed_batches": 1,
+                        "background_resident_commit_batch_queue_prefinalized_batches": 1,
                     }
                 ],
             }
@@ -3412,6 +3418,7 @@ class TestDynamicScheduler:
         assert summary["apply_commit_batch_queue_pruned"] == 0
         assert summary["apply_commit_batch_queue_evictions"] == 0
         assert summary["resident_commit_batch_queue_enqueued"] == 1
+        assert summary["resident_commit_batch_queue_committed_batches"] == 1
         assert summary["resident_commit_batch_queue_pruned"] == 0
         assert summary["resident_commit_batch_queue_evictions"] == 0
         assert summary["apply_commit_ready_cache_size"] == 0
@@ -3422,6 +3429,9 @@ class TestDynamicScheduler:
         assert summary["background_apply_queue_enqueued"] == 3
         assert summary["background_apply_commit_queue_enqueued"] == 0
         assert summary["background_apply_commit_batch_queue_enqueued"] == 1
+        assert summary["background_resident_commit_batch_queue_enqueued"] == 1
+        assert summary["background_resident_commit_batch_queue_committed_batches"] == 1
+        assert summary["background_resident_commit_batch_queue_prefinalized_batches"] == 1
         assert summary["apply_queue_commit_batch_size_avg"] is None
         assert summary["apply_queue_utilization"] == pytest.approx(0.5)
         assert summary["apply_commit_queue_utilization"] == pytest.approx(0.5)
@@ -3440,6 +3450,7 @@ class TestDynamicScheduler:
         assert summary["offload_background_apply_commit_queue_enqueued_total"] == 2
         assert summary["offload_background_apply_commit_batch_queue_enqueued_total"] == 1
         assert summary["offload_background_resident_commit_batch_queue_enqueued_total"] == 1
+        assert summary["offload_background_resident_commit_batch_queue_prefinalized_total"] == 1
 
     def test_apply_queue_commit_batch_metrics_track_background_and_foreground_commits(self, tmp_path):
         from safetensors.torch import save_file
@@ -3527,10 +3538,13 @@ class TestDynamicScheduler:
         assert background_applied == 1
         assert diagnostics["apply_commit_queue_enqueued"] == 1
         assert diagnostics["apply_commit_batch_queue_enqueued"] == 1
+        assert diagnostics["resident_commit_batch_queue_enqueued"] == 1
         assert diagnostics["apply_commit_queue_size"] == 0
         assert diagnostics["apply_commit_batch_queue_size"] == 0
+        assert diagnostics["resident_commit_batch_queue_size"] == 0
         assert diagnostics["apply_commit_queue_evictions"] == 0
         assert diagnostics["apply_commit_batch_queue_evictions"] == 0
+        assert diagnostics["resident_commit_batch_queue_committed_batches"] == 1
         assert diagnostics["apply_commit_ready_hits"] == 1
         assert diagnostics["apply_commit_ready_stores"] == 1
         assert diagnostics["background_apply_commit_batches"] == 1
@@ -3539,6 +3553,7 @@ class TestDynamicScheduler:
         assert diagnostics["apply_queue_commit_experts"] == 1
         assert diagnostics["background_apply_commit_queue_enqueued"] == 1
         assert diagnostics["background_apply_commit_batch_queue_enqueued"] == 1
+        assert diagnostics["background_resident_commit_batch_queue_committed_batches"] == 1
 
         hybrid._enqueue_activated_apply_candidates(phase="decode")
         hybrid._stage_apply_commit_batch(phase="decode")
@@ -5563,6 +5578,8 @@ class TestDynamicScheduler:
         assert diagnostics["apply_commit_ready_hits"] == 0
         assert stats["apply_commit_batch_queue_prefinalized"] == 1
         assert diagnostics["background_apply_commit_batch_queue_prefinalized_batches"] == 1
+        assert stats["resident_commit_batch_queue_prefinalized"] == 1
+        assert diagnostics["background_resident_commit_batch_queue_prefinalized_batches"] == 1
 
     def test_warm_cache_eviction_downgrades_lifecycle_to_ready(self, tmp_path):
         from safetensors.torch import save_file
@@ -6286,9 +6303,12 @@ class TestDynamicScheduler:
                 self.background_activation_applied = 24
                 self.resident_commit_batch_queue_enqueued = 25
                 self.resident_commit_batch_queue_batches = 26
-                self.resident_commit_batch_queue_pruned = 27
-                self.resident_commit_batch_queue_evictions = 28
-                self.background_resident_commit_batch_queue_enqueued = 29
+                self.resident_commit_batch_queue_committed_batches = 27
+                self.resident_commit_batch_queue_pruned = 28
+                self.resident_commit_batch_queue_evictions = 29
+                self.background_resident_commit_batch_queue_enqueued = 30
+                self.background_resident_commit_batch_queue_committed_batches = 31
+                self.background_resident_commit_batch_queue_prefinalized_batches = 32
 
         dummy_hybrid = DummyHybrid()
         layer = type("Layer", (), {"hybrid_moe": dummy_hybrid})()
@@ -6310,6 +6330,7 @@ class TestDynamicScheduler:
         assert dummy_hybrid.background_activation_applied == 0
         assert dummy_hybrid.resident_commit_batch_queue_enqueued == 0
         assert dummy_hybrid.background_resident_commit_batch_queue_enqueued == 0
+        assert dummy_hybrid.background_resident_commit_batch_queue_prefinalized_batches == 0
 
     def test_llm_reset_offload_diagnostics_zeros_runtime_background_tick_counters(self):
         from nano_ktrans.llm import LLM
@@ -6330,19 +6351,20 @@ class TestDynamicScheduler:
                 self.background_apply_commit_batch_queue_enqueued_total = 11
                 self.background_apply_commit_batch_queue_prefinalized_total = 12
                 self.background_resident_commit_batch_queue_enqueued_total = 13
+                self.background_resident_commit_batch_queue_prefinalized_total = 14
                 self.prefetch_submitted_total = 6
-                self.ready_polled_total = 14
-                self.activation_ready_total = 15
-                self.ready_applied_total = 16
-                self.ready_deferred_total = 17
-                self.apply_batch_count_total = 18
-                self.apply_batch_experts_total = 19
-                self.apply_batch_evictions_total = 20
-                self.apply_batch_activated_total = 21
-                self.apply_batch_warm_total = 22
-                self.apply_batch_cold_total = 23
-                self.layers_touched_total = 24
-                self.background_ready_callback_total = 25
+                self.ready_polled_total = 15
+                self.activation_ready_total = 16
+                self.ready_applied_total = 17
+                self.ready_deferred_total = 18
+                self.apply_batch_count_total = 19
+                self.apply_batch_experts_total = 20
+                self.apply_batch_evictions_total = 21
+                self.apply_batch_activated_total = 22
+                self.apply_batch_warm_total = 23
+                self.apply_batch_cold_total = 24
+                self.layers_touched_total = 25
+                self.background_ready_callback_total = 26
                 self.last_phase = "decode"
 
         class DummyHybrid:
@@ -6374,6 +6396,7 @@ class TestDynamicScheduler:
         assert runtime.background_apply_commit_batch_queue_enqueued_total == 0
         assert runtime.background_apply_commit_batch_queue_prefinalized_total == 0
         assert runtime.background_resident_commit_batch_queue_enqueued_total == 0
+        assert runtime.background_resident_commit_batch_queue_prefinalized_total == 0
         assert runtime.prefetch_submitted_total == 0
         assert runtime.background_ready_callback_total == 0
         assert runtime.last_phase == ""
