@@ -1087,6 +1087,22 @@ class HybridMoE(nn.Module):
             limit += 1
         return min(max(1, limit), max(1, self._apply_commit_queue_limit()))
 
+    def _adaptive_apply_commit_batch_limit(self, *, background: bool) -> int:
+        if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
+            return 1
+        limit = max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+        if self._apply_commit_batch_queue_pressure() >= 1.0:
+            limit += 1
+        if self.apply_commit_batch_queue_pressure_ema >= 1.0:
+            limit += 1
+        if self.cold_promotion_penalty >= 1.0:
+            limit += 1
+        if self._apply_commit_batch_queue_budget_backoff() > 0:
+            limit = max(1, limit - self._apply_commit_batch_queue_budget_backoff())
+        if not background and self.prepared_controller_aggressiveness >= 1.0:
+            limit += 1
+        return min(max(1, limit), max(1, self._apply_commit_batch_queue_limit()))
+
     def _adaptive_activation_limit(self) -> int:
         base_limit = self._activated_cache_limit()
         if self.expert_prepared_cache_size is None:
@@ -1551,8 +1567,13 @@ class HybridMoE(nn.Module):
             return 0, 0
 
         active_experts = active_experts or set()
-        max_promotions = (
+        stage_limit = (
             max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
+            if max_commits is None
+            else max(1, int(max_commits))
+        )
+        batch_limit = (
+            self._adaptive_apply_commit_batch_limit(background=background)
             if max_commits is None
             else max(1, int(max_commits))
         )
@@ -1560,12 +1581,12 @@ class HybridMoE(nn.Module):
             device=device,
             dtype=dtype,
             eligible_expert_ids=eligible_expert_ids,
-            max_resolves=max_promotions,
+            max_resolves=stage_limit,
             background=background,
         )
         self._stage_apply_commit_batch_queue(
             eligible_expert_ids=eligible_expert_ids,
-            max_commits=max_promotions,
+            max_commits=batch_limit,
             background=background,
         )
         candidate_ops = []
@@ -1583,10 +1604,10 @@ class HybridMoE(nn.Module):
         if count_batch:
             selected_ops, deferred = self._select_ready_promotion_batch(
                 candidate_ops,
-                max_promotions=max_promotions,
+                max_promotions=batch_limit,
             )
         else:
-            selected_ops = candidate_ops[:max_promotions]
+            selected_ops = candidate_ops[:batch_limit]
             deferred = max(0, len(candidate_ops) - len(selected_ops))
 
         if not selected_ops:
@@ -2582,6 +2603,8 @@ class HybridMoE(nn.Module):
             "adaptive_prebuild_limit": self._adaptive_prebuild_limit(),
             "adaptive_prefetch_pending_limit": self._adaptive_prefetch_pending_limit(phase="decode"),
             "adaptive_prefetch_candidate_budget": self._adaptive_prefetch_candidate_budget(phase="decode"),
+            "adaptive_apply_commit_limit": self._adaptive_apply_commit_limit(background=False),
+            "adaptive_apply_commit_batch_limit": self._adaptive_apply_commit_batch_limit(background=False),
             "warm_cache_hits": self.warm_cache_hits,
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,

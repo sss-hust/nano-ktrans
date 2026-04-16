@@ -300,6 +300,8 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "adaptive_prebuild_limit": 0,
         "adaptive_prefetch_pending_limit": 0,
         "adaptive_prefetch_candidate_budget": 0,
+        "adaptive_apply_commit_limit": 0,
+        "adaptive_apply_commit_batch_limit": 0,
         "decode_prefetch_hits": 0,
         "decode_prefetch_misses": 0,
         "runtime_evictions": 0,
@@ -477,6 +479,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["adaptive_prefetch_candidate_budget"] += int(
             layer.get("adaptive_prefetch_candidate_budget", 0)
         )
+        summary["adaptive_apply_commit_limit"] += int(
+            layer.get("adaptive_apply_commit_limit", 0)
+        )
+        summary["adaptive_apply_commit_batch_limit"] += int(
+            layer.get("adaptive_apply_commit_batch_limit", 0)
+        )
         summary["decode_prefetch_hits"] += int(layer.get("decode_prefetch_hits", 0))
         summary["decode_prefetch_misses"] += int(layer.get("decode_prefetch_misses", 0))
         summary["runtime_evictions"] += int(layer.get("runtime_evictions", 0))
@@ -578,6 +586,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["adaptive_prefetch_candidate_budget_avg"] = (
             summary["adaptive_prefetch_candidate_budget"] / summary["layer_count"]
         )
+        summary["adaptive_apply_commit_limit_avg"] = (
+            summary["adaptive_apply_commit_limit"] / summary["layer_count"]
+        )
+        summary["adaptive_apply_commit_batch_limit_avg"] = (
+            summary["adaptive_apply_commit_batch_limit"] / summary["layer_count"]
+        )
         summary["apply_queue_pressure_avg"] = (
             summary["apply_queue_pressure"] / summary["layer_count"]
         )
@@ -625,6 +639,8 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["adaptive_prebuild_limit_avg"] = None
         summary["adaptive_prefetch_pending_limit_avg"] = None
         summary["adaptive_prefetch_candidate_budget_avg"] = None
+        summary["adaptive_apply_commit_limit_avg"] = None
+        summary["adaptive_apply_commit_batch_limit_avg"] = None
         summary["apply_queue_pressure_avg"] = None
         summary["apply_queue_pressure_step_avg"] = None
         summary["apply_queue_pressure_ema_avg"] = None

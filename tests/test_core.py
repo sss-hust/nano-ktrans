@@ -5200,6 +5200,68 @@ class TestDynamicScheduler:
         assert hybrid._adaptive_prefetch_pending_limit(phase="decode") < base_prefetch_pending
         assert hybrid._adaptive_prefetch_candidate_budget(phase="decode") < base_prefetch_budget
 
+    def test_apply_commit_batch_limit_tracks_batch_queue_pressure(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(4):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=4,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=4,
+            expert_prepared_cache_size=4,
+            prepared_controller_aggressiveness=1.0,
+        ).to(dtype=torch.float32)
+
+        base_commit_limit = hybrid._adaptive_apply_commit_limit(background=False)
+        base_batch_limit = hybrid._adaptive_apply_commit_batch_limit(background=False)
+
+        hybrid.apply_commit_batch_queue_evictions = 4
+        hybrid.pipeline_ticks = 2
+        hybrid._update_apply_commit_batch_queue_pressure_signals()
+
+        assert hybrid._apply_commit_batch_queue_pressure() >= 2.0
+        assert hybrid._apply_commit_batch_queue_budget_backoff() == 2
+        assert hybrid._adaptive_apply_commit_limit(background=False) >= base_commit_limit
+        assert hybrid._adaptive_apply_commit_batch_limit(background=False) <= base_batch_limit
+
     def test_background_pipeline_resolves_apply_commit_queue_before_commit(self, tmp_path):
         from safetensors.torch import save_file
 

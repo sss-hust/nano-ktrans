@@ -628,6 +628,10 @@ tags: [architecture]
     - `apply_commit_batch_queue_pressure_ema_avg`
     - `apply_commit_batch_queue_budget_backoff_avg`
     这意味着 profile 对比不再只看前半段 prepared-tier 和中段 staged commit queue，也开始显式比较“最终 resident commit buffer 是否拥塞”。
+91. resident commit 的后半段现在已经明确拆成两级 budget：
+    - `_adaptive_apply_commit_limit()` 负责 `apply_commit_queue` 的 staged resolve / staging
+    - `_adaptive_apply_commit_batch_limit()` 负责 `apply_commit_batch_queue -> resident set` 的 final batch commit
+    这让后半段 resident commit 从“单一 staged commit 预算”推进成了“staged resolve 与 final commit 分离控制”的结构，更接近真正的后台 batch commit worker。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
