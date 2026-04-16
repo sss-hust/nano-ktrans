@@ -3026,6 +3026,10 @@ class TestDynamicScheduler:
                     "prepared_cache_limit": 3,
                     "prepared_cache_size": 2,
                     "effective_warm_cache_limit": 1,
+                    "prepared_cache_rebalance_evicted_warm": 1,
+                    "prepared_cache_rebalance_evicted_activated": 2,
+                    "prepared_cache_rebalance_demoted_to_warm": 2,
+                    "prepared_cache_rebalance_dropped_to_ready": 1,
                     "activated_cache_size": 1,
                     "warm_cache_size": 1,
                     "backend": {"migration_manager": {"layers": []}},
@@ -3039,6 +3043,11 @@ class TestDynamicScheduler:
         assert summary["prepared_cache_size"] == 2
         assert summary["effective_warm_cache_limit"] == 1
         assert summary["prepared_cache_utilization"] == 2 / 3
+        assert summary["prepared_cache_rebalance_evicted_warm"] == 1
+        assert summary["prepared_cache_rebalance_evicted_activated"] == 2
+        assert summary["prepared_cache_rebalance_demoted_to_warm"] == 2
+        assert summary["prepared_cache_rebalance_dropped_to_ready"] == 1
+        assert summary["prepared_cache_rebalance_activated_ratio"] == 2 / 3
 
     def test_profile_sweep_summary_includes_prepared_cache_metrics(self):
         from nano_ktrans.scheduler.diagnostics import summarize_profile_sweep_results
@@ -3070,6 +3079,11 @@ class TestDynamicScheduler:
                     "prepared_cache_size": 3,
                     "effective_warm_cache_limit": 2,
                     "prepared_cache_utilization": 0.75,
+                    "prepared_cache_rebalance_evicted_warm": 1,
+                    "prepared_cache_rebalance_evicted_activated": 0,
+                    "prepared_cache_rebalance_demoted_to_warm": 0,
+                    "prepared_cache_rebalance_dropped_to_ready": 1,
+                    "prepared_cache_rebalance_activated_ratio": 0.0,
                     "migration_activation_eviction_regressions": 0,
                     "migration_warm_eviction_regressions": 0,
                     "pipeline_prefetch_overlap_hits": 2,
@@ -3086,6 +3100,8 @@ class TestDynamicScheduler:
         assert profile["prepared_cache_size"] == 3
         assert profile["effective_warm_cache_limit"] == 2
         assert profile["prepared_cache_utilization"] == 0.75
+        assert profile["prepared_cache_rebalance_evicted_warm"] == 1
+        assert profile["prepared_cache_rebalance_evicted_activated"] == 0
         assert comparison_row["prepared_cache_utilization"] == 0.75
         assert best_by_metric["scheduler_profile"] == "baseline"
         assert best_by_metric["value"] == 0.75

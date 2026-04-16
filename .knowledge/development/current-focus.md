@@ -75,6 +75,7 @@ updated: 2026-04-16 03:22
 - [x] prepared-cache 预算现在会做跨层级统一重平衡，activated 和 warm candidates 会在同一个保留策略下竞争 prepared slots
 - [x] prepared-cache 预算现在已打通到 `LLM/example/benchmark` 入口，并在 scheduler summary 中暴露 utilization / effective warm limit 指标
 - [x] profile sweep 现在也会显式汇总 prepared-cache 指标，prepared tier 开始进入自动比较与 best-by-metric 排序
+- [x] prepared-cache 重平衡事件现在也会进入 scheduler summary/profile sweep，可直接区分 warm/activated 哪一层在挤压 prepared budget
 
 ## 阻塞项
 
@@ -129,6 +130,7 @@ updated: 2026-04-16 03:22
 - 当前 prepared-cache 已开始跨 warm/activated 统一重平衡，但 victim policy 还没有直接利用 recent source mix / eviction regression 做自适应预算调整
 - 当前 prepared-cache 已可配置和观测，但 budget 仍是静态数值，还没有根据 source mix / regression pressure 自适应调整
 - 当前 prepared-cache 指标已进入 profile sweep，但还没有真正反馈回 scheduler policy 去动态调整 prepared budget
+- 当前 prepared-cache 重平衡压力已可观测，但 scheduler 还没有利用这些指标动态调节 prepared budget 或 prebuild/activation aggressiveness
 - 当前 runtime batch totals 已是按 tick 增量统计，但还没有接入真实宿主机 benchmark 结果做长期趋势归档
 - 当前 strict ready-only 语义已经覆盖 resident staging，但 `prefetching -> ready` 仍然依赖前台 refresh，而不是真 completion event 驱动
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总

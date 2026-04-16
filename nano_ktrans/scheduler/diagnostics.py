@@ -157,6 +157,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "prepared_cache_limit": 0,
         "prepared_cache_size": 0,
         "effective_warm_cache_limit": 0,
+        "prepared_cache_rebalance_evicted_warm": 0,
+        "prepared_cache_rebalance_evicted_activated": 0,
+        "prepared_cache_rebalance_demoted_to_warm": 0,
+        "prepared_cache_rebalance_dropped_to_ready": 0,
         "decode_prefetch_hits": 0,
         "decode_prefetch_misses": 0,
         "runtime_evictions": 0,
@@ -228,6 +232,18 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["prepared_cache_limit"] += int(layer.get("prepared_cache_limit") or 0)
         summary["prepared_cache_size"] += int(layer.get("prepared_cache_size", 0))
         summary["effective_warm_cache_limit"] += int(layer.get("effective_warm_cache_limit", 0))
+        summary["prepared_cache_rebalance_evicted_warm"] += int(
+            layer.get("prepared_cache_rebalance_evicted_warm", 0)
+        )
+        summary["prepared_cache_rebalance_evicted_activated"] += int(
+            layer.get("prepared_cache_rebalance_evicted_activated", 0)
+        )
+        summary["prepared_cache_rebalance_demoted_to_warm"] += int(
+            layer.get("prepared_cache_rebalance_demoted_to_warm", 0)
+        )
+        summary["prepared_cache_rebalance_dropped_to_ready"] += int(
+            layer.get("prepared_cache_rebalance_dropped_to_ready", 0)
+        )
         summary["decode_prefetch_hits"] += int(layer.get("decode_prefetch_hits", 0))
         summary["decode_prefetch_misses"] += int(layer.get("decode_prefetch_misses", 0))
         summary["runtime_evictions"] += int(layer.get("runtime_evictions", 0))
@@ -292,6 +308,16 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
     else:
         summary["prepared_cache_utilization"] = None
+    total_rebalance_events = (
+        summary["prepared_cache_rebalance_evicted_warm"]
+        + summary["prepared_cache_rebalance_evicted_activated"]
+    )
+    if total_rebalance_events > 0:
+        summary["prepared_cache_rebalance_activated_ratio"] = (
+            summary["prepared_cache_rebalance_evicted_activated"] / total_rebalance_events
+        )
+    else:
+        summary["prepared_cache_rebalance_activated_ratio"] = None
     if summary["pipeline_apply_batch_experts"] > 0:
         summary["pipeline_apply_batch_activated_ratio"] = (
             summary["pipeline_apply_batch_activated"] / summary["pipeline_apply_batch_experts"]
@@ -410,6 +436,21 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             "prepared_cache_size": scheduler_summary.get("prepared_cache_size"),
             "effective_warm_cache_limit": scheduler_summary.get("effective_warm_cache_limit"),
             "prepared_cache_utilization": scheduler_summary.get("prepared_cache_utilization"),
+            "prepared_cache_rebalance_evicted_warm": int(
+                scheduler_summary.get("prepared_cache_rebalance_evicted_warm", 0)
+            ),
+            "prepared_cache_rebalance_evicted_activated": int(
+                scheduler_summary.get("prepared_cache_rebalance_evicted_activated", 0)
+            ),
+            "prepared_cache_rebalance_demoted_to_warm": int(
+                scheduler_summary.get("prepared_cache_rebalance_demoted_to_warm", 0)
+            ),
+            "prepared_cache_rebalance_dropped_to_ready": int(
+                scheduler_summary.get("prepared_cache_rebalance_dropped_to_ready", 0)
+            ),
+            "prepared_cache_rebalance_activated_ratio": scheduler_summary.get(
+                "prepared_cache_rebalance_activated_ratio"
+            ),
             "migration_activation_eviction_regressions": int(
                 scheduler_summary.get("migration_activation_eviction_regressions", 0)
             ),

@@ -370,6 +370,10 @@ tags: [architecture]
     - `best_by_metric`
     都会显式保留 prepared-cache utilization 与 budget 相关字段
     这样 prepared tier 不再只是 benchmark 的附加诊断，而是能直接参与 profile 排序和调度策略评估的一级信号。
+62. prepared-cache 的重平衡压力也已进入观测面：
+    - summary 和 profile sweep 会分别统计 warm side 被挤掉了多少、activated side 被挤掉了多少
+    - 以及 activated candidate 被降回 warm、warm candidate 被降回 ready 的次数
+    这样后续做自适应 prepared-cache policy 时，可以直接判断“预算不够”主要打在 warm tier 还是 activated tier，而不是只看到一个总的 utilization。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

@@ -125,6 +125,10 @@ class HybridMoE(nn.Module):
         self.pipeline_apply_batch_activated = 0
         self.pipeline_apply_batch_warm = 0
         self.pipeline_apply_batch_cold = 0
+        self.prepared_cache_rebalance_evicted_warm = 0
+        self.prepared_cache_rebalance_evicted_activated = 0
+        self.prepared_cache_rebalance_demoted_to_warm = 0
+        self.prepared_cache_rebalance_dropped_to_ready = 0
         self.expert_warm_cache_size = max(0, int(expert_warm_cache_size))
         self.expert_prepared_cache_size = (
             None if expert_prepared_cache_size is None else max(0, int(expert_prepared_cache_size))
@@ -396,6 +400,8 @@ class HybridMoE(nn.Module):
                             state=MigrationLifecycle.WARMED,
                         )
                 self.activated_cache_evictions += 1
+                self.prepared_cache_rebalance_evicted_activated += 1
+                self.prepared_cache_rebalance_demoted_to_warm += 1
                 self._insert_warm_module(expert_idx, module)
                 continue
             self.warm_expert_cache.pop(expert_key)
@@ -408,6 +414,8 @@ class HybridMoE(nn.Module):
                         state=MigrationLifecycle.READY,
                     )
             self.warm_cache_evictions += 1
+            self.prepared_cache_rebalance_evicted_warm += 1
+            self.prepared_cache_rebalance_dropped_to_ready += 1
 
         self._trim_warm_cache_to_budget()
 
@@ -1374,6 +1382,10 @@ class HybridMoE(nn.Module):
             "prepared_cache_limit": self.expert_prepared_cache_size,
             "prepared_cache_size": self._prepared_cache_size(),
             "effective_warm_cache_limit": self._effective_warm_cache_limit(),
+            "prepared_cache_rebalance_evicted_warm": self.prepared_cache_rebalance_evicted_warm,
+            "prepared_cache_rebalance_evicted_activated": self.prepared_cache_rebalance_evicted_activated,
+            "prepared_cache_rebalance_demoted_to_warm": self.prepared_cache_rebalance_demoted_to_warm,
+            "prepared_cache_rebalance_dropped_to_ready": self.prepared_cache_rebalance_dropped_to_ready,
             "warm_cache_hits": self.warm_cache_hits,
             "warm_cache_stores": self.warm_cache_stores,
             "warm_cache_evictions": self.warm_cache_evictions,

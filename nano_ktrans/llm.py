@@ -280,6 +280,10 @@ class LLM:
             hybrid_moe.pipeline_apply_batch_activated = 0
             hybrid_moe.pipeline_apply_batch_warm = 0
             hybrid_moe.pipeline_apply_batch_cold = 0
+            hybrid_moe.prepared_cache_rebalance_evicted_warm = 0
+            hybrid_moe.prepared_cache_rebalance_evicted_activated = 0
+            hybrid_moe.prepared_cache_rebalance_demoted_to_warm = 0
+            hybrid_moe.prepared_cache_rebalance_dropped_to_ready = 0
             hybrid_moe.warm_cache_hits = 0
             hybrid_moe.warm_cache_stores = 0
             hybrid_moe.warm_cache_evictions = 0
