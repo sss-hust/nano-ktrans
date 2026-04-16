@@ -4304,6 +4304,9 @@ class TestDynamicScheduler:
                 self.pipeline_promotion_source_activated = 14
                 self.pipeline_promotion_source_warm = 15
                 self.pipeline_promotion_source_cold = 16
+                self.prepared_cache_rebalance_pressure_ema = 0.4
+                self.prepared_cache_rebalance_events_last_tick = 2
+                self.prepared_cache_rebalance_events_prev_total = 5
                 self.warm_cache_hits = 13
                 self.warm_cache_stores = 14
                 self.warm_cache_evictions = 15
@@ -4327,6 +4330,9 @@ class TestDynamicScheduler:
         assert dummy_hybrid.pipeline_ticks == 0
         assert dummy_hybrid.pipeline_prefetch_overlap_hits == 0
         assert dummy_hybrid.pipeline_promotion_source_activated == 0
+        assert dummy_hybrid.prepared_cache_rebalance_pressure_ema == 0.0
+        assert dummy_hybrid.prepared_cache_rebalance_events_last_tick == 0
+        assert dummy_hybrid.prepared_cache_rebalance_events_prev_total == 0
         assert dummy_hybrid.warm_cache_prebuilt == 0
         assert dummy_hybrid.activated_cache_hits == 0
         assert dummy_hybrid.activation_applied == 0

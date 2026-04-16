@@ -249,6 +249,10 @@ tags: [architecture]
     - `prepared_cache_rebalance_pressure_step`：本步压力，反映瞬时抖动
     - `prepared_cache_rebalance_pressure_ema`：对 step 压力做平滑后的中期趋势
     prepared-tier controller 目前已把累计压力与 EMA 一起用于 budget backoff；这让 controller 开始具备最小的“趋势感知”能力，而不只是对单次抖动做反应。
+45. 这些 controller 信号当前已经与 benchmark 生命周期对齐：
+    - `reset_offload_diagnostics()` 会在每次单 run 前清零 prepared-tier 的 pressure/EMA 相关状态
+    - 因此单次 benchmark 里的 summary/profile sweep 看到的是该次运行自身的 prepared pressure 轨迹，而不是跨 run 累积值
+    这保证了后续基于 sweep 结果做 controller/profile 调优时，信号具备可比性。
     这样 `HybridMoE.advance_offload_pipeline()` 现在已经可以按 `queued -> prefetching -> ready -> warmed -> activated -> applied` 的顺序推进一次 promotion。
 39. 这也让“前台 pipeline”里的工作边界更清晰了：
     - resident export / safetensors prefetch 负责准备权重

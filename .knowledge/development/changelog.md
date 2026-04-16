@@ -7,6 +7,8 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-16 09:08 --> **[prepared-controller-reset]** `LLM.reset_offload_diagnostics()` 现在会同步清零 prepared-tier controller 的 `prepared_cache_rebalance_pressure_ema`、`prepared_cache_rebalance_events_last_tick` 和 `prepared_cache_rebalance_events_prev_total`，避免单次 benchmark run 混入前序 step 的 controller 状态。
+- <!-- updated: 2026-04-16 09:08 --> **[tests]** 扩展 `reset_offload_diagnostics()` 覆盖，验证 prepared controller 的 EMA / step counters 也会被清零；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `88 passed, 1 warning`。
 - <!-- updated: 2026-04-16 09:02 --> **[prepared-pressure-signals]** prepared-tier 现在同时输出三类压力信号：累计 `prepared_cache_rebalance_pressure`、单步 `prepared_cache_rebalance_pressure_step` 和平滑后的 `prepared_cache_rebalance_pressure_ema`；prepared budget backoff 可以同时参考累计与 EMA，而不是只靠累计压力。
 - <!-- updated: 2026-04-16 09:02 --> **[tests]** 新增 prepared pressure step/EMA 的控制器测试与 summary 聚合测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `88 passed, 1 warning`。
 - <!-- updated: 2026-04-16 08:54 --> **[rebalance-pressure-normalization]** `prepared_cache_rebalance_pressure` 现按 `pipeline_ticks` 归一；prepared-tier controller 不再把长运行中的累计 eviction 直接当成瞬时高压，长期运行下的 backoff 信号更稳定。
