@@ -218,6 +218,15 @@ tags: [architecture]
     - `warmed` 表示 module 已在 CPU warm cache 里预构建
     - `activated` 表示该 module 已执行 device transfer，进入目标 device 上的 warm cache
     - `applied` 才表示它真正被插入 `gpu_experts` 并更新 resident set
+39. resident commit 现在也被拆成两段 staged queue：
+    - `apply_candidate_queue`：承接所有已经进入 `ACTIVATED` 的候选 expert
+    - `apply_commit_queue`：只承接被当前 batch policy 选中的 staged commit 候选
+    - 之后才进入真正的 resident set commit
+    这意味着后半段流水线现在已经从“activated 后立刻 opportunistic apply”推进成了“候选排队 -> staged commit -> resident 注入”的三段式结构。
+40. 当前 background worker 与前台主路径的职责边界也因此更清晰：
+    - background path 主要负责 `prefetching -> ready -> warmed -> activated -> apply_commit_queue enqueue`
+    - foreground path 主要负责消费 `apply_commit_queue` 并做最终 resident commit
+    - 这样后续再把 resident 注入继续收成真正的 per-layer batch commit 时，不必再从候选筛选阶段回退重构。
 39. prepared tier 当前不再只有静态预算：
     - `prepared_cache_limit` 表示配置上的 prepared 总预算
     - `effective_prepared_cache_limit` 表示运行时在当前压力下真正允许保留的 prepared expert 数

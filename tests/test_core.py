@@ -3213,6 +3213,7 @@ class TestDynamicScheduler:
         assert stats["apply_queue_enqueued"] == 1
         assert stats["activation_applied"] == 0
         assert diagnostics["background_apply_queue_enqueued"] == 1
+        assert diagnostics["background_apply_commit_queue_enqueued"] == 0
         assert diagnostics["apply_queue_enqueued"] == 1
         assert diagnostics["apply_queue_committed"] == 0
         assert diagnostics["apply_queue_size"] == 1
@@ -3344,6 +3345,7 @@ class TestDynamicScheduler:
         assert summary["apply_queue_pruned"] == 1
         assert summary["apply_queue_evictions"] == 2
         assert summary["background_apply_queue_enqueued"] == 3
+        assert summary["background_apply_commit_queue_enqueued"] == 0
         assert summary["apply_queue_commit_batch_size_avg"] is None
         assert summary["apply_queue_utilization"] == pytest.approx(0.5)
         assert summary["apply_queue_pressure_avg"] == pytest.approx(1.5)
@@ -3428,6 +3430,7 @@ class TestDynamicScheduler:
             )
 
         hybrid._enqueue_activated_apply_candidates(phase="decode")
+        hybrid._enqueue_apply_commit_candidates(expert_ids={1}, background=True)
         background_applied = hybrid._background_apply_activated_experts(
             phase="decode",
             eligible_expert_ids={1},
@@ -3435,12 +3438,16 @@ class TestDynamicScheduler:
         diagnostics = hybrid.diagnostics()
 
         assert background_applied == 1
+        assert diagnostics["apply_commit_queue_enqueued"] == 1
+        assert diagnostics["apply_commit_queue_size"] == 0
         assert diagnostics["background_apply_commit_batches"] == 1
         assert diagnostics["background_apply_commit_experts"] == 1
         assert diagnostics["apply_queue_commit_batches"] == 1
         assert diagnostics["apply_queue_commit_experts"] == 1
+        assert diagnostics["background_apply_commit_queue_enqueued"] == 1
 
         hybrid._enqueue_activated_apply_candidates(phase="decode")
+        hybrid._stage_apply_commit_batch(phase="decode")
         hybrid._commit_apply_candidate_queue(
             device=torch.device("cpu"),
             dtype=torch.float32,
@@ -3454,6 +3461,8 @@ class TestDynamicScheduler:
 
         assert diagnostics["apply_queue_commit_batches"] == 2
         assert diagnostics["apply_queue_commit_experts"] == 2
+        assert diagnostics["apply_commit_queue_enqueued"] >= 2
+        assert diagnostics["apply_commit_queue_utilization"] >= 0.0
 
     def test_hybrid_moe_promotion_prefers_activated_cache(self, tmp_path):
         from safetensors.torch import save_file

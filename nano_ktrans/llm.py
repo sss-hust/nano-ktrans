@@ -357,6 +357,9 @@ class LLM:
             hybrid_moe.apply_queue_committed = 0
             hybrid_moe.apply_queue_pruned = 0
             hybrid_moe.background_apply_queue_enqueued = 0
+            hybrid_moe.apply_commit_queue_enqueued = 0
+            hybrid_moe.apply_commit_queue_pruned = 0
+            hybrid_moe.background_apply_commit_queue_enqueued = 0
             hybrid_moe.apply_queue_commit_batches = 0
             hybrid_moe.apply_queue_commit_experts = 0
             hybrid_moe.background_apply_commit_batches = 0

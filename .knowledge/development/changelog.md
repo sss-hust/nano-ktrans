@@ -25,6 +25,9 @@ tags: [changelog]
 - <!-- updated: 2026-04-17 16:45 --> **[apply-queue-commit-batches]** apply queue 现新增 `apply_queue_commit_batches / experts` 和 `background_apply_commit_batches / experts`，可以直接量化后台和前台 staged commit 的批次大小，不再只能看 enqueue/committed 总数。
 - <!-- updated: 2026-04-17 16:45 --> **[apply-queue-commit-limit]** `HybridMoE` 新增 `adaptive_apply_commit_limit()`，apply queue staged commit 开始根据 apply queue 压力、EMA、cold penalty 和 profile aggressiveness 自适应调整每批 commit 的大小。
 - <!-- updated: 2026-04-17 16:45 --> **[tests]** 新增 apply queue commit batch 指标和 adaptive commit path 的覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `116 passed, 1 warning`。
+- <!-- updated: 2026-04-17 18:40 --> **[apply-commit-queue]** `HybridMoE` 现在把 resident commit 进一步拆成 `apply_candidate_queue -> apply_commit_queue -> resident set`；后台路径先将已激活 expert 分批推进到 staged commit queue，再由前台/后台消费 commit queue 做最终 resident 注入。
+- <!-- updated: 2026-04-17 18:40 --> **[apply-commit-queue-metrics]** scheduler summary 新增 `apply_commit_queue_size / limit / utilization / enqueued / pruned / background_apply_commit_queue_enqueued`，可以单独量化后半段 staged commit queue 的拥塞与推进情况。
+- <!-- updated: 2026-04-17 18:40 --> **[tests]** 扩展 apply commit queue 的后台 enqueue、前台 commit 和 summary 覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `116 passed, 1 warning`。
 
 - <!-- updated: 2026-04-17 15:18 --> **[pipeline-lock]** `HybridMoE` 新增内部 `RLock`，background worker 与前台 `refresh/advance/forward/diagnostics` 对 prepared-tier cache、migration lifecycle 和 resident set 的共享状态访问开始串行化，降低后台推进接入真实生成后出现竞态的风险。
 - <!-- updated: 2026-04-17 15:18 --> **[tests]** 并发边界收口后重新回归 `tests/test_core.py + tests/test_pim_runtime.py`，当前为 `111 passed, 1 warning`。
