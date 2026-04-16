@@ -897,6 +897,26 @@ class TestDynamicScheduler:
         assert diagnostics["offload_pipeline_apply_batch_warm_total"] == 1
         assert diagnostics["offload_pipeline_apply_batch_cold_total"] == 1
 
+    def test_migration_pipeline_runtime_tracks_background_tick_totals(self):
+        from nano_ktrans.kernels.migration_runtime import MigrationPipelineRuntime
+
+        class DummyLayer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.ones(1))
+                self.hybrid_moe = self
+
+            def background_tick_offload_state(self):
+                return 3
+
+        runtime = MigrationPipelineRuntime()
+        tick = runtime.background_tick_layers([DummyLayer()], phase="decode")
+        diagnostics = runtime.diagnostics()
+
+        assert tick["background_ready_callbacks"] == 3
+        assert diagnostics["offload_background_ticks"] == 1
+        assert diagnostics["offload_pipeline_background_ready_callback_total"] == 3
+
     def test_hybrid_moe_advance_pipeline_reports_incremental_batch_metrics(self, tmp_path):
         from safetensors.torch import save_file
 
@@ -4709,3 +4729,50 @@ class TestDynamicScheduler:
         assert dummy_hybrid.warm_cache_prebuilt == 0
         assert dummy_hybrid.activated_cache_hits == 0
         assert dummy_hybrid.activation_applied == 0
+
+    def test_llm_reset_offload_diagnostics_zeros_runtime_background_tick_counters(self):
+        from nano_ktrans.llm import LLM
+
+        llm = LLM.__new__(LLM)
+
+        class DummyRuntime:
+            def __init__(self):
+                self.tick_calls = 4
+                self.background_ticks = 5
+                self.prefetch_submitted_total = 6
+                self.ready_polled_total = 7
+                self.activation_ready_total = 8
+                self.ready_applied_total = 9
+                self.ready_deferred_total = 10
+                self.apply_batch_count_total = 11
+                self.apply_batch_experts_total = 12
+                self.apply_batch_evictions_total = 13
+                self.apply_batch_activated_total = 14
+                self.apply_batch_warm_total = 15
+                self.apply_batch_cold_total = 16
+                self.layers_touched_total = 17
+                self.background_ready_callback_total = 18
+                self.last_phase = "decode"
+
+        class DummyHybrid:
+            pass
+
+        runtime = DummyRuntime()
+        layer = type("Layer", (), {"hybrid_moe": DummyHybrid()})()
+        model = type(
+            "Inner",
+            (),
+            {
+                "layers": [layer],
+                "offload_runtime": runtime,
+            },
+        )()
+        llm.model = type("Wrapper", (), {"model": model})()
+
+        llm.reset_offload_diagnostics()
+
+        assert runtime.tick_calls == 0
+        assert runtime.background_ticks == 0
+        assert runtime.prefetch_submitted_total == 0
+        assert runtime.background_ready_callback_total == 0
+        assert runtime.last_phase == ""

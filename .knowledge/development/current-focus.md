@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-17 12:32
+updated: 2026-04-17 12:46
 ---
 
 # 🔥 当前工作焦点
@@ -96,6 +96,7 @@ updated: 2026-04-17 12:32
 - [x] migration manager 已补上内部锁，后台 ready callback 现在可以安全推进 lifecycle，不再默认假设所有迁移状态都只在前台单线程修改
 - [x] engine/model 已补上 background offload tick hook，后台 ready callback 可以在每个 token-step 的主 refresh 前先推进一轮，不再只靠同一个前台函数串行承担全部工作
 - [x] scheduler summary 现已汇总 `offload_background_ticks / offload_pipeline_background_ready_callback_total`，background tick 路径已进入 benchmark 可观测面
+- [x] `LLM.reset_offload_diagnostics()` 现已同步清零 runtime 级 background tick 计数，单次 run 的 background offload 指标不再混入历史步数
 
 ## 阻塞项
 
@@ -161,6 +162,7 @@ updated: 2026-04-17 12:32
 - 当前后台 ready callback 已能安全推进 lifecycle，但 `READY -> WARMED/ACTIVATED/APPLIED` 仍然主要由前台 token-step runtime 驱动，后台 worker 还没有接管完整后半段流水线
 - 当前 background tick 已经独立于主 refresh hook，但仍是 token-step 入口触发，不是真正常驻后台线程/事件循环
 - 当前 background tick 已经进入 summary/benchmark 可观测面，但仍只覆盖 `prefetching -> ready`，尚未接管 `ready -> warmed/activated` 或 resident apply
+- 当前 background tick 指标已支持 per-run reset，但 benchmark 还未把这组指标纳入 profile sweep 排序与 best-by-metric 对比
 - 当前 promotion batch 虽然已先统一 resolve source/module，再进入 apply，但 resident set 注入仍是 batch 内逐 expert 提交，不是真正底层 batched apply
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总
 - 当前 prebuild 已做候选裁剪，但 warm cache 还没有独立的“低优先级淘汰”策略，仍然主要依赖容量上限和 LRU

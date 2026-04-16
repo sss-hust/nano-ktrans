@@ -262,6 +262,24 @@ class LLM:
         }
 
     def reset_offload_diagnostics(self) -> None:
+        runtime = getattr(self.model.model, "offload_runtime", None)
+        if runtime is not None:
+            runtime.tick_calls = 0
+            runtime.background_ticks = 0
+            runtime.prefetch_submitted_total = 0
+            runtime.ready_polled_total = 0
+            runtime.activation_ready_total = 0
+            runtime.ready_applied_total = 0
+            runtime.ready_deferred_total = 0
+            runtime.apply_batch_count_total = 0
+            runtime.apply_batch_experts_total = 0
+            runtime.apply_batch_evictions_total = 0
+            runtime.apply_batch_activated_total = 0
+            runtime.apply_batch_warm_total = 0
+            runtime.apply_batch_cold_total = 0
+            runtime.layers_touched_total = 0
+            runtime.background_ready_callback_total = 0
+            runtime.last_phase = ""
         for layer in self.model.model.layers:
             hybrid_moe = getattr(layer, "hybrid_moe", None)
             if hybrid_moe is None:

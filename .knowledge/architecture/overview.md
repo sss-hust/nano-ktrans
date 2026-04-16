@@ -472,6 +472,10 @@ tags: [architecture]
     - `offload_background_ticks`
     - `offload_pipeline_background_ready_callback_total`
     这样 benchmark 已经能单独观察“后台事件推进量”和“前台主流水线推进量”，两条路径终于可以分开对比，而不再都折叠进同一个 refresh 计数里。
+76. runtime 级 background tick 指标现在也会被 `LLM.reset_offload_diagnostics()` 一起重置：
+    - 单次 run 的 background tick 计数不会再混入前序 warmup
+    - background ready callback 的推进量终于具备和 decode/apply 指标一致的 per-run 语义
+    这让以后用 benchmark/profile sweep 比较“后台推进是否真的减少前台 stall”时，数据口径开始统一。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
