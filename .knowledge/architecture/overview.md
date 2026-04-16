@@ -279,6 +279,10 @@ tags: [architecture]
     - 前者表示 device-side activated candidate 被挤回 CPU warm 层
     - 后者表示 CPU warm candidate 被进一步打回 `READY`
     这意味着后续 profile sweep 不只可以看命中率，也可以看“系统为了维持 budget 到底回退了多少已准备好的 expert”。
+50. 这些 regression 指标现在也已经进入 profile sweep 排名层：
+    - `comparison_table` 会带出每个 profile 的 eviction regression 压力
+    - `best_by_metric` 也能按更少的 regression 选出更稳的 profile
+    这让 profile 对比从“只看快不快”继续推进到“快的同时是不是在靠频繁回退缓存状态硬撑”。
 46. benchmark 侧现在也开始按“单次 run”观察流水线：
     - 每次 generation 前会重置 HybridMoE 的 runtime/queue/cache 计数器
     - 每个 run 结果都带自己的 `scheduler_summary`

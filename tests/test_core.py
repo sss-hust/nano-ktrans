@@ -739,6 +739,8 @@ class TestDynamicScheduler:
                         "offload_pipeline_apply_batch_count_total": 2,
                         "offload_pipeline_apply_batch_experts_total": 3,
                         "offload_pipeline_apply_batch_evictions_total": 1,
+                        "migration_activation_eviction_regressions": 2,
+                        "migration_warm_eviction_regressions": 3,
                         "runtime_deferred_for_prefetch": 4,
                     },
                     "runs": [
@@ -770,6 +772,8 @@ class TestDynamicScheduler:
                         "offload_pipeline_apply_batch_count_total": 3,
                         "offload_pipeline_apply_batch_experts_total": 6,
                         "offload_pipeline_apply_batch_evictions_total": 2,
+                        "migration_activation_eviction_regressions": 0,
+                        "migration_warm_eviction_regressions": 1,
                         "runtime_deferred_for_prefetch": 1,
                     },
                     "runs": [
@@ -787,14 +791,17 @@ class TestDynamicScheduler:
         assert summary["best_by_decode_tokens_per_second"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_decode_tokens_per_second"]["decode_tokens_per_second"] == pytest.approx(2.5)
         assert summary["metric_directions"]["pipeline_promotion_source_cold"] == "min"
+        assert summary["metric_directions"]["migration_activation_eviction_regressions"] == "min"
         assert "pipeline_apply_batch_size_avg" in summary["sort_keys"]
         assert "pipeline_promotion_non_cold_ratio" in summary["sort_keys"]
         assert summary["best_by_decode_tokens_per_second"]["runtime_offload_pipeline_apply_batch_count_total"] == 3
         assert summary["best_by_metric"]["pipeline_promotion_source_cold"]["scheduler_profile"] == "overlap_safe"
+        assert summary["best_by_metric"]["migration_activation_eviction_regressions"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["pipeline_promotion_non_cold_ratio"]["value"] == pytest.approx(0.75)
         assert summary["best_by_metric"]["runtime_apply_batch_size_avg"]["value"] == pytest.approx(2.0)
         assert summary["comparison_table"][0]["pipeline_apply_batch_activated"] == 3
         assert summary["comparison_table"][0]["pipeline_apply_batch_cold_ratio"] == pytest.approx(1.0 / 6.0)
+        assert summary["comparison_table"][0]["migration_activation_eviction_regressions"] == 0
         assert summary["comparison_table"][0]["scheduler_profile"] == "overlap_safe"
         assert summary["comparison_table"][0]["rank_by_decode_tokens_per_second"] == 1
         assert summary["comparison_table"][0]["pipeline_promotion_non_cold_total"] == 3

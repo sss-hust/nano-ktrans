@@ -16,6 +16,8 @@ PROFILE_SWEEP_SORT_KEYS = (
     "runtime_offload_pipeline_apply_batch_evictions_total",
     "pipeline_apply_batch_size_avg",
     "pipeline_apply_batch_evictions",
+    "migration_activation_eviction_regressions",
+    "migration_warm_eviction_regressions",
     "runtime_deferred_for_prefetch",
 )
 
@@ -36,6 +38,8 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "runtime_offload_pipeline_apply_batch_experts_total": "max",
     "runtime_offload_pipeline_apply_batch_evictions_total": "min",
     "runtime_apply_batch_size_avg": "max",
+    "migration_activation_eviction_regressions": "min",
+    "migration_warm_eviction_regressions": "min",
     "runtime_deferred_for_prefetch": "min",
 }
 
@@ -69,6 +73,8 @@ def _build_profile_comparison_table(profiles: list[dict[str, Any]]) -> list[dict
         key=lambda profile: (
             float(profile.get("decode_tokens_per_second") or float("-inf")),
             float(profile.get("pipeline_promotion_non_cold_ratio") or float("-inf")),
+            -float(profile.get("migration_activation_eviction_regressions") or 0.0),
+            -float(profile.get("migration_warm_eviction_regressions") or 0.0),
             -float(profile.get("runtime_deferred_for_prefetch") or 0.0),
         ),
         reverse=True,
@@ -385,6 +391,12 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
                 runtime_apply_batch_experts / runtime_apply_batch_count
                 if runtime_apply_batch_count > 0
                 else None
+            ),
+            "migration_activation_eviction_regressions": int(
+                scheduler_summary.get("migration_activation_eviction_regressions", 0)
+            ),
+            "migration_warm_eviction_regressions": int(
+                scheduler_summary.get("migration_warm_eviction_regressions", 0)
             ),
             "runtime_deferred_for_prefetch": int(
                 scheduler_summary.get("runtime_deferred_for_prefetch", 0)

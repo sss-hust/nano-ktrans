@@ -11,6 +11,7 @@ tags: [changelog]
 - <!-- updated: 2026-04-16 03:36 --> **[batch-apply-sources]** ready promotion 的批处理现在会统计 batch 内 `activated / warm / cold` 三类来源；对应指标已接到 `HybridMoE` 诊断、`MigrationPipelineRuntime` 汇总和 scheduler summary，便于判断批处理究竟是在消费热路径还是仍有大量冷启动。
 - <!-- updated: 2026-04-16 03:48 --> **[lifecycle-alignment]** warm/activated cache 的 eviction 现在会同步回退 migration lifecycle：device-side activated candidate 被挤出时回退到 `WARMED`，CPU warm candidate 被挤出时回退到 `READY`，避免 cache 层次和状态机脱节。
 - <!-- updated: 2026-04-16 03:58 --> **[eviction-regressions]** migration diagnostics 新增 `total_activation_eviction_regressions` 和 `total_warm_eviction_regressions`，可以直接统计缓存淘汰导致的 lifecycle 回退次数，为后续调整 warm/activated 预算提供依据。
+- <!-- updated: 2026-04-16 04:05 --> **[profile-ranking]** profile sweep 的比较表和 metric ranking 现在会纳入 eviction regression 压力，后续可以直接按“更少 lifecycle 回退”筛选更稳的动态调度策略。
 
 ## 2026-04-07
 
