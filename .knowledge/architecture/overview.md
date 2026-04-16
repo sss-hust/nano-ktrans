@@ -490,6 +490,11 @@ tags: [architecture]
     - 前台 decode 主路径则继续负责：
       - `ACTIVATED -> APPLIED`
     这意味着当前系统已经从“纯前台 hook 推进”演化成了“后台准备 + 前台 commit”的雏形；虽然还不是真正的 GPU<->PIM 异步迁移执行器，但后台 worker 已经是独立对象，并具备独立计数、reset 和 shutdown 生命周期。
+79. background worker 现在已经接入真实生成生命周期：
+    - `SimpleEngine` 负责启动/停止后台 worker
+    - `LLM.generate()` 在生成前启动 worker，在 `finally` 中停止并清理
+    - 因此后台推进不再只是“模型里有个可选线程对象”，而是正式进入端到端 decode 路径
+    这一步的意义是把后台 worker 从纯骨架推进成了真正会参与运行的 runtime 组件，为后续继续把 `READY -> WARMED/ACTIVATED` 甚至部分 apply 从前台主路径挪走打下基础。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

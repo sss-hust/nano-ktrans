@@ -50,6 +50,20 @@ class SimpleEngine:
         if refresh_fn is None:
             return 0
         return int(refresh_fn(phase=phase))
+
+    def start_background_offload_worker(self) -> bool:
+        start_fn = getattr(self.model.model, "start_offload_worker", None)
+        if start_fn is None:
+            return False
+        start_fn()
+        return True
+
+    def stop_background_offload_worker(self) -> bool:
+        stop_fn = getattr(self.model.model, "shutdown_offload_worker", None)
+        if stop_fn is None:
+            return False
+        stop_fn()
+        return True
             
     @torch.no_grad()
     def prefill(self, input_ids: torch.Tensor) -> torch.Tensor:

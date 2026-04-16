@@ -61,6 +61,9 @@ class BackgroundOffloadWorker:
             self._thread.join(timeout=1.0)
             self._thread = None
 
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     def reset_counters(self) -> None:
         with self._stats_lock:
             self.ticks = 0
@@ -73,7 +76,7 @@ class BackgroundOffloadWorker:
             work_ticks = self.work_ticks
             last_work_items = self.last_work_items
         return {
-            "enabled": self._thread is not None and self._thread.is_alive(),
+            "enabled": self.is_running(),
             "poll_interval_seconds": self.poll_interval_seconds,
             "ticks": ticks,
             "work_ticks": work_ticks,

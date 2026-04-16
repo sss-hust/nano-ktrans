@@ -225,6 +225,7 @@ class LLM:
         print(f"Prompt tokens: {seq_len}. Starts generation...")
 
         try:
+            self.engine.start_background_offload_worker()
             # 2. Prefill
             logits = self.engine.prefill(input_ids)
             next_token = torch.argmax(logits[0, -1, :], dim=-1).unsqueeze(0).unsqueeze(0)
@@ -247,6 +248,7 @@ class LLM:
             output_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
             return output_text
         finally:
+            self.engine.stop_background_offload_worker()
             self.shutdown()
 
     def get_offload_diagnostics(self) -> dict:

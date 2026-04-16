@@ -295,6 +295,17 @@ class MixtralModel(nn.Module):
         if offload_worker is not None:
             offload_worker.shutdown()
 
+    def start_offload_worker(self) -> None:
+        offload_worker = self.__dict__.get("offload_worker")
+        if offload_worker is not None:
+            offload_worker.start()
+
+    def offload_worker_running(self) -> bool:
+        offload_worker = self.__dict__.get("offload_worker")
+        if offload_worker is None:
+            return False
+        return bool(offload_worker.is_running())
+
     def reset_offload_worker_diagnostics(self) -> None:
         offload_worker = self.__dict__.get("offload_worker")
         if offload_worker is not None:

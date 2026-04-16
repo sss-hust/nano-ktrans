@@ -441,6 +441,30 @@ class TestSimpleEngine:
         assert engine.model.model.calls == 1
         assert engine.model.model.last_phase == "decode"
 
+    def test_engine_can_start_and_stop_background_offload_worker(self):
+        from nano_ktrans.engine.simple_engine import SimpleEngine
+
+        called = {"start": 0, "stop": 0}
+
+        class DummyInnerModel:
+            def start_offload_worker(self):
+                called["start"] += 1
+
+            def shutdown_offload_worker(self):
+                called["stop"] += 1
+
+        class DummyOuterModel:
+            def __init__(self):
+                self.model = DummyInnerModel()
+
+        engine = SimpleEngine.__new__(SimpleEngine)
+        engine.model = DummyOuterModel()
+
+        assert engine.start_background_offload_worker() is True
+        assert engine.stop_background_offload_worker() is True
+        assert called["start"] == 1
+        assert called["stop"] == 1
+
 
 class TestBackgroundOffloadWorker:
     def test_worker_records_ticks_and_can_reset(self):
@@ -1917,6 +1941,29 @@ class TestDynamicScheduler:
         model.offload_worker = DummyWorker()
         model.reset_offload_worker_diagnostics()
         assert called["count"] == 1
+
+    def test_mixtral_model_can_start_and_stop_background_worker(self):
+        from nano_ktrans.models.mixtral import MixtralModel
+
+        called = {"start": 0, "stop": 0}
+
+        class DummyWorker:
+            def start(self):
+                called["start"] += 1
+
+            def shutdown(self):
+                called["stop"] += 1
+
+            def is_running(self):
+                return called["start"] > called["stop"]
+
+        model = MixtralModel.__new__(MixtralModel)
+        model.offload_worker = DummyWorker()
+        model.start_offload_worker()
+        assert model.offload_worker_running() is True
+        model.shutdown_offload_worker()
+        assert called["start"] == 1
+        assert called["stop"] == 1
 
     def test_scheduler_summary_reports_background_offload_tick_metrics(self):
         from nano_ktrans.scheduler.diagnostics import summarize_offload_diagnostics
@@ -4884,3 +4931,56 @@ class TestDynamicScheduler:
         llm.model = type("Wrapper", (), {"model": DummyModel()})()
         llm.shutdown()
         assert called["count"] == 1
+
+    def test_llm_generate_starts_and_stops_background_worker(self):
+        from nano_ktrans.llm import LLM
+
+        llm = LLM.__new__(LLM)
+        llm.device = "cpu"
+        llm.tokenizer = type(
+            "Tokenizer",
+            (),
+            {
+                "eos_token_id": -1,
+                "decode": staticmethod(lambda ids, skip_special_tokens=True: "decoded"),
+                "__call__": staticmethod(
+                    lambda prompt, return_tensors="pt": type(
+                        "Inputs",
+                        (),
+                        {"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long)},
+                    )()
+                ),
+            },
+        )()
+
+        calls = {"start": 0, "stop": 0, "shutdown": 0, "prefill": 0, "decode": 0}
+
+        class DummyEngine:
+            def start_background_offload_worker(self):
+                calls["start"] += 1
+
+            def stop_background_offload_worker(self):
+                calls["stop"] += 1
+
+            def prefill(self, input_ids):
+                calls["prefill"] += 1
+                return torch.tensor([[[0.1, 0.9]]], dtype=torch.float32)
+
+            def decode_step(self, next_token, current_seq_len):
+                calls["decode"] += 1
+                return torch.tensor([[[0.9, 0.1]]], dtype=torch.float32)
+
+        class DummyModel:
+            def shutdown_offload_worker(self):
+                calls["shutdown"] += 1
+
+        llm.engine = DummyEngine()
+        llm.model = type("Wrapper", (), {"model": DummyModel()})()
+        output = llm.generate("hi", max_new_tokens=2)
+
+        assert output == "decoded"
+        assert calls["start"] == 1
+        assert calls["stop"] == 1
+        assert calls["shutdown"] == 1
+        assert calls["prefill"] == 1
+        assert calls["decode"] == 1

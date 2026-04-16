@@ -227,6 +227,12 @@ tags: [changelog]
 - `LLM.reset_offload_diagnostics()` 已同步重置 background worker 计数，`LLM.shutdown()` 会在生成结束后关闭后台 worker。
 - 新增对应测试覆盖 background worker 计数、reset 和 shutdown 路径。
 
+<!-- updated: 2026-04-17 13:45 -->
+
+- `SimpleEngine` 新增 `start_background_offload_worker()` / `stop_background_offload_worker()`，worker 生命周期现在可以由引擎统一管理。
+- `LLM.generate()` 现在会在生成前启动 background offload worker，并在 `finally` 中停止 worker 与执行 shutdown，后台推进首次接入真实生成路径。
+- `MixtralModel` 新增 `start_offload_worker()` / `offload_worker_running()`，后台 worker 从“模型里可选对象”进一步收敛成了正式 runtime 组件。
+
 ## 2026-04-16
 
 - <!-- updated: 2026-04-16 00:40 --> **[migration-pipeline-runtime]** 新增 `MigrationPipelineRuntime`，将 token-step 级 offload refresh 提升为最小流水线运行时；ready prefetch 轮询与 ready promotion 现在可在进入模型前统一推进，不再依赖层内 forward 临时收敛。

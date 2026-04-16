@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-17 13:00
+updated: 2026-04-17 13:45
 ---
 
 # 🔥 当前工作焦点
@@ -100,6 +100,7 @@ updated: 2026-04-17 13:00
 - [x] background offload tick 现在不只推进 ready callback，也会提前推进一部分 `READY -> WARMED/ACTIVATED`，后台路径已开始覆盖 prepared tier 的前半段
 - [x] 新增最小后台 offload worker 骨架，后台线程可周期性推进 `background_tick_offload_state()`，decode 主线程不再是唯一能推动 ready/warm/activation 前半段前进的入口
 - [x] background worker 诊断现已并入 `offload_refresh_diagnostics()`，并支持 per-run reset，benchmark 可独立观察后台 worker tick 与 work tick 行为
+- [x] `SimpleEngine/LLM` 现已接入 background worker 生命周期：生成前启动后台 worker，生成后停止并清理，后台推进不再只是模型内部的“可选对象”
 
 ## 阻塞项
 
