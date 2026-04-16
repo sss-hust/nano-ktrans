@@ -161,6 +161,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "prepared_cache_rebalance_evicted_activated": 0,
         "prepared_cache_rebalance_demoted_to_warm": 0,
         "prepared_cache_rebalance_dropped_to_ready": 0,
+        "prepared_cache_activation_stage_bonus": 0.0,
         "decode_prefetch_hits": 0,
         "decode_prefetch_misses": 0,
         "runtime_evictions": 0,
@@ -244,6 +245,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["prepared_cache_rebalance_dropped_to_ready"] += int(
             layer.get("prepared_cache_rebalance_dropped_to_ready", 0)
         )
+        summary["prepared_cache_activation_stage_bonus"] += float(
+            layer.get("prepared_cache_activation_stage_bonus", 0.0)
+        )
         summary["decode_prefetch_hits"] += int(layer.get("decode_prefetch_hits", 0))
         summary["decode_prefetch_misses"] += int(layer.get("decode_prefetch_misses", 0))
         summary["runtime_evictions"] += int(layer.get("runtime_evictions", 0))
@@ -308,6 +312,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
     else:
         summary["prepared_cache_utilization"] = None
+    if summary["layer_count"] > 0:
+        summary["prepared_cache_activation_stage_bonus_avg"] = (
+            summary["prepared_cache_activation_stage_bonus"] / summary["layer_count"]
+        )
+    else:
+        summary["prepared_cache_activation_stage_bonus_avg"] = None
     total_rebalance_events = (
         summary["prepared_cache_rebalance_evicted_warm"]
         + summary["prepared_cache_rebalance_evicted_activated"]
@@ -450,6 +460,9 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             ),
             "prepared_cache_rebalance_activated_ratio": scheduler_summary.get(
                 "prepared_cache_rebalance_activated_ratio"
+            ),
+            "prepared_cache_activation_stage_bonus_avg": scheduler_summary.get(
+                "prepared_cache_activation_stage_bonus_avg"
             ),
             "migration_activation_eviction_regressions": int(
                 scheduler_summary.get("migration_activation_eviction_regressions", 0)

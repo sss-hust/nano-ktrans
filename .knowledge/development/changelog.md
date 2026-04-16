@@ -7,6 +7,8 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-16 07:40 --> **[prepared-cache-stage-bonus]** prepared-cache retention policy 现在带最小自适应 stage bonus：当重平衡更频繁地打在 activated tier 或 warm tier 时，`prepared_cache_activation_stage_bonus` 会随之调整，开始为后续自适应 prepared-cache policy 预留动态信号。
+- <!-- updated: 2026-04-16 07:40 --> **[tests]** 新增 prepared-cache stage-bonus 方向性测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `83 passed, 1 warning`。
 - <!-- updated: 2026-04-16 07:29 --> **[prepared-cache-rebalance-metrics]** scheduler summary/profile sweep 现在会显式统计 prepared-cache 重平衡事件，包括 `prepared_cache_rebalance_evicted_warm / evicted_activated / demoted_to_warm / dropped_to_ready`，可以直接看 prepared budget 压力主要落在哪一层。
 - <!-- updated: 2026-04-16 07:29 --> **[tests]** 新增 prepared-cache 重平衡摘要与 profile sweep 测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `82 passed, 1 warning`。
 - <!-- updated: 2026-04-16 07:18 --> **[prepared-cache-sweep]** profile sweep 的 `profiles / comparison_table / best_by_metric` 现已包含 `prepared_cache_limit / prepared_cache_size / effective_warm_cache_limit / prepared_cache_utilization`，prepared tier 预算可以直接参与策略排序与对比。

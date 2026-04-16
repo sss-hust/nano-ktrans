@@ -374,6 +374,11 @@ tags: [architecture]
     - summary 和 profile sweep 会分别统计 warm side 被挤掉了多少、activated side 被挤掉了多少
     - 以及 activated candidate 被降回 warm、warm candidate 被降回 ready 的次数
     这样后续做自适应 prepared-cache policy 时，可以直接判断“预算不够”主要打在 warm tier 还是 activated tier，而不是只看到一个总的 utilization。
+63. prepared-cache retention policy 现在还带一个最小的自适应 stage bonus：
+    - activated tier 在 prepared-cache victim 选择时会带额外 stage bonus
+    - 这个 bonus 会随着最近的 prepared-cache 重平衡方向做小幅调整
+    - 因而系统开始具备“近期更容易牺牲哪一层，就稍微补偿哪一层”的最小动态倾向
+    这还不是完整的 budget controller，但已经把 prepared tier 从静态 heuristic 推进到了弱自适应策略。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
