@@ -695,3 +695,13 @@ tags: [architecture]
 - 当前 `pim` backend 同时支持 `linear` 和实验性 `fused` 两种 kernel variant；`fused` 已能在 DPU 上执行完整 expert 子图，但性能尚未优于 `linear3`，所以默认仍应使用 `linear`。
 - 当前 PIM benchmark 测的是整数 affine workload，不是 FLOPS，也不是 MoE expert GEMM。
 - 当前专家放置仍是静态的 `gpu_experts_mask`；真正的 GPU/PIM 动态迁移、权重常驻管理和 overlap 调度还没有接入系统。
+- 当前 resident commit 已演进为多级 staged pipeline：
+  - `apply_candidate_queue`
+  - `apply_commit_queue`
+  - `apply_commit_batch_queue`
+  - `resident_commit_batch_queue`
+  - `resident_commit_finalize_queue`
+  - `resident_commit_ready_cache`
+  - `resident_commit_apply_queue`
+  - `resident set`
+- background worker 现在可以把 preexisting resident batches 逐步推进到 `resident_commit_apply_queue`，而前台 decode 主路径主要消费 tick 开始前已存在的 apply batches，再做最终 metadata finalize。

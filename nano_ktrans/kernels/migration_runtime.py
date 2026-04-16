@@ -32,6 +32,7 @@ class MigrationPipelineRuntime:
         self.background_resident_commit_finalize_queue_enqueued_total = 0
         self.background_resident_commit_finalize_queue_prefinalized_total = 0
         self.background_resident_commit_ready_cache_stores_total = 0
+        self.background_resident_commit_apply_queue_enqueued_total = 0
         self.prefetch_submitted_total = 0
         self.ready_polled_total = 0
         self.activation_ready_total = 0
@@ -79,6 +80,7 @@ class MigrationPipelineRuntime:
         background_resident_commit_finalize_queue_enqueued = 0
         background_resident_commit_finalize_queue_prefinalized = 0
         background_resident_commit_ready_cache_stores = 0
+        background_resident_commit_apply_queue_enqueued = 0
 
         for decoder_layer in decoder_layers:
             hybrid_moe = getattr(decoder_layer, "hybrid_moe", None)
@@ -124,6 +126,9 @@ class MigrationPipelineRuntime:
                     background_resident_commit_ready_cache_stores += int(
                         background_stats.get("resident_commit_ready_cache_stores", 0)
                     )
+                    background_resident_commit_apply_queue_enqueued += int(
+                        background_stats.get("resident_commit_apply_queue_enqueued", 0)
+                    )
                     background_work_items += (
                         int(background_stats.get("ready_polled", 0))
                         + int(background_stats.get("warm_prebuilt", 0))
@@ -138,6 +143,7 @@ class MigrationPipelineRuntime:
                         + int(background_stats.get("resident_commit_finalize_queue_enqueued", 0))
                         + int(background_stats.get("resident_commit_finalize_queue_prefinalized", 0))
                         + int(background_stats.get("resident_commit_ready_cache_stores", 0))
+                        + int(background_stats.get("resident_commit_apply_queue_enqueued", 0))
                     )
                     continue
                 background_tick_fn = getattr(hybrid_moe, "background_tick_offload_state", None)
@@ -206,6 +212,7 @@ class MigrationPipelineRuntime:
                 background_resident_commit_finalize_queue_prefinalized
             ),
             "background_resident_commit_ready_cache_stores": background_resident_commit_ready_cache_stores,
+            "background_resident_commit_apply_queue_enqueued": background_resident_commit_apply_queue_enqueued,
             "background_only": int(background_only),
         }
 
@@ -243,6 +250,9 @@ class MigrationPipelineRuntime:
         )
         self.background_resident_commit_ready_cache_stores_total += int(
             stats.get("background_resident_commit_ready_cache_stores", 0)
+        )
+        self.background_resident_commit_apply_queue_enqueued_total += int(
+            stats.get("background_resident_commit_apply_queue_enqueued", 0)
         )
         self.layers_touched_total += int(stats.get("layers_touched", 0))
         self.last_phase = phase
@@ -311,6 +321,9 @@ class MigrationPipelineRuntime:
             ),
             "offload_background_resident_commit_ready_cache_stores_total": int(
                 self.background_resident_commit_ready_cache_stores_total
+            ),
+            "offload_background_resident_commit_apply_queue_enqueued_total": int(
+                self.background_resident_commit_apply_queue_enqueued_total
             ),
             "offload_refresh_ready_total": int(self.ready_polled_total),
             "offload_pipeline_ticks": int(self.tick_calls),

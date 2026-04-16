@@ -3357,6 +3357,7 @@ class TestDynamicScheduler:
                     "offload_background_resident_commit_finalize_queue_enqueued_total": 1,
                     "offload_background_resident_commit_finalize_queue_prefinalized_total": 1,
                     "offload_background_resident_commit_ready_cache_stores_total": 1,
+                    "offload_background_resident_commit_apply_queue_enqueued_total": 1,
                 },
                 "dynamic_scheduler": {"enabled": True},
                 "layers": [
@@ -3378,6 +3379,9 @@ class TestDynamicScheduler:
                         "resident_commit_ready_cache_size": 1,
                         "resident_commit_ready_cache_limit": 2,
                         "resident_commit_ready_cache_utilization": 0.5,
+                        "resident_commit_apply_queue_size": 1,
+                        "resident_commit_apply_queue_limit": 2,
+                        "resident_commit_apply_queue_utilization": 0.5,
                         "apply_queue_enqueued": 5,
                         "apply_queue_committed": 3,
                         "apply_queue_pruned": 1,
@@ -3400,6 +3404,11 @@ class TestDynamicScheduler:
                         "resident_commit_ready_cache_hits": 0,
                         "resident_commit_ready_cache_pruned": 0,
                         "resident_commit_ready_cache_evictions": 0,
+                        "resident_commit_apply_queue_enqueued": 1,
+                        "resident_commit_apply_queue_batches": 1,
+                        "resident_commit_apply_queue_committed_batches": 1,
+                        "resident_commit_apply_queue_pruned": 0,
+                        "resident_commit_apply_queue_evictions": 0,
                         "apply_queue_pressure": 1.5,
                         "apply_queue_pressure_step": 0.5,
                         "apply_queue_pressure_ema": 0.75,
@@ -3421,6 +3430,8 @@ class TestDynamicScheduler:
                         "background_resident_commit_finalize_queue_committed_batches": 1,
                         "background_resident_commit_finalize_queue_prefinalized_batches": 1,
                         "background_resident_commit_ready_cache_stores": 1,
+                        "background_resident_commit_apply_queue_enqueued": 1,
+                        "background_resident_commit_apply_queue_committed_batches": 1,
                     }
                 ],
             }
@@ -3442,6 +3453,8 @@ class TestDynamicScheduler:
         assert summary["resident_commit_finalize_queue_limit"] == 2
         assert summary["resident_commit_ready_cache_size"] == 1
         assert summary["resident_commit_ready_cache_limit"] == 2
+        assert summary["resident_commit_apply_queue_size"] == 1
+        assert summary["resident_commit_apply_queue_limit"] == 2
         assert summary["apply_commit_queue_enqueued"] == 2
         assert summary["apply_commit_queue_pruned"] == 1
         assert summary["apply_commit_queue_evictions"] == 1
@@ -3459,6 +3472,10 @@ class TestDynamicScheduler:
         assert summary["resident_commit_ready_cache_stores"] == 1
         assert summary["resident_commit_ready_cache_pruned"] == 0
         assert summary["resident_commit_ready_cache_evictions"] == 0
+        assert summary["resident_commit_apply_queue_enqueued"] == 1
+        assert summary["resident_commit_apply_queue_committed_batches"] == 1
+        assert summary["resident_commit_apply_queue_pruned"] == 0
+        assert summary["resident_commit_apply_queue_evictions"] == 0
         assert summary["apply_commit_ready_cache_size"] == 0
         assert summary["apply_commit_ready_hits"] == 0
         assert summary["apply_commit_ready_stores"] == 0
@@ -3474,6 +3491,8 @@ class TestDynamicScheduler:
         assert summary["background_resident_commit_finalize_queue_committed_batches"] == 1
         assert summary["background_resident_commit_finalize_queue_prefinalized_batches"] == 1
         assert summary["background_resident_commit_ready_cache_stores"] == 1
+        assert summary["background_resident_commit_apply_queue_enqueued"] == 1
+        assert summary["background_resident_commit_apply_queue_committed_batches"] == 1
         assert summary["apply_queue_commit_batch_size_avg"] is None
         assert summary["apply_queue_utilization"] == pytest.approx(0.5)
         assert summary["apply_commit_queue_utilization"] == pytest.approx(0.5)
@@ -3481,6 +3500,7 @@ class TestDynamicScheduler:
         assert summary["resident_commit_batch_queue_utilization"] == pytest.approx(0.5)
         assert summary["resident_commit_finalize_queue_utilization"] == pytest.approx(0.5)
         assert summary["resident_commit_ready_cache_utilization"] == pytest.approx(0.5)
+        assert summary["resident_commit_apply_queue_utilization"] == pytest.approx(0.5)
         assert summary["apply_queue_pressure_avg"] == pytest.approx(1.5)
         assert summary["apply_queue_pressure_step_avg"] == pytest.approx(0.5)
         assert summary["apply_queue_pressure_ema_avg"] == pytest.approx(0.75)
@@ -3498,6 +3518,7 @@ class TestDynamicScheduler:
         assert summary["offload_background_resident_commit_finalize_queue_enqueued_total"] == 1
         assert summary["offload_background_resident_commit_finalize_queue_prefinalized_total"] == 1
         assert summary["offload_background_resident_commit_ready_cache_stores_total"] == 1
+        assert summary["offload_background_resident_commit_apply_queue_enqueued_total"] == 1
 
     def test_apply_queue_commit_batch_metrics_track_background_and_foreground_commits(self, tmp_path):
         from safetensors.torch import save_file
