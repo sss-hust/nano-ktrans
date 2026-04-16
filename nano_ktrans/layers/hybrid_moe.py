@@ -547,30 +547,53 @@ class HybridMoE(nn.Module):
             return 0.0
         return self._prepared_cache_size() / max(1, int(effective_prepared_limit))
 
+    def _prepared_controller_engaged(self) -> bool:
+        return self._prepared_cache_budget_backoff() > 0 or self._prepared_cache_pressure() >= 1.0
+
     def _adaptive_activation_limit(self) -> int:
         base_limit = self._activated_cache_limit()
         if self.expert_prepared_cache_size is None:
             return base_limit
+        controller_engaged = self._prepared_controller_engaged()
+        effective_prepared_limit = max(1, int(self._effective_prepared_cache_limit() or base_limit))
+        limit = base_limit
         if self._prepared_cache_pressure() >= 1.0 and self.prepared_cache_activation_stage_bonus <= 0.25:
-            return max(1, base_limit - 1)
+            limit = max(1, base_limit - 1)
         if self.cold_promotion_penalty >= 1.0:
-            return min(base_limit + 1, max(base_limit, int(self.expert_prepared_cache_size)))
-        if self.prepared_cache_activation_stage_bonus >= 1.0:
-            return min(base_limit + 1, max(base_limit, int(self.expert_prepared_cache_size)))
-        return base_limit
+            limit = min(base_limit + 1, max(limit, base_limit))
+        elif self.prepared_cache_activation_stage_bonus >= 1.0:
+            limit = min(base_limit + 1, max(limit, base_limit))
+        if controller_engaged:
+            controller_cap = effective_prepared_limit
+            if self.prepared_cache_activation_stage_bonus >= 1.0:
+                controller_cap += 1
+            if self.cold_promotion_penalty >= 1.0:
+                controller_cap += 1
+            limit = min(limit, max(1, controller_cap))
+        return max(1, limit)
 
     def _adaptive_prebuild_limit(self) -> int:
         base_limit = max(1, self._activated_cache_limit() * 2)
         if self.expert_prepared_cache_size is None:
             return base_limit
+        controller_engaged = self._prepared_controller_engaged()
+        effective_prepared_limit = max(1, int(self._effective_prepared_cache_limit() or 1))
         pressure = self._prepared_cache_pressure()
+        limit = base_limit
         if pressure >= 1.0:
-            return max(1, min(base_limit, int(self.expert_prepared_cache_size)))
+            limit = max(1, min(base_limit, int(self.expert_prepared_cache_size)))
         if self.cold_promotion_penalty >= 1.0:
-            return min(base_limit + 2, max(base_limit, int(self.expert_prepared_cache_size) + 2))
-        if self.prepared_cache_activation_stage_bonus >= 1.0:
-            return min(base_limit + 1, max(base_limit, int(self.expert_prepared_cache_size) + 1))
-        return base_limit
+            limit = min(base_limit + 2, max(limit, int(self.expert_prepared_cache_size) + 2))
+        elif self.prepared_cache_activation_stage_bonus >= 1.0:
+            limit = min(base_limit + 1, max(limit, int(self.expert_prepared_cache_size) + 1))
+        if controller_engaged:
+            controller_cap = effective_prepared_limit + max(0, self._adaptive_activation_limit() - 1)
+            if self.prepared_cache_activation_stage_bonus >= 1.0:
+                controller_cap += 1
+            if self.cold_promotion_penalty >= 1.0:
+                controller_cap += 1
+            limit = min(limit, max(1, controller_cap))
+        return max(1, limit)
 
     def _update_cold_promotion_penalty(self, cold_promotions: int, total_promotions: int) -> None:
         if total_promotions <= 0:

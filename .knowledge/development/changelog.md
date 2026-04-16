@@ -7,6 +7,8 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-16 08:47 --> **[prepared-controller-coupling]** `prepared_cache_budget_backoff` 不再只影响 `effective_prepared_cache_limit`，现在也会反馈到 `adaptive_activation_limit / adaptive_prebuild_limit`；prepared budget 收缩与候选准备 aggressiveness 已开始联动。
+- <!-- updated: 2026-04-16 08:47 --> **[tests]** 新增 prepared controller engaged / backoff 影响 adaptive limit 的测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `87 passed, 1 warning`。
 - <!-- updated: 2026-04-16 08:40 --> **[prepared-budget-backoff]** prepared tier controller 现在新增 `prepared_cache_budget_backoff`：会按 prepared-cache 重平衡压力分级收缩 `effective_prepared_cache_limit`，在高压时最多把 prepared tier 缩到仅保留最关键候选；若 `cold_promotion_penalty` 偏高，则会撤销 backoff，重新放宽 prepared budget。
 - <!-- updated: 2026-04-16 08:40 --> **[prepared-budget-summary]** scheduler summary / profile sweep 现已输出 `prepared_cache_budget_backoff_avg`，可以直接比较不同 profile 的 prepared budget 收缩幅度。
 - <!-- updated: 2026-04-16 08:40 --> **[tests]** 新增 prepared budget backoff 的行为与摘要覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `87 passed, 1 warning`。

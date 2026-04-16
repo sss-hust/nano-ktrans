@@ -3224,10 +3224,13 @@ class TestDynamicScheduler:
         assert hybrid._prepared_cache_rebalance_pressure() == pytest.approx(2.0)
         assert hybrid._prepared_cache_budget_backoff() == 2
         assert hybrid._effective_prepared_cache_limit() == 1
+        assert hybrid._prepared_controller_engaged() is True
 
         hybrid.cold_promotion_penalty = 1.5
         assert hybrid._prepared_cache_budget_backoff() == 0
         assert hybrid._effective_prepared_cache_limit() == 3
+        assert hybrid._adaptive_activation_limit() == 2
+        assert hybrid._adaptive_prebuild_limit() == 5
 
     def test_effective_prepared_cache_limit_shrinks_under_pressure(self, tmp_path):
         from safetensors.torch import save_file
@@ -3439,6 +3442,7 @@ class TestDynamicScheduler:
             hybrid._store_activated_module(expert_idx, module.to(dtype=torch.float32))
 
         assert hybrid._prepared_cache_pressure() >= 1.0
+        assert hybrid._prepared_controller_engaged() is True
         assert hybrid._adaptive_activation_limit() == 1
         assert hybrid._adaptive_prebuild_limit() == 2
 

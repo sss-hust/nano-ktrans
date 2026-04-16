@@ -233,6 +233,12 @@ tags: [architecture]
     - `prepared_cache_activation_stage_bonus` 越高，说明 activated tier 越值得保留，会抵消部分 backoff
     - `cold_promotion_penalty` 越高，说明冷路径 promotion 仍多，会继续抵消 backoff，避免 prepared tier 被压得过小
     这使 prepared tier 已从“静态上限 + 局部 heuristic”进一步走向真正的小型闭环控制器。
+42. 这套 controller 现在已不只影响 cache 容量：
+    - `effective_prepared_cache_limit` 控制 prepared tier 最多保留多少 warm/activated candidate
+    - `adaptive_activation_limit` 控制每步最多推进多少 warmed candidate 到 activated
+    - `adaptive_prebuild_limit` 控制每步最多准备多少 ready candidate
+    - 当 prepared budget backoff 提高时，后两者也会同步受到约束；但若 `cold_promotion_penalty` 偏高，又会重新放宽，避免为了节省 prepared slots 反而导致更多 cold promotion
+    因此 prepared tier 当前已经形成“容量控制 + 候选推进 aggressiveness”一体化的最小闭环。
     这样 `HybridMoE.advance_offload_pipeline()` 现在已经可以按 `queued -> prefetching -> ready -> warmed -> activated -> applied` 的顺序推进一次 promotion。
 39. 这也让“前台 pipeline”里的工作边界更清晰了：
     - resident export / safetensors prefetch 负责准备权重
