@@ -508,6 +508,10 @@ tags: [architecture]
     - `prepared_cache_budget_heuristic` 表示当前 profile 给出的静态 prepared budget 基线
     - `prepared_cache_budget / effective_prepared_cache_limit / adaptive_*` 则表示 runtime controller 实际如何调节 prepared tier
     这样 benchmark 和诊断不再只看到 controller 的结果，也能回溯“这组策略一开始给了 prepared tier 多大基线”，更利于分析 profile 本身和 controller 本身各自的贡献。
+83. 当前 background worker 已和前台 refresh hook 做了去重：
+    - 如果后台 worker 已运行，`SimpleEngine` 不再手动触发 `background_tick_offload_state()`
+    - 前台路径只保留主 `refresh_offload_state()` 和后续 `advance_offload_pipeline()`
+    这避免了同一个 token-step 里，后台线程和前台 hook 对 ready/warmed/activated 前半段做重复推进，是后台执行器真正接入运行路径后的一次必要收口。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

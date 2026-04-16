@@ -44,7 +44,9 @@ class SimpleEngine:
 
     def _refresh_offload_state(self, *, phase: str = "decode") -> int:
         background_fn = getattr(self.model.model, "background_tick_offload_state", None)
-        if background_fn is not None:
+        worker_running_fn = getattr(self.model.model, "offload_worker_running", None)
+        worker_running = bool(worker_running_fn()) if worker_running_fn is not None else False
+        if background_fn is not None and not worker_running:
             background_fn(phase=phase)
         refresh_fn = getattr(self.model.model, "refresh_offload_state", None)
         if refresh_fn is None:

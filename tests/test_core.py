@@ -425,6 +425,9 @@ class TestSimpleEngine:
                 self.calls = 0
                 self.last_phase = None
 
+            def offload_worker_running(self):
+                return False
+
             def refresh_offload_state(self, *, phase="decode"):
                 self.calls += 1
                 self.last_phase = phase
@@ -440,6 +443,36 @@ class TestSimpleEngine:
         assert engine._refresh_offload_state() == 7
         assert engine.model.model.calls == 1
         assert engine.model.model.last_phase == "decode"
+
+    def test_refresh_offload_state_skips_manual_background_tick_when_worker_running(self):
+        from nano_ktrans.engine.simple_engine import SimpleEngine
+
+        class DummyInnerModel:
+            def __init__(self):
+                self.background_calls = 0
+                self.refresh_calls = 0
+
+            def offload_worker_running(self):
+                return True
+
+            def background_tick_offload_state(self, *, phase="decode"):
+                self.background_calls += 1
+                return 3
+
+            def refresh_offload_state(self, *, phase="decode"):
+                self.refresh_calls += 1
+                return 5
+
+        class DummyOuterModel:
+            def __init__(self):
+                self.model = DummyInnerModel()
+
+        engine = SimpleEngine.__new__(SimpleEngine)
+        engine.model = DummyOuterModel()
+
+        assert engine._refresh_offload_state() == 5
+        assert engine.model.model.background_calls == 0
+        assert engine.model.model.refresh_calls == 1
 
     def test_engine_can_start_and_stop_background_offload_worker(self):
         from nano_ktrans.engine.simple_engine import SimpleEngine

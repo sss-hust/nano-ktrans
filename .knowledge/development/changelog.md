@@ -248,6 +248,11 @@ tags: [changelog]
 - `LLM.get_offload_diagnostics()` 现已显式输出 `prepared_cache_budget_heuristic`，用户可以直接对照 profile 的静态 prepared 预算基线与 runtime controller 的实际 prepared-tier 行为。
 - 新增对应测试，确保 prepared budget heuristic 不只存在于 profile summary，也会进入最终的 offload diagnostics。
 
+<!-- updated: 2026-04-17 14:50 -->
+
+- `SimpleEngine._refresh_offload_state()` 现在会在检测到 background worker 已运行时，跳过手动 `background_tick_offload_state()`，避免前台 hook 和后台线程对同一阶段做重复推进。
+- 新增对应测试，验证 worker 运行时只保留主 refresh，不再重复调用 background tick。
+
 ## 2026-04-16
 
 - <!-- updated: 2026-04-16 00:40 --> **[migration-pipeline-runtime]** 新增 `MigrationPipelineRuntime`，将 token-step 级 offload refresh 提升为最小流水线运行时；ready prefetch 轮询与 ready promotion 现在可在进入模型前统一推进，不再依赖层内 forward 临时收敛。
