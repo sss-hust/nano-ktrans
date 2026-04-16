@@ -34,6 +34,9 @@ Notes:
   - step-level runtime apply batch totals
   - prepared-tier controller metrics, including:
     - `prepared_cache_budget` / `prepared_cache_budget_heuristic`
+      - `baseline`: `max(2 * decode_promote_k, prefetch_candidate_budget, 2)`
+      - `overlap_safe`: baseline 再上调一档，优先降低 strict ready-only 下的冷启动
+      - `eager`: 再上调一档，配合更激进的候选预取与 prepared-tier 推进
     - `prepared_cache_budget_backoff_avg`
     - `prepared_cache_rebalance_pressure_avg / _ema_avg`
     - `cold_promotion_penalty_avg`

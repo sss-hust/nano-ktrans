@@ -600,6 +600,25 @@ class TestDynamicScheduler:
 
         assert summary["prepared_cache_budget_heuristic"] == 6
 
+    def test_resolve_prepared_cache_budget_varies_by_profile(self):
+        from nano_ktrans.scheduler import (
+            SCHEDULER_PROFILE_BASELINE,
+            SCHEDULER_PROFILE_EAGER,
+            SCHEDULER_PROFILE_OVERLAP_SAFE,
+            SchedulerConfig,
+            resolve_prepared_cache_budget,
+        )
+
+        config = SchedulerConfig(
+            enabled=True,
+            decode_promote_k=2,
+            prefetch_candidate_budget_per_layer=4,
+        )
+
+        assert resolve_prepared_cache_budget(SCHEDULER_PROFILE_BASELINE, config) == 4
+        assert resolve_prepared_cache_budget(SCHEDULER_PROFILE_OVERLAP_SAFE, config) == 5
+        assert resolve_prepared_cache_budget(SCHEDULER_PROFILE_EAGER, config) == 6
+
     def test_normalize_scheduler_profiles_dedupes(self):
         from nano_ktrans.scheduler import normalize_scheduler_profiles
 

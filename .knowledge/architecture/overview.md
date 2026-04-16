@@ -434,6 +434,11 @@ tags: [architecture]
     - runtime diagnostics 会给出实际采用的 `prepared_cache_budget`
     - 因而 benchmark / profile sweep 后面可以直接对照“静态 prepared 预算是多少”与“controller 最终把 effective budget、prefetch/aggressiveness 调到了哪里”
     这让 prepared-tier controller 不再只是 runtime 黑盒，而开始具备可解释的 baseline-vs-controller 观测能力。
+68. prepared budget heuristic 现在也开始显式受 profile 影响：
+    - `baseline` 维持最小预算基线
+    - `overlap_safe` 会额外抬高 prepared budget，给 strict ready-only decode 留出更多 warmed/activated 空间
+    - `eager` 会进一步上调 prepared budget，配合更积极的 prefetch / prebuild / activation
+    这让 profile 不再只是 scheduler 开关集合，而开始直接塑造 prepared tier 的初始容量形态，为后续做 profile-driven auto-tuning 打基础。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

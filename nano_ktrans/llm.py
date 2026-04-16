@@ -12,6 +12,7 @@ from nano_ktrans.scheduler import (
     SchedulerConfig,
     apply_scheduler_overrides,
     resolve_scheduler_profile,
+    resolve_prepared_cache_budget,
     scheduler_profile_summary,
 )
 from nano_ktrans.utils.loader import load_model
@@ -173,10 +174,9 @@ class LLM:
         prepared_cache_budget = (
             scheduler_prepared_cache_budget_per_layer
             if scheduler_prepared_cache_budget_per_layer is not None
-            else max(
-                int(self.dynamic_expert_scheduler.config.decode_promote_k) * 2,
-                int(self.dynamic_expert_scheduler.config.prefetch_candidate_budget_per_layer),
-                2,
+            else resolve_prepared_cache_budget(
+                self.scheduler_profile,
+                self.dynamic_expert_scheduler.config,
             )
         )
         self.prepared_cache_budget = int(prepared_cache_budget)

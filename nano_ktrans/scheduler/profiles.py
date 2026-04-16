@@ -100,12 +100,27 @@ def apply_scheduler_overrides(
     return replace(config, **filtered)
 
 
-def scheduler_profile_summary(profile: str, config: SchedulerConfig) -> dict[str, Any]:
-    prepared_cache_budget = max(
+def resolve_prepared_cache_budget(profile: str, config: SchedulerConfig) -> int:
+    normalized = normalize_scheduler_profiles([profile])[0]
+    base_budget = max(
         int(config.decode_promote_k) * 2,
         int(config.prefetch_candidate_budget_per_layer),
         2,
     )
+
+    if normalized == SCHEDULER_PROFILE_OVERLAP_SAFE:
+        return max(base_budget + 1, int(config.decode_promote_k) * 2 + 1)
+    if normalized == SCHEDULER_PROFILE_EAGER:
+        return max(
+            base_budget + 2,
+            int(config.decode_promote_k) * 2 + 2,
+            int(config.prefetch_candidate_budget_per_layer) + 1,
+        )
+    return base_budget
+
+
+def scheduler_profile_summary(profile: str, config: SchedulerConfig) -> dict[str, Any]:
+    prepared_cache_budget = resolve_prepared_cache_budget(profile, config)
     return {
         "profile": profile,
         "prefill_collect_only": bool(config.prefill_collect_only),
