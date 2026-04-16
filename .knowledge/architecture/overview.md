@@ -476,6 +476,11 @@ tags: [architecture]
     - 单次 run 的 background tick 计数不会再混入前序 warmup
     - background ready callback 的推进量终于具备和 decode/apply 指标一致的 per-run 语义
     这让以后用 benchmark/profile sweep 比较“后台推进是否真的减少前台 stall”时，数据口径开始统一。
+77. background offload tick 现在已经开始介入 prepared tier 的前半段推进：
+    - 它不再只做 `prefetching -> ready`
+    - decode 阶段也会在 background tick 中提前尝试 `ready -> warmed -> activated`
+    - 主 refresh 则继续负责最终的 `activated -> applied`
+    这样后台路径第一次真正覆盖到了 prepared tier，而不只是单纯的 ready callback；系统已经开始向“后台准备对象，前台只做最终 commit”这个方向靠拢。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

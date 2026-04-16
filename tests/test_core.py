@@ -906,16 +906,24 @@ class TestDynamicScheduler:
                 self.weight = torch.nn.Parameter(torch.ones(1))
                 self.hybrid_moe = self
 
-            def background_tick_offload_state(self):
-                return 3
+            def background_advance_offload_pipeline(self, *, phase, device, dtype):
+                return {
+                    "ready_polled": 3,
+                    "warm_prebuilt": 2,
+                    "activation_ready": 1,
+                }
 
         runtime = MigrationPipelineRuntime()
         tick = runtime.background_tick_layers([DummyLayer()], phase="decode")
         diagnostics = runtime.diagnostics()
 
         assert tick["background_ready_callbacks"] == 3
+        assert tick["background_warm_prebuilt"] == 2
+        assert tick["background_activation_ready"] == 1
         assert diagnostics["offload_background_ticks"] == 1
         assert diagnostics["offload_pipeline_background_ready_callback_total"] == 3
+        assert diagnostics["offload_background_warm_prebuilt_total"] == 2
+        assert diagnostics["offload_background_activation_ready_total"] == 1
 
     def test_hybrid_moe_advance_pipeline_reports_incremental_batch_metrics(self, tmp_path):
         from safetensors.torch import save_file
@@ -1803,9 +1811,13 @@ class TestDynamicScheduler:
                 self.background_ticks = 0
                 self.refresh_calls = 0
 
-            def background_tick_offload_state(self):
+            def background_advance_offload_pipeline(self, *, phase, device, dtype):
                 self.background_ticks += 1
-                return 2
+                return {
+                    "ready_polled": 2,
+                    "warm_prebuilt": 1,
+                    "activation_ready": 1,
+                }
 
             def advance_offload_pipeline(self, *, phase, device, dtype):
                 self.refresh_calls += 1
@@ -1834,6 +1846,8 @@ class TestDynamicScheduler:
         diagnostics = model.offload_refresh_diagnostics()
         assert diagnostics["offload_background_ticks"] == 1
         assert diagnostics["offload_pipeline_background_ready_callback_total"] == 2
+        assert diagnostics["offload_background_warm_prebuilt_total"] == 1
+        assert diagnostics["offload_background_activation_ready_total"] == 1
 
     def test_scheduler_summary_reports_background_offload_tick_metrics(self):
         from nano_ktrans.scheduler.diagnostics import summarize_offload_diagnostics
@@ -4739,19 +4753,21 @@ class TestDynamicScheduler:
             def __init__(self):
                 self.tick_calls = 4
                 self.background_ticks = 5
+                self.background_warm_prebuilt_total = 6
+                self.background_activation_ready_total = 7
                 self.prefetch_submitted_total = 6
-                self.ready_polled_total = 7
-                self.activation_ready_total = 8
-                self.ready_applied_total = 9
-                self.ready_deferred_total = 10
-                self.apply_batch_count_total = 11
-                self.apply_batch_experts_total = 12
-                self.apply_batch_evictions_total = 13
-                self.apply_batch_activated_total = 14
-                self.apply_batch_warm_total = 15
-                self.apply_batch_cold_total = 16
-                self.layers_touched_total = 17
-                self.background_ready_callback_total = 18
+                self.ready_polled_total = 8
+                self.activation_ready_total = 9
+                self.ready_applied_total = 10
+                self.ready_deferred_total = 11
+                self.apply_batch_count_total = 12
+                self.apply_batch_experts_total = 13
+                self.apply_batch_evictions_total = 14
+                self.apply_batch_activated_total = 15
+                self.apply_batch_warm_total = 16
+                self.apply_batch_cold_total = 17
+                self.layers_touched_total = 18
+                self.background_ready_callback_total = 19
                 self.last_phase = "decode"
 
         class DummyHybrid:
@@ -4773,6 +4789,8 @@ class TestDynamicScheduler:
 
         assert runtime.tick_calls == 0
         assert runtime.background_ticks == 0
+        assert runtime.background_warm_prebuilt_total == 0
+        assert runtime.background_activation_ready_total == 0
         assert runtime.prefetch_submitted_total == 0
         assert runtime.background_ready_callback_total == 0
         assert runtime.last_phase == ""

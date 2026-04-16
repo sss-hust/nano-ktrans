@@ -267,6 +267,8 @@ class LLM:
             runtime.tick_calls = 0
             runtime.background_ticks = 0
             runtime.prefetch_submitted_total = 0
+            runtime.background_warm_prebuilt_total = 0
+            runtime.background_activation_ready_total = 0
             runtime.ready_polled_total = 0
             runtime.activation_ready_total = 0
             runtime.ready_applied_total = 0

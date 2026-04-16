@@ -115,6 +115,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "layer_count": int(offload_diagnostics.get("layer_count", 0)),
         "offload_refresh_calls": int((offload_diagnostics.get("offload_refresh") or {}).get("offload_refresh_calls", 0)),
         "offload_background_ticks": int((offload_diagnostics.get("offload_refresh") or {}).get("offload_background_ticks", 0)),
+        "offload_background_warm_prebuilt_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_background_warm_prebuilt_total", 0)
+        ),
+        "offload_background_activation_ready_total": int(
+            (offload_diagnostics.get("offload_refresh") or {}).get("offload_background_activation_ready_total", 0)
+        ),
         "offload_refresh_ready_total": int(
             (offload_diagnostics.get("offload_refresh") or {}).get("offload_refresh_ready_total", 0)
         ),

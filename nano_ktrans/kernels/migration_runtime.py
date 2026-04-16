@@ -19,6 +19,8 @@ class MigrationPipelineRuntime:
     def __init__(self) -> None:
         self.tick_calls = 0
         self.background_ticks = 0
+        self.background_warm_prebuilt_total = 0
+        self.background_activation_ready_total = 0
         self.prefetch_submitted_total = 0
         self.ready_polled_total = 0
         self.activation_ready_total = 0
@@ -54,6 +56,8 @@ class MigrationPipelineRuntime:
         apply_batch_cold = 0
         layers_touched = 0
         background_ready_callbacks = 0
+        warm_prebuilt = 0
+        activation_ready = 0
 
         for decoder_layer in decoder_layers:
             hybrid_moe = getattr(decoder_layer, "hybrid_moe", None)
@@ -62,6 +66,16 @@ class MigrationPipelineRuntime:
             layers_touched += 1
 
             if background_only:
+                background_advance_fn = getattr(hybrid_moe, "background_advance_offload_pipeline", None)
+                if background_advance_fn is not None:
+                    first_param = next(iter(decoder_layer.parameters()), None)
+                    device = first_param.device if first_param is not None else torch.device("cpu")
+                    dtype = first_param.dtype if first_param is not None else torch.float32
+                    background_stats = background_advance_fn(phase=phase, device=device, dtype=dtype)
+                    background_ready_callbacks += int(background_stats.get("ready_polled", 0))
+                    warm_prebuilt += int(background_stats.get("warm_prebuilt", 0))
+                    activation_ready += int(background_stats.get("activation_ready", 0))
+                    continue
                 background_tick_fn = getattr(hybrid_moe, "background_tick_offload_state", None)
                 if background_tick_fn is None:
                     continue
@@ -107,6 +121,8 @@ class MigrationPipelineRuntime:
             "apply_batch_warm": apply_batch_warm,
             "apply_batch_cold": apply_batch_cold,
             "background_ready_callbacks": background_ready_callbacks,
+            "background_warm_prebuilt": warm_prebuilt,
+            "background_activation_ready": activation_ready,
             "background_only": int(background_only),
         }
 
@@ -114,6 +130,8 @@ class MigrationPipelineRuntime:
         stats = self._tick_layers_impl(decoder_layers, phase=phase, background_only=True)
         self.background_ticks += 1
         self.background_ready_callback_total += int(stats.get("background_ready_callbacks", 0))
+        self.background_warm_prebuilt_total += int(stats.get("background_warm_prebuilt", 0))
+        self.background_activation_ready_total += int(stats.get("background_activation_ready", 0))
         self.layers_touched_total += int(stats.get("layers_touched", 0))
         self.last_phase = phase
         return stats
@@ -153,6 +171,8 @@ class MigrationPipelineRuntime:
         return {
             "offload_refresh_calls": int(self.tick_calls),
             "offload_background_ticks": int(self.background_ticks),
+            "offload_background_warm_prebuilt_total": int(self.background_warm_prebuilt_total),
+            "offload_background_activation_ready_total": int(self.background_activation_ready_total),
             "offload_refresh_ready_total": int(self.ready_polled_total),
             "offload_pipeline_ticks": int(self.tick_calls),
             "offload_pipeline_prefetch_submitted_total": int(self.prefetch_submitted_total),

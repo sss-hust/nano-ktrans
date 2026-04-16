@@ -326,6 +326,25 @@ class HybridMoE(nn.Module):
             return 0
         return int(self.materialization_manager.drain_ready_callbacks())
 
+    def background_advance_offload_pipeline(
+        self,
+        *,
+        phase: str,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> dict[str, int]:
+        ready_polled = self.background_tick_offload_state()
+        warm_prebuilt = 0
+        activation_ready = 0
+        if phase == "decode":
+            warm_prebuilt = self._prebuild_ready_experts(phase=phase, device=device, dtype=dtype)
+            activation_ready = self._activate_warmed_experts(phase=phase, device=device, dtype=dtype)
+        return {
+            "ready_polled": int(ready_polled),
+            "warm_prebuilt": int(warm_prebuilt),
+            "activation_ready": int(activation_ready),
+        }
+
     def _insert_warm_module(self, expert_idx: int, module: nn.Module) -> None:
         expert_key = str(expert_idx)
         self.warm_expert_cache[expert_key] = module.to(device="cpu")
