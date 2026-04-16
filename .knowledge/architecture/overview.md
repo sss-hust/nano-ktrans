@@ -623,6 +623,11 @@ tags: [architecture]
     - `apply_commit_batch_queue_budget_backoff`
     这组信号会继续反向约束 `adaptive_activation_limit / adaptive_prebuild_limit / adaptive_prefetch_*`
     因而系统现在不只感知 candidate queue 和 staged commit queue 的压力，也开始感知最终 resident commit batch buffer 是否拥塞。
+90. apply commit batch queue 的压力信号现在也已进入 profile sweep 决策面：
+    - `apply_commit_batch_queue_pressure_avg`
+    - `apply_commit_batch_queue_pressure_ema_avg`
+    - `apply_commit_batch_queue_budget_backoff_avg`
+    这意味着 profile 对比不再只看前半段 prepared-tier 和中段 staged commit queue，也开始显式比较“最终 resident commit buffer 是否拥塞”。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

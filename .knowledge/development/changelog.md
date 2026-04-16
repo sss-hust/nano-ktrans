@@ -22,6 +22,12 @@ tags: [changelog]
 - scheduler summary / profile sweep 已补齐 commit-batch queue 的压力指标，便于直接比较不同 profile 在最终 resident commit buffer 上的拥塞情况。
 - 重新跑过 `./.venv/bin/python -m pytest -q tests/test_core.py tests/test_pim_runtime.py`，结果 `122 passed, 1 warning`。
 
+### 2026-04-17 03:53 - Surface commit-batch pressure in sweep comparisons
+
+- `apply_commit_batch_queue_pressure_avg / _ema_avg / _budget_backoff_avg` 已接入 profile sweep `comparison_table` 与 `best_by_metric`。
+- summary 聚合测试和 prepared-tier backoff 测试已补齐，最终 commit buffer 的拥塞行为现在可直接参与 profile 排序。
+- 重新跑过 `./.venv/bin/python -m pytest -q tests/test_core.py tests/test_pim_runtime.py`，结果 `122 passed, 1 warning`。
+
 - <!-- updated: 2026-04-17 21:05 --> **[apply-commit-ready-cache]** `HybridMoE` 新增 `apply_commit_ready_cache`，`apply_commit_queue` 中的 staged commit 候选现在可以先在 background/foreground 路径上解析成可直接 resident commit 的 ready entry，`_apply_promotion_batch()` 也支持消费预解析 batch。
 - <!-- updated: 2026-04-17 21:05 --> **[background-commit-staging]** background pipeline 现在允许“同一 tick 新入队的 apply candidate -> apply commit queue -> ready resolve”连续推进，但 resident commit 仍只消费 tick 开始前已存在的 staged commit 候选，避免 background tick 在同一轮里同时 enqueue 和 commit 同一 expert。
 - <!-- updated: 2026-04-17 21:05 --> **[diagnostics]** 新增 `apply_commit_ready_cache_size / hits / stores / pruned / background_apply_commit_resolved`，用于区分 staged commit queue 的 ready resolve 命中与真正 resident commit 消费。

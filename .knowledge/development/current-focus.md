@@ -17,6 +17,7 @@ updated: 2026-04-17 21:05
 updated: 2026-04-17 21:35
 updated: 2026-04-17 03:38
 updated: 2026-04-17 03:50
+updated: 2026-04-17 03:53
 ---
 
 # 🔥 当前工作焦点
@@ -74,6 +75,7 @@ updated: 2026-04-17 03:50
 - [x] apply commit batch queue 现已补齐独立 `size / limit / utilization / enqueued / pruned / evictions / background_enqueued` 诊断与 runtime totals，后半段 commit buffer 的推进和拥塞可单独观测
 - [x] resident commit 现已支持从 `apply_commit_ready_cache` 做 batched module commit，再逐 expert 完成 residency/lifecycle finalize，后半段提交流水线已从“纯逐 expert 注入”推进成“两段式 batch commit”
 - [x] apply commit batch queue 现已补齐独立 `pressure / step / ema / budget_backoff` 控制信号，并开始反向约束 activation / prebuild / prefetch aggressiveness，resident commit 的最终 batch buffer 也进入了闭环控制
+- [x] apply commit batch queue 的 `pressure / step / ema / budget_backoff` 现已贯通到 scheduler summary / profile sweep，并开始参与不同 profile 的对比排序
 - [x] offload refresh 已接入模型级统计，benchmark 可直接看到 refresh 次数与每步 ready 收敛量
 - [x] layer 级 refresh 已加空队列短路，避免无 pending prefetch 时做无意义轮询
 - [x] benchmark 已支持 scheduler profile sweep，可一轮比较多组调度策略
