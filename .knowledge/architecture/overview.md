@@ -229,6 +229,11 @@ tags: [architecture]
     - 再完成 `apply_commit_ready_cache` 的 resolve
     - 但真正 resident commit 只消费 tick 开始前已存在的 staged commit 候选
     这样后台 enqueue/resolve 与 resident commit 的边界更清楚，避免 background tick 在同一轮里对同一 expert 同时 enqueue 和 commit。
+41. resident commit 的最后一段现在也开始具备真正的 batch 语义：
+    - `apply_commit_ready_cache` 中的 ready entry 会先按批量方式把 module 注入 `gpu_experts`
+    - 并统一批量更新 `gpu_experts_mask`
+    - 然后再逐 expert 写回 residency、history 和 migration lifecycle
+    因此 `apply_commit_queue -> resident set` 已不再是纯逐 expert 注入，而是“batch module commit + per-expert metadata finalize”的两段式提交。
 39. resident commit 现在也被拆成两段 staged queue：
     - `apply_candidate_queue`：承接所有已经进入 `ACTIVATED` 的候选 expert
     - `apply_commit_queue`：只承接被当前 batch policy 选中的 staged commit 候选

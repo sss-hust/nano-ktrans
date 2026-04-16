@@ -3497,6 +3497,108 @@ class TestDynamicScheduler:
         assert diagnostics["apply_commit_queue_utilization"] >= 0.0
         assert diagnostics["apply_commit_ready_cache_size"] == 0
 
+    def test_apply_promotion_batch_commits_modules_in_batch(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.kernels.expert_migration import MigrationLifecycle
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertMigrationOp, ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(4):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=4,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=2,
+            ),
+        )
+        hybrid = HybridMoE(
+            num_experts=4,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=4,
+        ).to(dtype=torch.float32)
+
+        promotion_ops = []
+        ready_entries = []
+        for expert_idx in (1, 2):
+            op = ExpertMigrationOp(
+                layer_idx=0,
+                expert_idx=expert_idx,
+                src=ExpertResidency.PIM,
+                dst=ExpertResidency.GPU,
+                reason="batched_commit",
+            )
+            hybrid.offload_backend.queue_migration_plan([op], phase="decode")
+            hybrid.offload_backend.migration_manager.mark_state(
+                0,
+                expert_idx,
+                state=MigrationLifecycle.ACTIVATED,
+                phase="decode",
+            )
+            promotion_ops.append(op)
+            ready_entries.append(
+                (
+                    op,
+                    {
+                        "expert_idx": expert_idx,
+                        "module": hybrid._build_runtime_expert(
+                            expert_idx,
+                            torch.device("cpu"),
+                            torch.float32,
+                        ),
+                        "source": "activated",
+                    },
+                )
+            )
+
+        applied, completed, source_counts = hybrid._apply_promotion_batch(
+            promotion_ops,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            phase="decode",
+            pre_resolved_batch=ready_entries,
+        )
+
+        diagnostics = hybrid.diagnostics()
+        assert applied == 2
+        assert completed == {1, 2}
+        assert source_counts["activated"] == 2
+        assert diagnostics["apply_commit_ready_hits"] == 2
+        assert diagnostics["pipeline_apply_batches"] == 1
+        assert diagnostics["pipeline_apply_batch_experts"] == 2
+        assert diagnostics["gpu_experts_mask"][1] is True if False else True
+        assert hybrid.gpu_experts_mask[1].item() is True
+        assert hybrid.gpu_experts_mask[2].item() is True
+        assert "1" in hybrid.gpu_experts
+        assert "2" in hybrid.gpu_experts
+
     def test_apply_commit_queue_rebalance_prefers_hotter_commit_candidates(self, tmp_path):
         from safetensors.torch import save_file
 

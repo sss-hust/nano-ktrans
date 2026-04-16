@@ -11,6 +11,8 @@ tags: [changelog]
 - <!-- updated: 2026-04-17 21:05 --> **[background-commit-staging]** background pipeline 现在允许“同一 tick 新入队的 apply candidate -> apply commit queue -> ready resolve”连续推进，但 resident commit 仍只消费 tick 开始前已存在的 staged commit 候选，避免 background tick 在同一轮里同时 enqueue 和 commit 同一 expert。
 - <!-- updated: 2026-04-17 21:05 --> **[diagnostics]** 新增 `apply_commit_ready_cache_size / hits / stores / pruned / background_apply_commit_resolved`，用于区分 staged commit queue 的 ready resolve 命中与真正 resident commit 消费。
 - <!-- updated: 2026-04-17 21:05 --> **[tests]** 新增 background staged commit resolve 路径覆盖，并更新 background apply queue 语义测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `119 passed, 1 warning`。
+- <!-- updated: 2026-04-17 21:35 --> **[batched-resident-commit]** `_apply_promotion_batch()` 现已先批量把 ready-entry 中的 module 注入 `gpu_experts` 并统一更新 `gpu_experts_mask`，再逐 expert 写回 residency/history/lifecycle，resident commit 的最后一段已从纯逐 expert 注入推进到真正的 per-layer batched commit 语义。
+- <!-- updated: 2026-04-17 21:35 --> **[tests]** 新增 batched resident commit 覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `120 passed, 1 warning`。
 
 ## 2026-04-16
 

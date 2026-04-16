@@ -1844,14 +1844,30 @@ class HybridMoE(nn.Module):
             ]
         )
 
+        modules_to_commit: "OrderedDict[str, nn.Module]" = OrderedDict()
+        batch_expert_indices: list[int] = []
+        for op, resolved in resolved_batch:
+            expert_idx = int(op.expert_idx)
+            expert_key = str(expert_idx)
+            if expert_key not in self.gpu_experts and expert_key not in modules_to_commit:
+                modules_to_commit[expert_key] = resolved["module"]  # type: ignore[index]
+            batch_expert_indices.append(expert_idx)
+
+        if modules_to_commit:
+            self.gpu_experts.update(modules_to_commit)
+        if batch_expert_indices:
+            expert_indices = torch.tensor(
+                batch_expert_indices,
+                device=self.gpu_experts_mask.device,
+                dtype=torch.long,
+            )
+            self.gpu_experts_mask[expert_indices] = True
+
         for op, resolved in resolved_batch:
             expert_idx = int(op.expert_idx)
             expert_key = str(expert_idx)
             source = str(resolved.get("source") or "cold")
-            if expert_key not in self.gpu_experts:
-                self.gpu_experts[expert_key] = resolved["module"]  # type: ignore[index]
             self.activation_applied += 1
-            self.gpu_experts_mask[expert_idx] = True
             self._set_residency(expert_idx, ExpertResidency.GPU)
             source_counts[source] += 1
             if pre_resolved_batch is not None:
