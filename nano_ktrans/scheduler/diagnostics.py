@@ -10,6 +10,7 @@ PROFILE_SWEEP_SORT_KEYS = (
     "background_worker_work_ratio",
     "apply_queue_utilization",
     "apply_queue_commit_batch_size_avg",
+    "apply_commit_queue_utilization",
     "prepared_cache_utilization",
     "effective_prepared_cache_utilization",
     "prepared_cache_budget_backoff_avg",
@@ -46,6 +47,7 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "background_worker_work_ratio": "max",
     "apply_queue_utilization": "max",
     "apply_queue_commit_batch_size_avg": "max",
+    "apply_commit_queue_utilization": "max",
     "pipeline_apply_batches": "max",
     "pipeline_apply_batch_size_avg": "max",
     "pipeline_apply_batch_evictions": "min",
@@ -225,6 +227,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "apply_queue_commit_experts": 0,
         "apply_commit_queue_enqueued": 0,
         "apply_commit_queue_pruned": 0,
+        "apply_commit_queue_evictions": 0,
         "apply_queue_pressure": 0.0,
         "apply_queue_pressure_step": 0.0,
         "apply_queue_pressure_ema": 0.0,
@@ -341,6 +344,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["apply_queue_commit_experts"] += int(layer.get("apply_queue_commit_experts", 0))
         summary["apply_commit_queue_enqueued"] += int(layer.get("apply_commit_queue_enqueued", 0))
         summary["apply_commit_queue_pruned"] += int(layer.get("apply_commit_queue_pruned", 0))
+        summary["apply_commit_queue_evictions"] += int(layer.get("apply_commit_queue_evictions", 0))
         summary["apply_queue_pressure"] += float(layer.get("apply_queue_pressure", 0.0))
         summary["apply_queue_pressure_step"] += float(layer.get("apply_queue_pressure_step", 0.0))
         summary["apply_queue_pressure_ema"] += float(layer.get("apply_queue_pressure_ema", 0.0))
@@ -557,6 +561,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
     else:
         summary["apply_queue_utilization"] = None
+    if summary["apply_commit_queue_limit"] > 0:
+        summary["apply_commit_queue_utilization"] = (
+            summary["apply_commit_queue_size"] / summary["apply_commit_queue_limit"]
+        )
+    else:
+        summary["apply_commit_queue_utilization"] = None
     if summary["apply_queue_commit_batches"] > 0:
         summary["apply_queue_commit_batch_size_avg"] = (
             summary["apply_queue_commit_experts"] / summary["apply_queue_commit_batches"]
@@ -647,6 +657,9 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             "apply_queue_utilization": scheduler_summary.get("apply_queue_utilization"),
             "apply_queue_commit_batch_size_avg": scheduler_summary.get(
                 "apply_queue_commit_batch_size_avg"
+            ),
+            "apply_commit_queue_utilization": scheduler_summary.get(
+                "apply_commit_queue_utilization"
             ),
             "apply_queue_pressure_avg": scheduler_summary.get("apply_queue_pressure_avg"),
             "apply_queue_pressure_step_avg": scheduler_summary.get("apply_queue_pressure_step_avg"),

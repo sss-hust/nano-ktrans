@@ -170,6 +170,7 @@ class HybridMoE(nn.Module):
         self.apply_queue_commit_experts = 0
         self.background_apply_commit_batches = 0
         self.background_apply_commit_experts = 0
+        self.apply_commit_queue_evictions = 0
         self.apply_queue_pressure_ema = 0.0
         self.apply_queue_events_last_tick = 0
         self.apply_queue_events_prev_total = 0
@@ -676,7 +677,7 @@ class HybridMoE(nn.Module):
                 evicted_key, _ = self.apply_commit_queue.popitem(last=False)
             else:
                 self.apply_commit_queue.pop(evicted_key, None)
-            self.apply_queue_evictions += 1
+            self.apply_commit_queue_evictions += 1
 
     def _rebalance_apply_candidate_queue(self) -> None:
         limit = self._apply_queue_limit()
@@ -757,7 +758,7 @@ class HybridMoE(nn.Module):
         self.apply_queue_pressure_ema = (0.8 * self.apply_queue_pressure_ema) + (0.2 * step_pressure)
 
     def _update_apply_queue_pressure_signals(self) -> None:
-        current_total = self.apply_queue_evictions
+        current_total = self.apply_queue_evictions + self.apply_commit_queue_evictions
         self.apply_queue_events_last_tick = max(
             0,
             current_total - self.apply_queue_events_prev_total,
@@ -2239,6 +2240,7 @@ class HybridMoE(nn.Module):
             "apply_queue_commit_experts": self.apply_queue_commit_experts,
             "apply_commit_queue_enqueued": self.apply_commit_queue_enqueued,
             "apply_commit_queue_pruned": self.apply_commit_queue_pruned,
+            "apply_commit_queue_evictions": self.apply_commit_queue_evictions,
             "apply_queue_pressure": self._apply_queue_pressure(),
             "apply_queue_pressure_step": self._apply_queue_pressure_step(),
             "apply_queue_pressure_ema": self.apply_queue_pressure_ema,

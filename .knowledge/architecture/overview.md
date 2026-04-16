@@ -227,6 +227,11 @@ tags: [architecture]
     - background path 主要负责 `prefetching -> ready -> warmed -> activated -> apply_commit_queue enqueue`
     - foreground path 主要负责消费 `apply_commit_queue` 并做最终 resident commit
     - 这样后续再把 resident 注入继续收成真正的 per-layer batch commit 时，不必再从候选筛选阶段回退重构。
+41. `apply_commit_queue` 现在也拥有独立 queue policy：
+    - queue 有自己的 `limit`
+    - 超预算时按 hotness 和 lifecycle 选择更冷的 staged commit victim
+    - 并单独统计 `apply_commit_queue_evictions`
+    这样后半段 resident commit 已经不再只是“复用 apply candidate queue 的 budget 信号”，而开始具备独立的 staged commit 缓冲层语义。
 39. prepared tier 当前不再只有静态预算：
     - `prepared_cache_limit` 表示配置上的 prepared 总预算
     - `effective_prepared_cache_limit` 表示运行时在当前压力下真正允许保留的 prepared expert 数

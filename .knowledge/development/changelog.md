@@ -28,6 +28,8 @@ tags: [changelog]
 - <!-- updated: 2026-04-17 18:40 --> **[apply-commit-queue]** `HybridMoE` 现在把 resident commit 进一步拆成 `apply_candidate_queue -> apply_commit_queue -> resident set`；后台路径先将已激活 expert 分批推进到 staged commit queue，再由前台/后台消费 commit queue 做最终 resident 注入。
 - <!-- updated: 2026-04-17 18:40 --> **[apply-commit-queue-metrics]** scheduler summary 新增 `apply_commit_queue_size / limit / utilization / enqueued / pruned / background_apply_commit_queue_enqueued`，可以单独量化后半段 staged commit queue 的拥塞与推进情况。
 - <!-- updated: 2026-04-17 18:40 --> **[tests]** 扩展 apply commit queue 的后台 enqueue、前台 commit 和 summary 覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `116 passed, 1 warning`。
+- <!-- updated: 2026-04-17 19:10 --> **[apply-commit-queue-policy]** apply commit queue 现在新增独立 `evictions` 计数，并按 hotness/lifecycle 选 victim；apply queue 压力信号已开始同时感知 candidate queue 与 commit queue 的预算回退。
+- <!-- updated: 2026-04-17 19:10 --> **[tests]** 新增 apply commit queue rebalance 行为与 summary 聚合覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `117 passed, 1 warning`。
 
 - <!-- updated: 2026-04-17 15:18 --> **[pipeline-lock]** `HybridMoE` 新增内部 `RLock`，background worker 与前台 `refresh/advance/forward/diagnostics` 对 prepared-tier cache、migration lifecycle 和 resident set 的共享状态访问开始串行化，降低后台推进接入真实生成后出现竞态的风险。
 - <!-- updated: 2026-04-17 15:18 --> **[tests]** 并发边界收口后重新回归 `tests/test_core.py + tests/test_pim_runtime.py`，当前为 `111 passed, 1 warning`。
