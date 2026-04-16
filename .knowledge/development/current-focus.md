@@ -25,6 +25,7 @@ updated: 2026-04-17 03:53
 updated: 2026-04-17 05:18
 updated: 2026-04-17 05:27
 updated: 2026-04-17 05:42
+updated: 2026-04-17 05:58
 ---
 
 # 🔥 当前工作焦点
@@ -86,6 +87,7 @@ updated: 2026-04-17 05:42
 - [x] resident commit 现已进一步拆成 `resident_commit_batch_queue -> resident_commit_finalize_queue -> resident set`，后台路径可先把 final resident batches 预推进到 finalize queue，前台/后台再消费 preexisting finalize batches
 - [x] resident commit 现已进一步拆成 `resident_commit_batch_queue -> resident_commit_finalize_queue -> resident_commit_ready_cache -> resident set`，后台路径可先把 preexisting finalize batches 解析成 ready commit cache，前台/后台再消费 ready cache 中已有的 final batches
 - [x] resident commit 现已进一步拆成 `resident_commit_batch_queue -> resident_commit_finalize_queue -> resident_commit_ready_cache -> resident_commit_apply_queue -> resident set`，后台路径可先把 ready resident batches 预推进到 apply queue，前台/后台再消费 tick 开始前已存在的 apply batches
+- [x] resident commit 现已进一步拆成 `resident_commit_batch_queue -> resident_commit_finalize_queue -> resident_commit_ready_cache -> resident_commit_apply_queue -> resident_commit_finalize_ready_queue -> resident set`，后台路径可先把 preexisting apply batches 再预推进到 finalize-ready queue，前台/后台再消费 tick 开始前已存在的 finalize-ready batches
 - [x] offload refresh 已接入模型级统计，benchmark 可直接看到 refresh 次数与每步 ready 收敛量
 - [x] layer 级 refresh 已加空队列短路，避免无 pending prefetch 时做无意义轮询
 - [x] benchmark 已支持 scheduler profile sweep，可一轮比较多组调度策略

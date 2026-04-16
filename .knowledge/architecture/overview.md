@@ -703,5 +703,6 @@ tags: [architecture]
   - `resident_commit_finalize_queue`
   - `resident_commit_ready_cache`
   - `resident_commit_apply_queue`
+  - `resident_commit_finalize_ready_queue`
   - `resident set`
-- background worker 现在可以把 preexisting resident batches 逐步推进到 `resident_commit_apply_queue`，而前台 decode 主路径主要消费 tick 开始前已存在的 apply batches，再做最终 metadata finalize。
+- background worker 现在可以把 preexisting resident batches 逐步推进到 `resident_commit_apply_queue` 和 `resident_commit_finalize_ready_queue`，而前台 decode 主路径主要消费 tick 开始前已存在的 finalize-ready batches，再做最终 metadata finalize。
