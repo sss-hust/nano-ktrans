@@ -269,6 +269,11 @@ tags: [architecture]
     - token-step runtime 也会累计 `offload_pipeline_apply_batch_*_total`
     - summary/profile sweep 会把这些比率透出
     这让系统不只知道“这一批应用了多少 expert”，还知道“这一批到底有多少已经是 activated 热路径，多少仍在走 cold path”。
+48. cache 层次和 migration lifecycle 现在也重新对齐了：
+    - 当 activated cache 因容量被挤出时，对应 expert 的 lifecycle 会从 `ACTIVATED` 回退到 `WARMED`
+    - 当 warm cache 因容量被挤出时，对应 lifecycle 会从 `WARMED` 回退到 `READY`
+    - 因此 cache 淘汰不再只是对象层面的变化，而会同步反映到控制面状态机
+    这对后续做真正的后台 worker 很关键，因为系统终于能从 lifecycle 上准确知道 expert 还处于哪一层缓存。
 46. benchmark 侧现在也开始按“单次 run”观察流水线：
     - 每次 generation 前会重置 HybridMoE 的 runtime/queue/cache 计数器
     - 每个 run 结果都带自己的 `scheduler_summary`

@@ -301,7 +301,16 @@ class HybridMoE(nn.Module):
         if count_store:
             self.warm_cache_stores += 1
         while len(self.warm_expert_cache) > self.expert_warm_cache_size:
-            self.warm_expert_cache.popitem(last=False)
+            evicted_key, _ = self.warm_expert_cache.popitem(last=False)
+            if self.offload_backend is not None:
+                evicted_idx = int(evicted_key)
+                state = self.offload_backend.migration_manager.state_for(self.layer_idx, evicted_idx)
+                if state == MigrationLifecycle.WARMED:
+                    self.offload_backend.migration_manager.mark_state(
+                        self.layer_idx,
+                        evicted_idx,
+                        state=MigrationLifecycle.READY,
+                    )
             self.warm_cache_evictions += 1
 
     def _activated_cache_limit(self) -> int:
@@ -385,6 +394,15 @@ class HybridMoE(nn.Module):
         while len(self.activated_expert_cache) > self._activated_cache_limit():
             evicted_key, evicted_module = self.activated_expert_cache.popitem(last=False)
             self._store_warm_module(int(evicted_key), evicted_module, count_store=False)
+            if self.offload_backend is not None:
+                evicted_idx = int(evicted_key)
+                state = self.offload_backend.migration_manager.state_for(self.layer_idx, evicted_idx)
+                if state == MigrationLifecycle.ACTIVATED:
+                    self.offload_backend.migration_manager.mark_state(
+                        self.layer_idx,
+                        evicted_idx,
+                        state=MigrationLifecycle.WARMED,
+                    )
             self.activated_cache_evictions += 1
 
     def _activate_warm_module(self, module: nn.Module, device: torch.device, dtype: torch.dtype) -> nn.Module:
