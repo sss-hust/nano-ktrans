@@ -5,6 +5,10 @@ tags: [changelog]
 
 # 📝 变更日志
 
+## 2026-04-16
+
+- <!-- updated: 2026-04-16 03:22 --> **[benchmark-sweep]** `profile_sweep_summary` 新增自动对比层，输出 `comparison_table`、`best_by_metric`、`metric_directions`，并补充 `pipeline_promotion_non_cold_total/ratio` 与 `runtime_apply_batch_size_avg`，便于直接比较 overlap 质量而不只看 decode TPS。
+
 ## 2026-04-07
 
 - **[init]** 初始化项目知识库

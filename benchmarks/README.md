@@ -28,10 +28,12 @@ Notes:
 - If CUDA is not available in the current session, CUDA backends are reported as `unavailable` instead of crashing.
 - When `--scheduler-profile-sweep` is used, the output JSON now includes `profile_sweep_summary`, which auto-compares:
   - `decode_tokens_per_second`
+  - non-cold promotion totals/ratios (`activated + warm`)
   - overlap hits and promotion source breakdown
   - layer-level apply batch metrics
   - step-level runtime apply batch totals
   - deferred-for-prefetch counts
+  - a ranked `comparison_table` and `best_by_metric` summary for quick profile selection
 
 ## PIM Microbenchmark
 

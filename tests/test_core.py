@@ -765,8 +765,17 @@ class TestDynamicScheduler:
         assert len(summary["profiles"]) == 2
         assert summary["best_by_decode_tokens_per_second"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_decode_tokens_per_second"]["decode_tokens_per_second"] == pytest.approx(2.5)
+        assert summary["metric_directions"]["pipeline_promotion_source_cold"] == "min"
         assert "pipeline_apply_batch_size_avg" in summary["sort_keys"]
+        assert "pipeline_promotion_non_cold_ratio" in summary["sort_keys"]
         assert summary["best_by_decode_tokens_per_second"]["runtime_offload_pipeline_apply_batch_count_total"] == 3
+        assert summary["best_by_metric"]["pipeline_promotion_source_cold"]["scheduler_profile"] == "overlap_safe"
+        assert summary["best_by_metric"]["pipeline_promotion_non_cold_ratio"]["value"] == pytest.approx(0.75)
+        assert summary["best_by_metric"]["runtime_apply_batch_size_avg"]["value"] == pytest.approx(2.0)
+        assert summary["comparison_table"][0]["scheduler_profile"] == "overlap_safe"
+        assert summary["comparison_table"][0]["rank_by_decode_tokens_per_second"] == 1
+        assert summary["comparison_table"][0]["pipeline_promotion_non_cold_total"] == 3
+        assert summary["comparison_table"][0]["runtime_apply_batch_size_avg"] == pytest.approx(2.0)
 
     def test_migration_pipeline_runtime_tracks_apply_batch_totals(self):
         from nano_ktrans.kernels.migration_runtime import MigrationPipelineRuntime

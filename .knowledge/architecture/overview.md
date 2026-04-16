@@ -258,7 +258,12 @@ tags: [architecture]
     - 即使某个 expert 的 resident weights 已能同步 stage 到 CPU cache
     - decode prime 阶段也不会在同一步把它直接视作 `ready`
     - 它必须先经过下一次 refresh/pipeline tick，才会真正进入 ready-only 消费路径
-    这样系统里的 `ready` 更接近“上一阶段已经完成”的稳定信号，而不是“本阶段临时凑出来”的同步捷径。
+46. benchmark/profile sweep 的结果层现在也更像“调度决策面板”了：
+    - `profile_sweep_summary` 除了保留原始 `profiles` 和按 decode TPS 选的 `best_by_decode_tokens_per_second`
+    - 还会输出 `comparison_table`
+    - 以及 `best_by_metric` / `metric_directions`
+    - 可以直接按 `pipeline_promotion_non_cold_ratio`、`runtime_apply_batch_size_avg`、`runtime_deferred_for_prefetch` 这类 overlap 相关指标比较 profile
+    这让后续宿主机真实 sweep 不再只是“哪个快”，而是能看清“为什么快/慢”。
 46. benchmark 侧现在也开始按“单次 run”观察流水线：
     - 每次 generation 前会重置 HybridMoE 的 runtime/queue/cache 计数器
     - 每个 run 结果都带自己的 `scheduler_summary`

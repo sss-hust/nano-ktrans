@@ -5,6 +5,8 @@ from typing import Any
 
 PROFILE_SWEEP_SORT_KEYS = (
     "decode_tokens_per_second",
+    "pipeline_promotion_non_cold_total",
+    "pipeline_promotion_non_cold_ratio",
     "pipeline_prefetch_overlap_hits",
     "pipeline_promotion_source_activated",
     "pipeline_promotion_source_warm",
@@ -16,6 +18,69 @@ PROFILE_SWEEP_SORT_KEYS = (
     "pipeline_apply_batch_evictions",
     "runtime_deferred_for_prefetch",
 )
+
+PROFILE_SWEEP_METRIC_DIRECTIONS = {
+    "decode_tokens_per_second": "max",
+    "prefill_seconds_avg": "min",
+    "decode_seconds_avg": "min",
+    "pipeline_prefetch_overlap_hits": "max",
+    "pipeline_promotion_source_activated": "max",
+    "pipeline_promotion_source_warm": "max",
+    "pipeline_promotion_source_cold": "min",
+    "pipeline_promotion_non_cold_total": "max",
+    "pipeline_promotion_non_cold_ratio": "max",
+    "pipeline_apply_batches": "max",
+    "pipeline_apply_batch_size_avg": "max",
+    "pipeline_apply_batch_evictions": "min",
+    "runtime_offload_pipeline_apply_batch_count_total": "max",
+    "runtime_offload_pipeline_apply_batch_experts_total": "max",
+    "runtime_offload_pipeline_apply_batch_evictions_total": "min",
+    "runtime_apply_batch_size_avg": "max",
+    "runtime_deferred_for_prefetch": "min",
+}
+
+
+def _metric_sort_key(value: Any, direction: str) -> tuple[int, float]:
+    if value is None:
+        return (0, 0.0)
+    numeric = float(value)
+    return (1, numeric if direction == "max" else -numeric)
+
+
+def _summarize_best_profiles_by_metric(profiles: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    best_by_metric: dict[str, dict[str, Any]] = {}
+    for metric, direction in PROFILE_SWEEP_METRIC_DIRECTIONS.items():
+        candidates = [profile for profile in profiles if profile.get(metric) is not None]
+        if not candidates:
+            continue
+        best_profile = max(candidates, key=lambda profile: _metric_sort_key(profile.get(metric), direction))
+        best_by_metric[metric] = {
+            "backend": best_profile.get("backend"),
+            "scheduler_profile": best_profile.get("scheduler_profile"),
+            "value": best_profile.get(metric),
+            "direction": direction,
+        }
+    return best_by_metric
+
+
+def _build_profile_comparison_table(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered = sorted(
+        profiles,
+        key=lambda profile: (
+            float(profile.get("decode_tokens_per_second") or float("-inf")),
+            float(profile.get("pipeline_promotion_non_cold_ratio") or float("-inf")),
+            -float(profile.get("runtime_deferred_for_prefetch") or 0.0),
+        ),
+        reverse=True,
+    )
+
+    comparison_table: list[dict[str, Any]] = []
+    for rank, profile in enumerate(ordered, start=1):
+        row = dict(profile)
+        row["rank_by_decode_tokens_per_second"] = rank
+        row["row_id"] = f"{profile.get('backend')}:{profile.get('scheduler_profile')}"
+        comparison_table.append(row)
+    return comparison_table
 
 
 def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[str, Any]:
@@ -219,6 +284,16 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             if decode_tps_values
             else None
         )
+        activated_count = int(scheduler_summary.get("pipeline_promotion_source_activated", 0))
+        warm_count = int(scheduler_summary.get("pipeline_promotion_source_warm", 0))
+        cold_count = int(scheduler_summary.get("pipeline_promotion_source_cold", 0))
+        promotion_total = activated_count + warm_count + cold_count
+        runtime_apply_batch_count = int(
+            scheduler_summary.get("offload_pipeline_apply_batch_count_total", 0)
+        )
+        runtime_apply_batch_experts = int(
+            scheduler_summary.get("offload_pipeline_apply_batch_experts_total", 0)
+        )
 
         item = {
             "backend": result.get("backend"),
@@ -237,14 +312,14 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             "pipeline_prefetch_overlap_hits": int(
                 scheduler_summary.get("pipeline_prefetch_overlap_hits", 0)
             ),
-            "pipeline_promotion_source_activated": int(
-                scheduler_summary.get("pipeline_promotion_source_activated", 0)
-            ),
-            "pipeline_promotion_source_warm": int(
-                scheduler_summary.get("pipeline_promotion_source_warm", 0)
-            ),
-            "pipeline_promotion_source_cold": int(
-                scheduler_summary.get("pipeline_promotion_source_cold", 0)
+            "pipeline_promotion_source_activated": activated_count,
+            "pipeline_promotion_source_warm": warm_count,
+            "pipeline_promotion_source_cold": cold_count,
+            "pipeline_promotion_non_cold_total": activated_count + warm_count,
+            "pipeline_promotion_non_cold_ratio": (
+                (activated_count + warm_count) / promotion_total
+                if promotion_total > 0
+                else None
             ),
             "pipeline_apply_batches": int(
                 scheduler_summary.get("pipeline_apply_batches", 0)
@@ -255,14 +330,15 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             "pipeline_apply_batch_evictions": int(
                 scheduler_summary.get("pipeline_apply_batch_evictions", 0)
             ),
-            "runtime_offload_pipeline_apply_batch_count_total": int(
-                scheduler_summary.get("offload_pipeline_apply_batch_count_total", 0)
-            ),
-            "runtime_offload_pipeline_apply_batch_experts_total": int(
-                scheduler_summary.get("offload_pipeline_apply_batch_experts_total", 0)
-            ),
+            "runtime_offload_pipeline_apply_batch_count_total": runtime_apply_batch_count,
+            "runtime_offload_pipeline_apply_batch_experts_total": runtime_apply_batch_experts,
             "runtime_offload_pipeline_apply_batch_evictions_total": int(
                 scheduler_summary.get("offload_pipeline_apply_batch_evictions_total", 0)
+            ),
+            "runtime_apply_batch_size_avg": (
+                runtime_apply_batch_experts / runtime_apply_batch_count
+                if runtime_apply_batch_count > 0
+                else None
             ),
             "runtime_deferred_for_prefetch": int(
                 scheduler_summary.get("runtime_deferred_for_prefetch", 0)
@@ -274,8 +350,12 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             best_decode_tps = decode_tps_avg
             best_profile = item
 
+    comparison_table = _build_profile_comparison_table(profiles)
     return {
         "sort_keys": list(PROFILE_SWEEP_SORT_KEYS),
+        "metric_directions": dict(PROFILE_SWEEP_METRIC_DIRECTIONS),
         "profiles": profiles,
+        "comparison_table": comparison_table,
+        "best_by_metric": _summarize_best_profiles_by_metric(profiles),
         "best_by_decode_tokens_per_second": best_profile,
     }
