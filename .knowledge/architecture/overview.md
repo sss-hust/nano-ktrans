@@ -458,6 +458,11 @@ tags: [architecture]
     - callback 可把对应 migration lifecycle 直接推进到 `READY`
     - 前台 token-step refresh 只需要保留兜底 drain 和汇总语义
     这让系统从“前台轮询 future 完成”进一步推进到了“后台完成即推状态”，虽然仍未形成独立 migration worker，但 `prefetching -> ready` 已不再完全依赖前台 hook。
+73. 为了让后台 callback 安全进入 migration 控制面，`ExpertMigrationManager` 现在已经补上了内部锁：
+    - queue/peek/take/mark_state/state_for/diagnostics` 都通过同一把 `RLock` 串行化
+    - 这样 materialization 后台线程可以直接推进 `READY`
+    - 同时不会和前台 token-step pipeline 的 `peek + selective consume` 语义互相踩状态
+    这还不是完整后台 migration worker，但已经让 migration lifecycle 从“默认前台单线程结构”转成了“允许后台事件进入的线程安全结构”。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 
