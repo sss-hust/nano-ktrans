@@ -3064,6 +3064,8 @@ class TestDynamicScheduler:
                     "prepared_cache_size": 2,
                     "effective_warm_cache_limit": 1,
                     "prepared_cache_rebalance_pressure": 1.0 / 3.0,
+                    "prepared_cache_rebalance_pressure_step": 0.25,
+                    "prepared_cache_rebalance_pressure_ema": 0.2,
                     "prepared_cache_rebalance_evicted_warm": 1,
                     "prepared_cache_rebalance_evicted_activated": 2,
                     "prepared_cache_rebalance_demoted_to_warm": 2,
@@ -3095,6 +3097,8 @@ class TestDynamicScheduler:
         assert summary["prepared_cache_rebalance_dropped_to_ready"] == 1
         assert summary["prepared_cache_rebalance_activated_ratio"] == 2 / 3
         assert summary["prepared_cache_rebalance_pressure_avg"] == pytest.approx(1.0 / 3.0)
+        assert summary["prepared_cache_rebalance_pressure_step_avg"] == pytest.approx(0.25)
+        assert summary["prepared_cache_rebalance_pressure_ema_avg"] == pytest.approx(0.2)
         assert summary["prepared_cache_activation_stage_bonus_avg"] == 0.75
         assert summary["cold_promotion_penalty_avg"] == 0.5
         assert summary["adaptive_activation_limit_avg"] == 2
@@ -3134,6 +3138,8 @@ class TestDynamicScheduler:
                     "prepared_cache_utilization": 0.75,
                     "effective_prepared_cache_utilization": 1.0,
                     "prepared_cache_rebalance_pressure_avg": 0.5,
+                    "prepared_cache_rebalance_pressure_step_avg": 0.25,
+                    "prepared_cache_rebalance_pressure_ema_avg": 0.2,
                     "prepared_cache_rebalance_evicted_warm": 1,
                     "prepared_cache_rebalance_evicted_activated": 0,
                     "prepared_cache_rebalance_demoted_to_warm": 0,
@@ -3163,6 +3169,8 @@ class TestDynamicScheduler:
         assert profile["prepared_cache_utilization"] == 0.75
         assert profile["effective_prepared_cache_utilization"] == 1.0
         assert profile["prepared_cache_rebalance_pressure_avg"] == 0.5
+        assert profile["prepared_cache_rebalance_pressure_step_avg"] == 0.25
+        assert profile["prepared_cache_rebalance_pressure_ema_avg"] == 0.2
         assert profile["prepared_cache_rebalance_evicted_warm"] == 1
         assert profile["prepared_cache_rebalance_evicted_activated"] == 0
         assert profile["prepared_cache_activation_stage_bonus_avg"] == 0.25
@@ -3232,6 +3240,68 @@ class TestDynamicScheduler:
         assert hybrid._effective_prepared_cache_limit() == 3
         assert hybrid._adaptive_activation_limit() == 2
         assert hybrid._adaptive_prebuild_limit() == 5
+
+    def test_prepared_cache_pressure_signals_track_step_and_ema(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(3):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(enabled=True, gpu_budget_per_layer=1, offload_tier=ExpertResidency.PIM),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=3,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=2,
+            expert_prepared_cache_size=3,
+        ).to(dtype=torch.float32)
+
+        hybrid.prepared_cache_rebalance_evicted_warm = 2
+        hybrid.prepared_cache_rebalance_evicted_activated = 1
+        hybrid.pipeline_ticks = 3
+        hybrid._update_prepared_cache_rebalance_pressure_signals()
+
+        assert hybrid.prepared_cache_rebalance_events_last_tick == 3
+        assert hybrid._prepared_cache_rebalance_pressure_step() == pytest.approx(1.0)
+        assert hybrid.prepared_cache_rebalance_pressure_ema == pytest.approx(0.2)
+
+        hybrid.prepared_cache_rebalance_evicted_warm = 3
+        hybrid.prepared_cache_rebalance_evicted_activated = 1
+        hybrid.pipeline_ticks = 4
+        hybrid._update_prepared_cache_rebalance_pressure_signals()
+
+        assert hybrid.prepared_cache_rebalance_events_last_tick == 1
+        assert hybrid._prepared_cache_rebalance_pressure_step() == pytest.approx(1.0 / 3.0)
+        assert hybrid.prepared_cache_rebalance_pressure_ema == pytest.approx(0.2266666667)
 
     def test_effective_prepared_cache_limit_shrinks_under_pressure(self, tmp_path):
         from safetensors.torch import save_file

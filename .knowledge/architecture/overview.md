@@ -244,6 +244,11 @@ tags: [architecture]
     - 现在改为优先按 `pipeline_ticks` 归一，更接近“每步平均回退压力”
     - 这样在长 decode 运行中，controller 读到的是更稳定的 step-level 压力，而不是单纯随时间累计放大的总量
     这为后续把 controller 从静态 heuristic 推进到真正的滑动窗口或 EMA 反馈打下了基础。
+44. 当前 prepared pressure 已进一步拆成三类信号：
+    - `prepared_cache_rebalance_pressure`：累计平均压力，反映长期拥塞
+    - `prepared_cache_rebalance_pressure_step`：本步压力，反映瞬时抖动
+    - `prepared_cache_rebalance_pressure_ema`：对 step 压力做平滑后的中期趋势
+    prepared-tier controller 目前已把累计压力与 EMA 一起用于 budget backoff；这让 controller 开始具备最小的“趋势感知”能力，而不只是对单次抖动做反应。
     这样 `HybridMoE.advance_offload_pipeline()` 现在已经可以按 `queued -> prefetching -> ready -> warmed -> activated -> applied` 的顺序推进一次 promotion。
 39. 这也让“前台 pipeline”里的工作边界更清晰了：
     - resident export / safetensors prefetch 负责准备权重

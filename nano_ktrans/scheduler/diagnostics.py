@@ -12,6 +12,7 @@ PROFILE_SWEEP_SORT_KEYS = (
     "prepared_cache_budget_backoff_avg",
     "cold_promotion_penalty_avg",
     "prepared_cache_rebalance_pressure_avg",
+    "prepared_cache_rebalance_pressure_ema_avg",
     "pipeline_prefetch_overlap_hits",
     "pipeline_promotion_source_activated",
     "pipeline_promotion_source_warm",
@@ -48,6 +49,7 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "prepared_cache_budget_backoff_avg": "min",
     "cold_promotion_penalty_avg": "min",
     "prepared_cache_rebalance_pressure_avg": "min",
+    "prepared_cache_rebalance_pressure_ema_avg": "min",
     "migration_activation_eviction_regressions": "min",
     "migration_warm_eviction_regressions": "min",
     "runtime_deferred_for_prefetch": "min",
@@ -168,6 +170,8 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "prepared_cache_size": 0,
         "effective_warm_cache_limit": 0,
         "prepared_cache_rebalance_pressure": 0.0,
+        "prepared_cache_rebalance_pressure_step": 0.0,
+        "prepared_cache_rebalance_pressure_ema": 0.0,
         "prepared_cache_rebalance_evicted_warm": 0,
         "prepared_cache_rebalance_evicted_activated": 0,
         "prepared_cache_rebalance_demoted_to_warm": 0,
@@ -251,6 +255,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["effective_warm_cache_limit"] += int(layer.get("effective_warm_cache_limit", 0))
         summary["prepared_cache_rebalance_pressure"] += float(
             layer.get("prepared_cache_rebalance_pressure", 0.0)
+        )
+        summary["prepared_cache_rebalance_pressure_step"] += float(
+            layer.get("prepared_cache_rebalance_pressure_step", 0.0)
+        )
+        summary["prepared_cache_rebalance_pressure_ema"] += float(
+            layer.get("prepared_cache_rebalance_pressure_ema", 0.0)
         )
         summary["prepared_cache_rebalance_evicted_warm"] += int(
             layer.get("prepared_cache_rebalance_evicted_warm", 0)
@@ -353,6 +363,12 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["prepared_cache_rebalance_pressure_avg"] = (
             summary["prepared_cache_rebalance_pressure"] / summary["layer_count"]
         )
+        summary["prepared_cache_rebalance_pressure_step_avg"] = (
+            summary["prepared_cache_rebalance_pressure_step"] / summary["layer_count"]
+        )
+        summary["prepared_cache_rebalance_pressure_ema_avg"] = (
+            summary["prepared_cache_rebalance_pressure_ema"] / summary["layer_count"]
+        )
         summary["adaptive_activation_limit_avg"] = (
             summary["adaptive_activation_limit"] / summary["layer_count"]
         )
@@ -364,6 +380,8 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["prepared_cache_budget_backoff_avg"] = None
         summary["cold_promotion_penalty_avg"] = None
         summary["prepared_cache_rebalance_pressure_avg"] = None
+        summary["prepared_cache_rebalance_pressure_step_avg"] = None
+        summary["prepared_cache_rebalance_pressure_ema_avg"] = None
         summary["adaptive_activation_limit_avg"] = None
         summary["adaptive_prebuild_limit_avg"] = None
     total_rebalance_events = (
@@ -503,6 +521,12 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
             ),
             "prepared_cache_rebalance_pressure_avg": scheduler_summary.get(
                 "prepared_cache_rebalance_pressure_avg"
+            ),
+            "prepared_cache_rebalance_pressure_step_avg": scheduler_summary.get(
+                "prepared_cache_rebalance_pressure_step_avg"
+            ),
+            "prepared_cache_rebalance_pressure_ema_avg": scheduler_summary.get(
+                "prepared_cache_rebalance_pressure_ema_avg"
             ),
             "prepared_cache_rebalance_evicted_warm": int(
                 scheduler_summary.get("prepared_cache_rebalance_evicted_warm", 0)

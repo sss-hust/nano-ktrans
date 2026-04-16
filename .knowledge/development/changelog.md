@@ -7,6 +7,8 @@ tags: [changelog]
 
 ## 2026-04-16
 
+- <!-- updated: 2026-04-16 09:02 --> **[prepared-pressure-signals]** prepared-tier 现在同时输出三类压力信号：累计 `prepared_cache_rebalance_pressure`、单步 `prepared_cache_rebalance_pressure_step` 和平滑后的 `prepared_cache_rebalance_pressure_ema`；prepared budget backoff 可以同时参考累计与 EMA，而不是只靠累计压力。
+- <!-- updated: 2026-04-16 09:02 --> **[tests]** 新增 prepared pressure step/EMA 的控制器测试与 summary 聚合测试；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `88 passed, 1 warning`。
 - <!-- updated: 2026-04-16 08:54 --> **[rebalance-pressure-normalization]** `prepared_cache_rebalance_pressure` 现按 `pipeline_ticks` 归一；prepared-tier controller 不再把长运行中的累计 eviction 直接当成瞬时高压，长期运行下的 backoff 信号更稳定。
 - <!-- updated: 2026-04-16 08:54 --> **[tests]** 调整 prepared pressure/backoff 测试，验证 step 归一后的 effective prepared budget 行为；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `87 passed, 1 warning`。
 - <!-- updated: 2026-04-16 08:47 --> **[prepared-controller-coupling]** `prepared_cache_budget_backoff` 不再只影响 `effective_prepared_cache_limit`，现在也会反馈到 `adaptive_activation_limit / adaptive_prebuild_limit`；prepared budget 收缩与候选准备 aggressiveness 已开始联动。

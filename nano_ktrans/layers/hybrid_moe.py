@@ -131,6 +131,9 @@ class HybridMoE(nn.Module):
         self.prepared_cache_rebalance_dropped_to_ready = 0
         self.prepared_cache_activation_stage_bonus = 0.5
         self.cold_promotion_penalty = 0.0
+        self.prepared_cache_rebalance_pressure_ema = 0.0
+        self.prepared_cache_rebalance_events_last_tick = 0
+        self.prepared_cache_rebalance_events_prev_total = 0
         self.expert_warm_cache_size = max(0, int(expert_warm_cache_size))
         self.expert_prepared_cache_size = (
             None if expert_prepared_cache_size is None else max(0, int(expert_prepared_cache_size))
@@ -336,6 +339,29 @@ class HybridMoE(nn.Module):
         normalization = self.pipeline_ticks if self.pipeline_ticks > 0 else int(self.expert_prepared_cache_size)
         return rebalance_events / max(1, int(normalization))
 
+    def _prepared_cache_rebalance_pressure_step(self) -> float:
+        if not self.expert_prepared_cache_size:
+            return 0.0
+        return self.prepared_cache_rebalance_events_last_tick / max(1, int(self.expert_prepared_cache_size))
+
+    def _update_prepared_cache_rebalance_pressure_ema(self) -> None:
+        step_pressure = self._prepared_cache_rebalance_pressure_step()
+        self.prepared_cache_rebalance_pressure_ema = (
+            0.8 * self.prepared_cache_rebalance_pressure_ema
+        ) + (0.2 * step_pressure)
+
+    def _update_prepared_cache_rebalance_pressure_signals(self) -> None:
+        current_total = (
+            self.prepared_cache_rebalance_evicted_warm
+            + self.prepared_cache_rebalance_evicted_activated
+        )
+        self.prepared_cache_rebalance_events_last_tick = max(
+            0,
+            current_total - self.prepared_cache_rebalance_events_prev_total,
+        )
+        self.prepared_cache_rebalance_events_prev_total = current_total
+        self._update_prepared_cache_rebalance_pressure_ema()
+
     def _prepared_cache_budget_backoff(self) -> int:
         if self.expert_prepared_cache_size is None:
             return 0
@@ -343,7 +369,11 @@ class HybridMoE(nn.Module):
         if base_limit <= 1:
             return 0
 
-        pressure = self._prepared_cache_rebalance_pressure()
+        pressure = max(
+            self._prepared_cache_rebalance_pressure_step(),
+            self._prepared_cache_rebalance_pressure(),
+            self.prepared_cache_rebalance_pressure_ema,
+        )
         backoff = 0
         if pressure >= 1.0:
             backoff += 1
@@ -921,6 +951,7 @@ class HybridMoE(nn.Module):
                 phase=phase,
             )
         self.pipeline_ticks += 1
+        self._update_prepared_cache_rebalance_pressure_signals()
         self.pipeline_ready_applied += ready_applied
         self.pipeline_ready_deferred += ready_deferred
         return {
@@ -1528,6 +1559,9 @@ class HybridMoE(nn.Module):
             "prepared_cache_size": self._prepared_cache_size(),
             "effective_warm_cache_limit": self._effective_warm_cache_limit(),
             "prepared_cache_rebalance_pressure": self._prepared_cache_rebalance_pressure(),
+            "prepared_cache_rebalance_pressure_step": self._prepared_cache_rebalance_pressure_step(),
+            "prepared_cache_rebalance_pressure_ema": self.prepared_cache_rebalance_pressure_ema,
+            "prepared_cache_rebalance_events_last_tick": self.prepared_cache_rebalance_events_last_tick,
             "prepared_cache_rebalance_evicted_warm": self.prepared_cache_rebalance_evicted_warm,
             "prepared_cache_rebalance_evicted_activated": self.prepared_cache_rebalance_evicted_activated,
             "prepared_cache_rebalance_demoted_to_warm": self.prepared_cache_rebalance_demoted_to_warm,
