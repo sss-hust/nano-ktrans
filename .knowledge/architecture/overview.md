@@ -540,6 +540,18 @@ tags: [architecture]
     - decode 入口的 migration 应用与诊断快照
     都开始通过同一个 `RLock` 串行化访问 prepared-tier cache、migration lifecycle 和 resident set。
     这一步还没有把后台 apply 做成独立 commit queue，但它先把“后台线程已经真实在跑”的共享状态风险收住了，为后续继续拆 activation/apply queue 提供了安全边界。
+86. 后半段 resident commit 现在开始反向影响前半段 prepared-tier controller：
+    - `apply_candidate_queue` 已不再只是 staged commit buffer，而是会输出：
+      - `apply_queue_pressure`
+      - `apply_queue_pressure_step`
+      - `apply_queue_pressure_ema`
+      - `apply_queue_budget_backoff`
+    - 当 apply queue 长期拥塞、或频繁出现 queue eviction 时，controller 会主动收缩：
+      - `adaptive_activation_limit`
+      - `adaptive_prebuild_limit`
+      - `adaptive_prefetch_pending_limit`
+      - `adaptive_prefetch_candidate_budget`
+    这意味着系统开始形成真正的“前半段 prepared tier 和后半段 resident commit 阶段联动控流”，不再只是 prepared cache 自己感知自己的压力。
 
 这仍不是最终想要的“PIM resident -> GPU resident 的异步迁移”，但已经把系统推进到了“prefill 做热度探测和预热，decode 做真正 materialize”的合理分工。
 

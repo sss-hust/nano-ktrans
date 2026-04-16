@@ -933,6 +933,9 @@ class TestDynamicScheduler:
                         "pipeline_apply_batch_activated_ratio": 1.0 / 3.0,
                         "pipeline_apply_batch_warm_ratio": 1.0 / 3.0,
                         "pipeline_apply_batch_cold_ratio": 1.0 / 3.0,
+                        "apply_queue_pressure_avg": 1.5,
+                        "apply_queue_pressure_ema_avg": 0.8,
+                        "apply_queue_budget_backoff_avg": 1.0,
                         "offload_pipeline_apply_batch_count_total": 2,
                         "offload_pipeline_apply_batch_experts_total": 3,
                         "offload_pipeline_apply_batch_evictions_total": 1,
@@ -971,6 +974,9 @@ class TestDynamicScheduler:
                         "pipeline_apply_batch_activated_ratio": 0.5,
                         "pipeline_apply_batch_warm_ratio": 1.0 / 3.0,
                         "pipeline_apply_batch_cold_ratio": 1.0 / 6.0,
+                        "apply_queue_pressure_avg": 0.5,
+                        "apply_queue_pressure_ema_avg": 0.25,
+                        "apply_queue_budget_backoff_avg": 0.0,
                         "offload_pipeline_apply_batch_count_total": 3,
                         "offload_pipeline_apply_batch_experts_total": 6,
                         "offload_pipeline_apply_batch_evictions_total": 2,
@@ -996,12 +1002,14 @@ class TestDynamicScheduler:
         assert summary["metric_directions"]["pipeline_promotion_source_cold"] == "min"
         assert summary["metric_directions"]["cold_promotion_penalty_avg"] == "min"
         assert summary["metric_directions"]["migration_activation_eviction_regressions"] == "min"
+        assert summary["metric_directions"]["apply_queue_pressure_avg"] == "min"
         assert "pipeline_apply_batch_size_avg" in summary["sort_keys"]
         assert "pipeline_promotion_non_cold_ratio" in summary["sort_keys"]
         assert summary["best_by_decode_tokens_per_second"]["runtime_offload_pipeline_apply_batch_count_total"] == 3
         assert summary["best_by_metric"]["pipeline_promotion_source_cold"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["cold_promotion_penalty_avg"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["migration_activation_eviction_regressions"]["scheduler_profile"] == "overlap_safe"
+        assert summary["best_by_metric"]["apply_queue_pressure_avg"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["background_worker_work_ratio"]["scheduler_profile"] == "overlap_safe"
         assert summary["best_by_metric"]["pipeline_promotion_non_cold_ratio"]["value"] == pytest.approx(0.75)
         assert summary["best_by_metric"]["runtime_apply_batch_size_avg"]["value"] == pytest.approx(2.0)
@@ -3316,6 +3324,10 @@ class TestDynamicScheduler:
                         "apply_queue_committed": 3,
                         "apply_queue_pruned": 1,
                         "apply_queue_evictions": 2,
+                        "apply_queue_pressure": 1.5,
+                        "apply_queue_pressure_step": 0.5,
+                        "apply_queue_pressure_ema": 0.75,
+                        "apply_queue_budget_backoff": 1,
                         "background_apply_queue_enqueued": 3,
                     }
                 ],
@@ -3330,6 +3342,10 @@ class TestDynamicScheduler:
         assert summary["apply_queue_evictions"] == 2
         assert summary["background_apply_queue_enqueued"] == 3
         assert summary["apply_queue_utilization"] == pytest.approx(0.5)
+        assert summary["apply_queue_pressure_avg"] == pytest.approx(1.5)
+        assert summary["apply_queue_pressure_step_avg"] == pytest.approx(0.5)
+        assert summary["apply_queue_pressure_ema_avg"] == pytest.approx(0.75)
+        assert summary["apply_queue_budget_backoff_avg"] == 1.0
         assert summary["offload_background_apply_queue_enqueued_total"] == 3
 
     def test_hybrid_moe_promotion_prefers_activated_cache(self, tmp_path):
@@ -4511,6 +4527,73 @@ class TestDynamicScheduler:
         hybrid.cold_promotion_penalty = 1.5
         assert hybrid._adaptive_prefetch_pending_limit(phase="decode") == 4
         assert hybrid._adaptive_prefetch_candidate_budget(phase="decode") == 6
+
+    def test_apply_queue_pressure_backoff_reduces_prepared_aggressiveness(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nano_ktrans.layers.hybrid_moe import HybridMoE
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+
+        weight_path = tmp_path / "weights"
+        weight_path.mkdir()
+        tensors = {}
+        for expert_idx in range(4):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w1.weight"] = torch.randn(8, 4)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w2.weight"] = torch.randn(4, 8)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{expert_idx}.w3.weight"] = torch.randn(8, 4)
+        save_file(tensors, str(weight_path / "model.safetensors"))
+
+        gpu_mask = torch.tensor([True, False, False, False], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=1,
+                prefetch_candidate_budget_per_layer=3,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=4,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+            expert_prefetch_workers=0,
+            expert_warm_cache_size=4,
+            expert_prepared_cache_size=4,
+            prepared_controller_aggressiveness=1.0,
+        ).to(dtype=torch.float32)
+
+        base_activation = hybrid._adaptive_activation_limit()
+        base_prebuild = hybrid._adaptive_prebuild_limit()
+        base_prefetch_pending = hybrid._adaptive_prefetch_pending_limit(phase="decode")
+        base_prefetch_budget = hybrid._adaptive_prefetch_candidate_budget(phase="decode")
+
+        hybrid.apply_queue_evictions = 4
+        hybrid.pipeline_ticks = 2
+        hybrid._update_apply_queue_pressure_signals()
+
+        assert hybrid._apply_queue_pressure() >= 2.0
+        assert hybrid._apply_queue_budget_backoff() == 2
+        assert hybrid._adaptive_activation_limit() < base_activation
+        assert hybrid._adaptive_prebuild_limit() < base_prebuild
+        assert hybrid._adaptive_prefetch_pending_limit(phase="decode") < base_prefetch_pending
+        assert hybrid._adaptive_prefetch_candidate_budget(phase="decode") < base_prefetch_budget
 
     def test_warm_cache_eviction_downgrades_lifecycle_to_ready(self, tmp_path):
         from safetensors.torch import save_file

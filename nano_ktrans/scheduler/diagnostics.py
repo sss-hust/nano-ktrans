@@ -15,6 +15,9 @@ PROFILE_SWEEP_SORT_KEYS = (
     "cold_promotion_penalty_avg",
     "prepared_cache_rebalance_pressure_avg",
     "prepared_cache_rebalance_pressure_ema_avg",
+    "apply_queue_pressure_avg",
+    "apply_queue_pressure_ema_avg",
+    "apply_queue_budget_backoff_avg",
     "pipeline_prefetch_overlap_hits",
     "pipeline_promotion_source_activated",
     "pipeline_promotion_source_warm",
@@ -54,6 +57,9 @@ PROFILE_SWEEP_METRIC_DIRECTIONS = {
     "cold_promotion_penalty_avg": "min",
     "prepared_cache_rebalance_pressure_avg": "min",
     "prepared_cache_rebalance_pressure_ema_avg": "min",
+    "apply_queue_pressure_avg": "min",
+    "apply_queue_pressure_ema_avg": "min",
+    "apply_queue_budget_backoff_avg": "min",
     "adaptive_prefetch_pending_limit_avg": "max",
     "adaptive_prefetch_candidate_budget_avg": "max",
     "migration_activation_eviction_regressions": "min",
@@ -210,6 +216,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "apply_queue_committed": 0,
         "apply_queue_pruned": 0,
         "apply_queue_evictions": 0,
+        "apply_queue_pressure": 0.0,
+        "apply_queue_pressure_step": 0.0,
+        "apply_queue_pressure_ema": 0.0,
+        "apply_queue_budget_backoff": 0,
         "background_apply_queue_enqueued": 0,
         "activated_cache_hits": 0,
         "activated_cache_stores": 0,
@@ -312,6 +322,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["apply_queue_committed"] += int(layer.get("apply_queue_committed", 0))
         summary["apply_queue_pruned"] += int(layer.get("apply_queue_pruned", 0))
         summary["apply_queue_evictions"] += int(layer.get("apply_queue_evictions", 0))
+        summary["apply_queue_pressure"] += float(layer.get("apply_queue_pressure", 0.0))
+        summary["apply_queue_pressure_step"] += float(layer.get("apply_queue_pressure_step", 0.0))
+        summary["apply_queue_pressure_ema"] += float(layer.get("apply_queue_pressure_ema", 0.0))
+        summary["apply_queue_budget_backoff"] += int(layer.get("apply_queue_budget_backoff", 0))
         summary["background_apply_queue_enqueued"] += int(layer.get("background_apply_queue_enqueued", 0))
         summary["activated_cache_hits"] += int(layer.get("activated_cache_hits", 0))
         summary["activated_cache_stores"] += int(layer.get("activated_cache_stores", 0))
@@ -456,6 +470,18 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["adaptive_prefetch_candidate_budget_avg"] = (
             summary["adaptive_prefetch_candidate_budget"] / summary["layer_count"]
         )
+        summary["apply_queue_pressure_avg"] = (
+            summary["apply_queue_pressure"] / summary["layer_count"]
+        )
+        summary["apply_queue_pressure_step_avg"] = (
+            summary["apply_queue_pressure_step"] / summary["layer_count"]
+        )
+        summary["apply_queue_pressure_ema_avg"] = (
+            summary["apply_queue_pressure_ema"] / summary["layer_count"]
+        )
+        summary["apply_queue_budget_backoff_avg"] = (
+            summary["apply_queue_budget_backoff"] / summary["layer_count"]
+        )
     else:
         summary["prepared_cache_activation_stage_bonus_avg"] = None
         summary["prepared_cache_budget_backoff_avg"] = None
@@ -467,6 +493,10 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         summary["adaptive_prebuild_limit_avg"] = None
         summary["adaptive_prefetch_pending_limit_avg"] = None
         summary["adaptive_prefetch_candidate_budget_avg"] = None
+        summary["apply_queue_pressure_avg"] = None
+        summary["apply_queue_pressure_step_avg"] = None
+        summary["apply_queue_pressure_ema_avg"] = None
+        summary["apply_queue_budget_backoff_avg"] = None
     total_rebalance_events = (
         summary["prepared_cache_rebalance_evicted_warm"]
         + summary["prepared_cache_rebalance_evicted_activated"]
@@ -585,6 +615,10 @@ def summarize_profile_sweep_results(results: list[dict[str, Any]]) -> dict[str, 
                 "background_worker_work_ratio"
             ),
             "apply_queue_utilization": scheduler_summary.get("apply_queue_utilization"),
+            "apply_queue_pressure_avg": scheduler_summary.get("apply_queue_pressure_avg"),
+            "apply_queue_pressure_step_avg": scheduler_summary.get("apply_queue_pressure_step_avg"),
+            "apply_queue_pressure_ema_avg": scheduler_summary.get("apply_queue_pressure_ema_avg"),
+            "apply_queue_budget_backoff_avg": scheduler_summary.get("apply_queue_budget_backoff_avg"),
             "offload_background_work_items_total": int(
                 scheduler_summary.get("offload_background_work_items_total", 0)
             ),

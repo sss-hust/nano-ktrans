@@ -19,6 +19,9 @@ tags: [changelog]
 - <!-- updated: 2026-04-17 02:01 --> **[tests]** 新增 apply queue enqueue / rebalance / summary 覆盖，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `113 passed, 1 warning`。
 - <!-- updated: 2026-04-17 02:05 --> **[background-apply-boundary]** background pipeline 现只负责把 `ACTIVATED` expert 推入 apply queue；真正的 resident commit 留在后续 staged commit 路径，不再在同一 background tick 里立即消费“刚入队”的 apply candidate。
 - <!-- updated: 2026-04-17 02:05 --> **[tests]** 调整 background apply queue 语义测试，并新增 apply queue 利用率/摘要覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `114 passed, 1 warning`。
+- <!-- updated: 2026-04-17 16:20 --> **[apply-queue-controller]** apply queue 现新增 `apply_queue_pressure / step / ema / budget_backoff`，并把这组信号接回 prepared-tier controller；当 resident commit 阶段持续拥塞时，系统会主动收缩 activation/prebuild/prefetch aggressiveness，避免 prepared tier 继续向后半段无效堆积。
+- <!-- updated: 2026-04-17 16:20 --> **[apply-queue-summaries]** scheduler summary / profile sweep 新增 `apply_queue_pressure_avg / apply_queue_pressure_ema_avg / apply_queue_budget_backoff_avg`，可以直接比较不同 profile 在 apply queue 拥塞下的 controller 反应。
+- <!-- updated: 2026-04-17 16:20 --> **[tests]** 新增 apply queue pressure/backoff 行为测试与 summary/profile sweep 聚合覆盖；当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `115 passed, 1 warning`。
 
 - <!-- updated: 2026-04-17 15:18 --> **[pipeline-lock]** `HybridMoE` 新增内部 `RLock`，background worker 与前台 `refresh/advance/forward/diagnostics` 对 prepared-tier cache、migration lifecycle 和 resident set 的共享状态访问开始串行化，降低后台推进接入真实生成后出现竞态的风险。
 - <!-- updated: 2026-04-17 15:18 --> **[tests]** 并发边界收口后重新回归 `tests/test_core.py + tests/test_pim_runtime.py`，当前为 `111 passed, 1 warning`。

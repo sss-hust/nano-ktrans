@@ -4,6 +4,7 @@ updated: 2026-04-17 14:05
 updated: 2026-04-17 14:20
 updated: 2026-04-17 14:35
 updated: 2026-04-17 14:50
+updated: 2026-04-17 16:20
 updated: 2026-04-17 01:53
 updated: 2026-04-17 02:01
 updated: 2026-04-17 02:05
@@ -53,6 +54,7 @@ updated: 2026-04-17 02:05
 - [x] `activated -> applied` 已抽出显式 apply candidate queue；后台 worker 现在会先把 `ACTIVATED` expert 入队，前台再做 ready promotion commit
 - [x] apply queue 现已具备独立预算、hotness-aware victim 选择和 queue 级诊断，后半段 resident commit 开始从“ opportunistic apply ”推进成“受控 staged commit”
 - [x] background pipeline 现在只负责 `activated -> apply queue enqueue`；真正 resident commit 会留在后续前台/共享 staged commit 阶段，后台/前台边界更清晰
+- [x] apply queue 现在也已接入 pressure / EMA / backoff 信号，并开始反向约束 activation / prebuild / prefetch aggressiveness，prepared-tier controller 已能感知 resident commit 拥塞
 - [x] offload refresh 已接入模型级统计，benchmark 可直接看到 refresh 次数与每步 ready 收敛量
 - [x] layer 级 refresh 已加空队列短路，避免无 pending prefetch 时做无意义轮询
 - [x] benchmark 已支持 scheduler profile sweep，可一轮比较多组调度策略
@@ -187,6 +189,7 @@ updated: 2026-04-17 02:05
 - 当前 background worker 已能推进一部分 `activated -> applied`，但目前仍是 opportunistic background apply，不是真正独立的 resident commit queue，也还不是底层 batched apply
 - 当前后台路径已经从 opportunistic activated apply 推进到显式 apply queue，但 `apply queue -> resident set` 仍是前台/后台共享的 staged commit，不是底层 fully batched resident injection
 - 当前 apply queue 已有自身预算和 victim policy，但 `apply queue -> resident set` 仍是共享 staged commit，不是独立 batched resident commit queue
+- 当前 apply queue 压力已接回 prepared-tier controller，但 resident commit 仍是 staged shared commit；下一步仍需把 `apply queue -> resident set` 收成真正的 per-layer batch commit
 - 当前虽然已有 `HybridMoE` 级 pipeline 锁，但锁粒度仍偏粗；background apply 还只是“线程安全地 opportunistic apply”，不是独立 commit queue，也还没有真正 batched resident commit
 - 当前 promotion batch 虽然已先统一 resolve source/module，再进入 apply，但 resident set 注入仍是 batch 内逐 expert 提交，不是真正底层 batched apply
 - 当前 benchmark 已能稳定观察单次 run 的 pipeline 行为，但还缺少 profile sweep 结果表层面的自动对比汇总

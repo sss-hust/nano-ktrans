@@ -357,6 +357,9 @@ class LLM:
             hybrid_moe.apply_queue_committed = 0
             hybrid_moe.apply_queue_pruned = 0
             hybrid_moe.background_apply_queue_enqueued = 0
+            hybrid_moe.apply_queue_pressure_ema = 0.0
+            hybrid_moe.apply_queue_events_last_tick = 0
+            hybrid_moe.apply_queue_events_prev_total = 0
 
     def shutdown(self) -> None:
         shutdown_fn = getattr(self.model.model, "shutdown_offload_worker", None)
