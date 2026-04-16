@@ -249,6 +249,11 @@ tags: [architecture]
     - background pipeline 负责 `activated -> apply queue enqueue`
     - resident commit 再由前台/后台从 apply queue 消费
     这让系统从“看到 ACTIVATED 就 opportunistic apply”推进成“显式 staged commit”的结构，更接近后续真正的 apply queue / batched resident commit。
+47. 当前 apply queue 已经是独立于 activated cache 的一层控制面结构：
+    - 有自己的 queue budget
+    - 有基于 hotness 和 lifecycle 的 victim 选择
+    - 有 `apply_queue_enqueued / committed / pruned / evictions` 诊断
+    这让后台 prepared 阶段和前台 resident commit 之间开始有清晰的缓冲边界，而不再只是直接从 activated cache 命中就提交。
 44. 当前 prepared pressure 已进一步拆成三类信号：
     - `prepared_cache_rebalance_pressure`：累计平均压力，反映长期拥塞
     - `prepared_cache_rebalance_pressure_step`：本步压力，反映瞬时抖动

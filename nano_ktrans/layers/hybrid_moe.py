@@ -157,6 +157,7 @@ class HybridMoE(nn.Module):
         self.activation_ready = 0
         self.activation_applied = 0
         self.background_activation_applied = 0
+        self.apply_queue_evictions = 0
         self.apply_queue_enqueued = 0
         self.apply_queue_committed = 0
         self.apply_queue_pruned = 0
@@ -598,6 +599,42 @@ class HybridMoE(nn.Module):
             return 1
         return max(1, int(self.dynamic_expert_scheduler.config.decode_promote_k))
 
+    def _apply_queue_limit(self) -> int:
+        if self.dynamic_expert_scheduler is None or not self.dynamic_expert_scheduler.enabled:
+            return 1
+        limit = max(
+            1,
+            int(self.dynamic_expert_scheduler.config.decode_promote_k),
+        )
+        if self.prepared_controller_aggressiveness >= 0.5:
+            limit += 1
+        if self.prepared_controller_aggressiveness >= 1.0:
+            limit += 1
+        return limit
+
+    def _pick_apply_queue_victim_key(self) -> str | None:
+        if not self.apply_candidate_queue:
+            return None
+        ordered_keys = list(self.apply_candidate_queue.keys())
+        return min(
+            ordered_keys,
+            key=lambda expert_key: (
+                self._hotness_score(int(expert_key)),
+                self._migration_state_priority(int(expert_key)),
+                ordered_keys.index(expert_key),
+            ),
+        )
+
+    def _rebalance_apply_candidate_queue(self) -> None:
+        limit = self._apply_queue_limit()
+        while len(self.apply_candidate_queue) > limit:
+            evicted_key = self._pick_apply_queue_victim_key()
+            if evicted_key is None:
+                evicted_key, _ = self.apply_candidate_queue.popitem(last=False)
+            else:
+                self.apply_candidate_queue.pop(evicted_key, None)
+            self.apply_queue_evictions += 1
+
     def _pick_activated_cache_victim_key(self) -> str | None:
         if not self.activated_expert_cache:
             return None
@@ -926,6 +963,7 @@ class HybridMoE(nn.Module):
             if not was_present:
                 self.apply_queue_enqueued += 1
                 enqueued += 1
+        self._rebalance_apply_candidate_queue()
         return enqueued
 
     def _prune_apply_candidate_queue(self) -> int:
@@ -1927,9 +1965,12 @@ class HybridMoE(nn.Module):
                 "activation_applied": self.activation_applied,
                 "background_activation_applied": self.background_activation_applied,
                 "apply_queue_size": len(self.apply_candidate_queue),
+                "apply_queue_limit": self._apply_queue_limit(),
+                "apply_queue_pending_experts": [int(expert_idx) for expert_idx in self.apply_candidate_queue.keys()],
                 "apply_queue_enqueued": self.apply_queue_enqueued,
                 "apply_queue_committed": self.apply_queue_committed,
                 "apply_queue_pruned": self.apply_queue_pruned,
+                "apply_queue_evictions": self.apply_queue_evictions,
                 "background_apply_queue_enqueued": self.background_apply_queue_enqueued,
                 "materialization_manager": self.materialization_manager.diagnostics(),
                 "layer_residency": layer_residency,

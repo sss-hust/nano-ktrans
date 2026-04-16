@@ -352,6 +352,7 @@ class LLM:
             hybrid_moe.activation_ready = 0
             hybrid_moe.activation_applied = 0
             hybrid_moe.background_activation_applied = 0
+            hybrid_moe.apply_queue_evictions = 0
             hybrid_moe.apply_queue_enqueued = 0
             hybrid_moe.apply_queue_committed = 0
             hybrid_moe.apply_queue_pruned = 0
