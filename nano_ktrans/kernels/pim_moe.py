@@ -361,9 +361,13 @@ class PIMMoEBackend(CPUMoEBackend):
         if cpu_slot is None:
             return
         
-        # Clear cached weights for this expert
+        # Clear cached weights and DPU residency for this expert
         try:
             eid = self._expert_id(cpu_slot)
+            # If this expert is currently resident on DPU, evict it
+            if self.expert_runtime.resident_expert_id == eid:
+                self.expert_runtime.evict()
+            # Also clear pre-padded weight cache
             self.expert_runtime.evict_cached_weights(eid)
         except Exception:
             # Silently ignore if evict fails - this is best-effort cleanup
