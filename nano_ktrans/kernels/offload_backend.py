@@ -57,6 +57,18 @@ class ExpertOffloadBackend(ABC):
     def export_expert_weights(self, expert_idx: int) -> dict[str, torch.Tensor] | None:
         return None
 
+    def notify_expert_evicted(self, expert_idx: int, residency_before: str) -> None:
+        """
+        Called when an expert is being evicted from GPU to offload storage (PIM/CPU).
+        
+        Allows backends to clean up DPU-resident weights or other resources.
+        
+        Args:
+            expert_idx: The expert index being evicted
+            residency_before: The residency location before eviction (typically "gpu")
+        """
+        pass
+
     def queue_migration_plan(self, ops: list[Any], *, phase: str = "") -> None:
         self.migration_submit_calls += 1
         self.last_migration_plan_size = len(ops)

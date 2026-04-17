@@ -2899,6 +2899,9 @@ class HybridMoE(nn.Module):
             self._store_warm_module(expert_idx, expert_module, count_store=True)
         self.gpu_experts_mask[expert_idx] = False
         self._set_residency(expert_idx, dst)
+        # Notify backend to clean up DPU-resident weights if going to PIM
+        if dst == ExpertResidency.PIM:
+            self.offload_backend.notify_expert_evicted(expert_idx, 'gpu')
         return True
 
     def _coalesce_migration_ops(self, queued_ops: list) -> list:
