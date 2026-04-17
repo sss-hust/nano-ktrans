@@ -26,6 +26,7 @@ Notes:
 - `cuda_pim` routes offloaded experts through the real experimental PIM backend. In the current implementation, expert linear projections run on DPU while SiLU/gating stays on the host, and larger flattened batches still fall back to CPU.
 - `cuda_pim_shadow` uses the same numerically-correct CPU fallback for offloaded experts but exposes PIM visibility and routing counters inside the main inference path.
 - If CUDA is not available in the current session, CUDA backends are reported as `unavailable` instead of crashing.
+- `benchmark_inference.py` now supports `--enable-background-offload-worker` and `--background-offload-poll-interval-seconds`, so real `cuda_pim` / dynamic-scheduler runs can exercise the staged background migration pipeline during benchmarked generation instead of only inside `example.py`.
 - When `--scheduler-profile-sweep` is used, the output JSON now includes `profile_sweep_summary`, which auto-compares:
   - `decode_tokens_per_second`
   - non-cold promotion totals/ratios (`activated + warm`)

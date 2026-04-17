@@ -177,6 +177,14 @@ tags: [architecture]
     - layer forward：消费剩余未就绪/未提前应用的迁移，并执行真实 GPU/offload 混合计算
     - backend/offload tier：继续承担 CPU/PIM 数值计算
     这比早期“所有迁移控制都塞在 `HybridMoE.forward()` 里”更接近真正的流水线系统。
+30. benchmark / example 路径现在也已经能显式接通 background offload worker：
+    - `benchmark_inference.py` 和 `example.py` 新增了 `--enable-background-offload-worker`
+    - benchmark 单次 generation 会在 prefill/decode 前启动 worker，结束后停止
+    - 因而真实宿主机上的 `cuda_pim` benchmark 已经可以直接跑到后台 `prefetching -> ready -> warmed -> activated` 路径，而不再只停留在前台 refresh hook
+31. 这意味着当前系统已经不只是“模型内部有 background worker 骨架”，而是：
+    - `LLM.generate()` 可使用后台 worker
+    - `benchmark_inference.py` 的真实测量路径也可使用后台 worker
+    - 后续性能分析终于可以直接验证后台 worker 对真实 `cuda_pim` benchmark 的影响
 30. resident tier 到 staging cache 的路径也开始收敛：
     - `ExpertOffloadBackend` 现在可以导出 resident expert 权重
     - `HybridMoE._request_prefetch()` 会优先尝试从 offload backend 直接拿 resident weights

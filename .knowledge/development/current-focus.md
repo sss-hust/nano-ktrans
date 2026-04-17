@@ -152,6 +152,8 @@ updated: 2026-04-17 05:58
 - [x] 当前有 background worker 运行时，`SimpleEngine` 已不再手动重复调用 `background_tick_offload_state()`，前台 refresh 和后台 worker 的职责边界更清晰
 - [x] background worker 的 runtime 指标现已细化到 `background_work_items_total` 与 `background_activation_applied_total`，后台线程推进了多少准备/提交工作已进入 summary 与 profile sweep
 - [x] `HybridMoE` 现已引入内部 pipeline 锁，background worker 与前台 refresh/forward 对 prepared tier、migration lifecycle 和 resident set 的共享状态访问开始串行化
+- [x] `benchmark_inference.py` 与 `example.py` 现已显式支持 `--enable-background-offload-worker` 与 `--background-offload-poll-interval-seconds`，真实 benchmark 路径可以直接接通后台 offload worker
+- [x] benchmark 的 `run_single_generation()` 现已在单次生成前启动 background offload worker、结束后停止，真实 `cuda_pim` benchmark 开始能驱动后台 `prefetching -> ready -> warmed -> activated` 路径
 - [x] apply commit 路径现已补上 `apply_commit_ready_cache`，background tick 可以先把 staged commit queue 中的 expert 解析成可直接 commit 的 ready entry，再由后续 resident commit 消费
 - [x] background pipeline 现已允许“同一 tick 内新入队的 apply candidate 进入 apply commit queue 并完成 ready resolve”，但 resident set commit 仍只消费 tick 开始前已存在的 staged commit 候选，后台 enqueue / resolve / commit 边界更清晰
 - [x] `_apply_promotion_batch()` 现已先批量将 ready-entry 中的 module 提交到 `gpu_experts` / `gpu_experts_mask`，再统一写回 residency 与 lifecycle，resident commit 的最后一段开始具备真正的 per-layer batch commit 语义
@@ -204,6 +206,7 @@ updated: 2026-04-17 05:58
 - 当前 profile sweep 已能自动汇总 batch 指标，但还没有把这些指标和真实 `cuda_pim` 宿主机结果形成持续对照表
 - 当前 profile sweep 已覆盖 runtime batch totals，但还没把这些指标做成跨实验的历史趋势表
 - 当前 profile sweep 已能给出自动对比表和 metric 排名，但还没在宿主机真实 `cuda_cpu_offload/cuda_pim` sweep 上收集一轮对照结果
+- 当前虽然 benchmark 路径已接通 background worker，但还没重跑一轮开启 worker 的真实 `cuda_pim` benchmark，确认 staged queues / resident commit buffers 是否真正开始填充
 - 当前 batch apply 的来源构成已经可见，但还没把这些来源构成真正用于 batch policy，例如按 `activated` 命中率自适应调整 activation/prebuild 预算
 - 当前 cache eviction 已和 lifecycle 对齐，但还没有把这些回退事件显式汇总进 scheduler summary，后续 benchmark 仍难直接看出“冷热回退”压力
 - 当前回退事件已经能进 scheduler summary，但 profile sweep 还没把这些 regression 指标纳入排序或 best-by-metric 比较
