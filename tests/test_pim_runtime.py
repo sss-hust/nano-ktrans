@@ -29,6 +29,24 @@ def test_pim_linear_runtime_matches_cpu():
 
 
 @pytest.mark.skipif(not _has_real_dpu(), reason="Real UPMEM hardware and toolchain are required.")
+def test_pim_quantized_runtime_matches_cpu():
+    from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+    from nano_ktrans.kernels.quantized_ops import cpu_w4a32_matvec, quantize_symmetric_w4a32
+
+    torch.manual_seed(0)
+    weight = torch.randn(64, 128, dtype=torch.float32)
+    inputs = torch.randn(1, 128, dtype=torch.float32)
+    quantized = quantize_symmetric_w4a32(weight, group_size=64, linear_prefix="synthetic")
+
+    runtime = PIMQuantizedRuntime.get_shared(rank_count=1)
+    expected = cpu_w4a32_matvec(inputs, quantized).output
+    actual = runtime.linear(inputs, quantized)
+
+    assert actual.shape == expected.shape
+    assert torch.allclose(actual, expected, atol=5e-2, rtol=5e-2)
+
+
+@pytest.mark.skipif(not _has_real_dpu(), reason="Real UPMEM hardware and toolchain are required.")
 def test_pim_moe_backend_real_mode_uses_dpu(tmp_path):
     from nano_ktrans.kernels.pim_moe import PIMMoEBackend
 

@@ -1,0 +1,417 @@
+#define _POSIX_C_SOURCE 200809L
+
+#include <dpu/dpu.h>
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <string.h>
+
+#ifndef MAX_QWEIGHT_WORDS
+#define MAX_QWEIGHT_WORDS 2097152
+#endif
+
+#ifndef MAX_SCALE_FLOATS
+#define MAX_SCALE_FLOATS 65536
+#endif
+
+#ifndef MAX_INPUT_FLOATS
+#define MAX_INPUT_FLOATS 65536
+#endif
+
+#ifndef MAX_OUTPUT_FLOATS
+#define MAX_OUTPUT_FLOATS 65536
+#endif
+
+#ifndef BITS_PER_WEIGHT
+#define BITS_PER_WEIGHT 4
+#endif
+
+#ifndef WEIGHTS_PER_WORD
+#define WEIGHTS_PER_WORD (32 / BITS_PER_WEIGHT)
+#endif
+
+static struct dpu_set_t g_set;
+static bool g_initialized = false;
+static bool g_weights_loaded = false;
+static uint64_t g_last_cycles = 0;
+static uint32_t g_nr_dpus = 0;
+static uint32_t g_input_dim = 0;
+static uint32_t g_output_dim = 0;
+static uint32_t g_group_size = 0;
+static uint32_t g_num_groups = 0;
+static size_t g_rows_per_dpu = 0;
+static size_t g_shard_output_dim = 0;
+static uint32_t *g_valid_rows = NULL;
+
+static void
+set_error(char *error_buffer, size_t error_buffer_len, const char *fmt, ...)
+{
+    if (error_buffer == NULL || error_buffer_len == 0) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(error_buffer, error_buffer_len, fmt, args);
+    va_end(args);
+}
+
+static int
+check_dpu_error(
+    dpu_error_t error,
+    char *error_buffer,
+    size_t error_buffer_len,
+    const char *context)
+{
+    if (error == DPU_OK) {
+        return 0;
+    }
+
+    set_error(
+        error_buffer,
+        error_buffer_len,
+        "%s failed: %s",
+        context,
+        dpu_error_to_string(error));
+    return -1;
+}
+
+int
+pim_quantized_init(
+    const char *binary_path,
+    const char *profile,
+    uint32_t rank_count,
+    char *error_buffer,
+    size_t error_buffer_len)
+{
+    if (g_initialized) {
+        return 0;
+    }
+
+    if (binary_path == NULL || binary_path[0] == '\0') {
+        set_error(error_buffer, error_buffer_len, "binary_path is required");
+        return -1;
+    }
+    if (rank_count == 0) {
+        set_error(error_buffer, error_buffer_len, "rank_count must be positive");
+        return -1;
+    }
+
+    const char *effective_profile = (profile != NULL && profile[0] != '\0') ? profile : NULL;
+    if (check_dpu_error(
+            dpu_alloc_ranks(rank_count, effective_profile, &g_set),
+            error_buffer,
+            error_buffer_len,
+            "dpu_alloc_ranks") != 0) {
+        return -1;
+    }
+    if (check_dpu_error(
+            dpu_get_nr_dpus(g_set, &g_nr_dpus),
+            error_buffer,
+            error_buffer_len,
+            "dpu_get_nr_dpus") != 0) {
+        dpu_free(g_set);
+        memset(&g_set, 0, sizeof(g_set));
+        g_nr_dpus = 0;
+        return -1;
+    }
+    if (check_dpu_error(dpu_load(g_set, binary_path, NULL), error_buffer, error_buffer_len, "dpu_load") != 0) {
+        dpu_free(g_set);
+        memset(&g_set, 0, sizeof(g_set));
+        g_nr_dpus = 0;
+        return -1;
+    }
+
+    g_initialized = true;
+    g_weights_loaded = false;
+    g_last_cycles = 0;
+    return 0;
+}
+
+int
+pim_quantized_load_weights(
+    uint32_t input_dim,
+    uint32_t output_dim,
+    uint32_t group_size,
+    const void *packed_qweights,
+    const void *scales,
+    char *error_buffer,
+    size_t error_buffer_len)
+{
+    struct dpu_set_t dpu;
+    uint32_t dpu_index = 0;
+    int rc = -1;
+    uint32_t *qweight_shards = NULL;
+    float *scale_shards = NULL;
+
+    const uint32_t words_per_row = input_dim / WEIGHTS_PER_WORD;
+    const uint32_t num_groups = input_dim / group_size;
+    size_t shard_qweight_words = 0;
+    size_t shard_scale_floats = 0;
+
+    if (!g_initialized) {
+        set_error(error_buffer, error_buffer_len, "pim_quantized_init must be called first");
+        return -1;
+    }
+    if (packed_qweights == NULL || scales == NULL) {
+        set_error(error_buffer, error_buffer_len, "packed_qweights and scales must be non-null");
+        return -1;
+    }
+    if ((input_dim % WEIGHTS_PER_WORD) != 0 || (input_dim % group_size) != 0) {
+        set_error(error_buffer, error_buffer_len, "input_dim must be divisible by pack factor and group_size");
+        return -1;
+    }
+
+    g_input_dim = input_dim;
+    g_output_dim = output_dim;
+    g_group_size = group_size;
+    g_num_groups = num_groups;
+    g_rows_per_dpu = ((size_t)output_dim + (size_t)g_nr_dpus - 1u) / (size_t)g_nr_dpus;
+    g_shard_output_dim = g_rows_per_dpu + (g_rows_per_dpu % 2u);
+    shard_qweight_words = g_shard_output_dim * (size_t)words_per_row;
+    shard_scale_floats = g_shard_output_dim * (size_t)num_groups;
+
+    if (shard_qweight_words > MAX_QWEIGHT_WORDS) {
+        set_error(error_buffer, error_buffer_len, "qweight shard too large");
+        return -1;
+    }
+    if (shard_scale_floats > MAX_SCALE_FLOATS) {
+        set_error(error_buffer, error_buffer_len, "scale shard too large");
+        return -1;
+    }
+
+    free(g_valid_rows);
+    g_valid_rows = calloc(g_nr_dpus, sizeof(*g_valid_rows));
+    qweight_shards = calloc((size_t)g_nr_dpus * shard_qweight_words, sizeof(*qweight_shards));
+    scale_shards = calloc((size_t)g_nr_dpus * shard_scale_floats, sizeof(*scale_shards));
+    if (g_valid_rows == NULL || qweight_shards == NULL || scale_shards == NULL) {
+        set_error(error_buffer, error_buffer_len, "failed to allocate weight shard buffers");
+        goto cleanup;
+    }
+
+    const uint32_t *qweight_src = (const uint32_t *)packed_qweights;
+    const float *scale_src = (const float *)scales;
+    for (dpu_index = 0; dpu_index < g_nr_dpus; ++dpu_index) {
+        const size_t row_start = (size_t)dpu_index * g_rows_per_dpu;
+        const size_t rows_remaining = row_start < (size_t)output_dim ? (size_t)output_dim - row_start : 0;
+        const size_t local_rows = rows_remaining < g_rows_per_dpu ? rows_remaining : g_rows_per_dpu;
+        uint32_t *qweight_ptr = qweight_shards + ((size_t)dpu_index * shard_qweight_words);
+        float *scale_ptr = scale_shards + ((size_t)dpu_index * shard_scale_floats);
+
+        g_valid_rows[dpu_index] = (uint32_t)local_rows;
+        for (size_t local_row = 0; local_row < local_rows; ++local_row) {
+            memcpy(
+                qweight_ptr + (local_row * (size_t)words_per_row),
+                qweight_src + (((row_start + local_row) * (size_t)words_per_row)),
+                (size_t)words_per_row * sizeof(uint32_t));
+            memcpy(
+                scale_ptr + (local_row * (size_t)num_groups),
+                scale_src + (((row_start + local_row) * (size_t)num_groups)),
+                (size_t)num_groups * sizeof(float));
+        }
+    }
+
+    if (check_dpu_error(
+            dpu_broadcast_to(g_set, "input_dim", 0, &g_input_dim, sizeof(g_input_dim), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(input_dim)") != 0) {
+        goto cleanup;
+    }
+    const uint32_t shard_output_dim_u32 = (uint32_t)g_shard_output_dim;
+    if (check_dpu_error(
+            dpu_broadcast_to(g_set, "output_dim", 0, &shard_output_dim_u32, sizeof(shard_output_dim_u32), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(output_dim)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(
+            dpu_broadcast_to(g_set, "group_size", 0, &g_group_size, sizeof(g_group_size), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(group_size)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(
+            dpu_broadcast_to(g_set, "num_groups", 0, &g_num_groups, sizeof(g_num_groups), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(num_groups)") != 0) {
+        goto cleanup;
+    }
+
+    dpu_index = 0;
+    DPU_FOREACH(g_set, dpu, dpu_index)
+    {
+        if (check_dpu_error(
+                dpu_prepare_xfer(dpu, qweight_shards + ((size_t)dpu_index * shard_qweight_words)),
+                error_buffer, error_buffer_len, "dpu_prepare_xfer(qweight_mram)") != 0) {
+            goto cleanup;
+        }
+    }
+    if (check_dpu_error(
+            dpu_push_xfer(g_set, DPU_XFER_TO_DPU, "qweight_mram", 0, shard_qweight_words * sizeof(uint32_t), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_push_xfer(qweight_mram)") != 0) {
+        goto cleanup;
+    }
+
+    dpu_index = 0;
+    DPU_FOREACH(g_set, dpu, dpu_index)
+    {
+        if (check_dpu_error(
+                dpu_prepare_xfer(dpu, scale_shards + ((size_t)dpu_index * shard_scale_floats)),
+                error_buffer, error_buffer_len, "dpu_prepare_xfer(scales_mram)") != 0) {
+            goto cleanup;
+        }
+    }
+    if (check_dpu_error(
+            dpu_push_xfer(g_set, DPU_XFER_TO_DPU, "scales_mram", 0, shard_scale_floats * sizeof(float), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_push_xfer(scales_mram)") != 0) {
+        goto cleanup;
+    }
+
+    g_weights_loaded = true;
+    rc = 0;
+
+cleanup:
+    free(scale_shards);
+    free(qweight_shards);
+    return rc;
+}
+
+int
+pim_quantized_run(
+    uint32_t batch_size,
+    const void *inputs,
+    void *outputs,
+    char *error_buffer,
+    size_t error_buffer_len)
+{
+    struct dpu_set_t dpu;
+    uint32_t dpu_index = 0;
+    int rc = -1;
+    uint64_t max_cycles = 0;
+    uint64_t *kernel_cycles = NULL;
+    float *output_shards = NULL;
+    const size_t input_floats = (size_t)batch_size * (size_t)g_input_dim;
+    const size_t shard_output_floats = (size_t)batch_size * g_shard_output_dim;
+
+    if (!g_initialized || !g_weights_loaded) {
+        set_error(error_buffer, error_buffer_len, "weights must be loaded before pim_quantized_run");
+        return -1;
+    }
+    if (inputs == NULL || outputs == NULL) {
+        set_error(error_buffer, error_buffer_len, "inputs and outputs must be non-null");
+        return -1;
+    }
+    if (input_floats > MAX_INPUT_FLOATS || shard_output_floats > MAX_OUTPUT_FLOATS) {
+        set_error(error_buffer, error_buffer_len, "input/output shape too large");
+        return -1;
+    }
+
+    kernel_cycles = calloc(g_nr_dpus, sizeof(*kernel_cycles));
+    output_shards = calloc((size_t)g_nr_dpus * shard_output_floats, sizeof(*output_shards));
+    if (kernel_cycles == NULL || output_shards == NULL) {
+        set_error(error_buffer, error_buffer_len, "failed to allocate run buffers");
+        goto cleanup;
+    }
+
+    if (check_dpu_error(
+            dpu_broadcast_to(g_set, "batch_size", 0, &batch_size, sizeof(batch_size), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(batch_size)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(
+            dpu_broadcast_to(g_set, "inputs_mram", 0, inputs, input_floats * sizeof(float), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_mram)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(dpu_launch(g_set, DPU_SYNCHRONOUS), error_buffer, error_buffer_len, "dpu_launch") != 0) {
+        goto cleanup;
+    }
+
+    dpu_index = 0;
+    DPU_FOREACH(g_set, dpu, dpu_index)
+    {
+        if (check_dpu_error(
+                dpu_prepare_xfer(dpu, output_shards + ((size_t)dpu_index * shard_output_floats)),
+                error_buffer, error_buffer_len, "dpu_prepare_xfer(outputs_mram)") != 0) {
+            goto cleanup;
+        }
+    }
+    if (check_dpu_error(
+            dpu_push_xfer(g_set, DPU_XFER_FROM_DPU, "outputs_mram", 0, shard_output_floats * sizeof(float), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_push_xfer(outputs_mram)") != 0) {
+        goto cleanup;
+    }
+
+    dpu_index = 0;
+    DPU_FOREACH(g_set, dpu, dpu_index)
+    {
+        if (check_dpu_error(
+                dpu_prepare_xfer(dpu, kernel_cycles + dpu_index),
+                error_buffer, error_buffer_len, "dpu_prepare_xfer(kernel_cycles)") != 0) {
+            goto cleanup;
+        }
+    }
+    if (check_dpu_error(
+            dpu_push_xfer(g_set, DPU_XFER_FROM_DPU, "kernel_cycles", 0, sizeof(*kernel_cycles), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_push_xfer(kernel_cycles)") != 0) {
+        goto cleanup;
+    }
+
+    float *output_dst = (float *)outputs;
+    for (dpu_index = 0; dpu_index < g_nr_dpus; ++dpu_index) {
+        const uint32_t local_rows = g_valid_rows[dpu_index];
+        const size_t row_start = (size_t)dpu_index * g_rows_per_dpu;
+        const float *shard_ptr = output_shards + ((size_t)dpu_index * shard_output_floats);
+        if (kernel_cycles[dpu_index] > max_cycles) {
+            max_cycles = kernel_cycles[dpu_index];
+        }
+        for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+            memcpy(
+                output_dst + (((size_t)batch_idx * (size_t)g_output_dim) + row_start),
+                shard_ptr + ((size_t)batch_idx * g_shard_output_dim),
+                (size_t)local_rows * sizeof(float));
+        }
+    }
+
+    g_last_cycles = max_cycles;
+    rc = 0;
+
+cleanup:
+    free(output_shards);
+    free(kernel_cycles);
+    return rc;
+}
+
+void
+pim_quantized_shutdown(void)
+{
+    if (!g_initialized) {
+        return;
+    }
+
+    free(g_valid_rows);
+    g_valid_rows = NULL;
+    dpu_free(g_set);
+    memset(&g_set, 0, sizeof(g_set));
+    g_initialized = false;
+    g_weights_loaded = false;
+    g_last_cycles = 0;
+    g_nr_dpus = 0;
+    g_input_dim = 0;
+    g_output_dim = 0;
+    g_group_size = 0;
+    g_num_groups = 0;
+    g_rows_per_dpu = 0;
+    g_shard_output_dim = 0;
+}
+
+uint64_t
+pim_quantized_last_cycles(void)
+{
+    return g_last_cycles;
+}
+
+uint32_t
+pim_quantized_num_dpus(void)
+{
+    return g_nr_dpus;
+}

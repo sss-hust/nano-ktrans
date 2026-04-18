@@ -5,6 +5,26 @@ tags: [changelog]
 
 # 📝 变更日志
 
+## 2026-04-19
+
+- 新增 GPTQ/W4A32 单算子实验路径：
+  - `nano_ktrans/kernels/weight_loader.py` 新增 `GPTQLinearWeight`、Qwen3 GPTQ expert linear 读取和最小 dequant 支持
+  - `nano_ktrans/kernels/quantized_ops.py` 新增 CPU W4A32 matvec 和 synthetic quantizer
+  - `nano_ktrans/kernels/pim_quantized_runtime.py`、`pim_native/dpu_quantized_kernel.c`、`pim_native/host_quantized_bridge.c` 新增 PIM quantized runtime，支持量化权重常驻加载后重复执行 matvec
+  - `benchmarks/benchmark_quant_matvec.py` 新增 operator-only benchmark，可直接比较 CPU/PIM 的量化矩阵向量乘
+- 已在真实机器上跑通 synthetic W4A32 算子 benchmark：
+  - shape=`2048 -> 768`
+  - `group_size=128`
+  - `rank_count=4`
+  - CPU avg ≈ `4.77 ms`
+  - PIM avg ≈ `52.27 ms`
+  - `max_abs_error ≈ 1.68e-4`
+  当前 synthetic W4A32 operator-only 路径下，PIM 明显慢于 CPU。
+- 已开始拉取 `Qwen/Qwen3-30B-A3B-GPTQ-Int4`：
+  - `config.json`、`quantize_config.json` 已就绪
+  - `model.safetensors` 仍未完成下载
+  - 后续需要在真实 GPTQ 权重上验证 tensor layout 和 operator-only benchmark
+
 ## 2026-04-17
 
 ### 2026-04-17 03:38 - Final staged resident commit queue

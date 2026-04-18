@@ -30,12 +30,18 @@ tags: [architecture]
   Python 侧的真实 PIM 线性执行桥，负责构建并加载共享库，调用 UPMEM host bridge，并把 DPU 线性结果回传给 `PIMMoEBackend`。
 - `nano_ktrans/kernels/pim_expert_runtime.py`
   Python 侧的 fused expert 执行桥，负责加载 expert host bridge，并将完整 expert MLP 子图提交给 DPU。
+- `nano_ktrans/kernels/quantized_ops.py`
+  量化算子级基线实现，当前提供 CPU W4A32 operator-only matvec 与 synthetic quantizer，用于脱离完整 decode 链路单独比较量化矩阵向量乘。
+- `nano_ktrans/kernels/pim_quantized_runtime.py`
+  Python 侧的 quantized matvec 执行桥，负责将 packed int4 qweight 与 scales 持久化加载到 PIM，再重复执行 operator-only matvec。
 - `nano_ktrans/kernels/pim_native/`
-  DPU 原生代码目录，当前同时包含 linear kernel、fused expert kernel、对应 host bridge 和 build 脚本。
+  DPU 原生代码目录，当前同时包含 linear kernel、fused expert kernel、quantized matvec kernel、对应 host bridge 和 build 脚本。
 - `benchmarks/benchmark_inference.py`
   统一 benchmark 入口，用于比较 `cpu`、`cuda`、`cuda_cpu_offload`、`cuda_pim_shadow`。
 - `benchmarks/pim_microbench/`
   独立的 UPMEM host/DPU microbenchmark，用来测真实硬件上的传输与整数 kernel 指标。
+- `benchmarks/benchmark_quant_matvec.py`
+  独立 operator-only benchmark，支持 synthetic W4A32 或真实 GPTQ expert projection，直接比较 CPU 与 PIM 的单算子矩阵向量乘。
 
 ## 数据流
 
@@ -45,6 +51,25 @@ tags: [architecture]
 4. 冷 expert 请求通过 `ExpertOffloadBackend` 派发。
 5. `CPUMoEBackend`、`PIMMoEBackend(pim_shadow)` 或 `PIMMoEBackend(pim)` 处理 offloaded expert 请求。
 6. offload 输出与 GPU 输出合并，再交还推理引擎继续 decode。
+
+## 量化算子级实验路径
+
+1. `WeightLoader` 从 GPTQ checkpoint 中读取某个 expert projection 的 `qweight / scales / g_idx`。
+2. 当前最小支持路径假设：
+   - `bits=4`
+   - `sym=true`
+   - `group_size=128`
+   - 顺序 `g_idx`
+3. CPU 基线通过 `GPTQLinearWeight.dequantize()` 还原权重，再执行 `F.linear`，作为 operator-only baseline。
+4. PIM quantized runtime 先将 packed int4 权重与 scales 持久化加载到 DPU：
+   - `pim_quantized_load_weights(...)`
+   - 后续 repeated runs 只走 `pim_quantized_run(...)`
+5. DPU quantized kernel 当前在 DPU 上执行：
+   - int4 unpack
+   - 逐 group scale 反量化
+   - dequantized weight 与 float32 input 的矩阵向量乘
+6. 这条路径的目标不是先打通完整 MoE，而是先回答一个更直接的问题：
+   - “在同一算子上，使用持久化驻留的 W4A32/GPTQ 权重时，PIM 是否可能比 CPU 更快？”
 
 ### 当前 decode 迁移执行链
 

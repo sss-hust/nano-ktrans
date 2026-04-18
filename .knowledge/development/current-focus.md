@@ -26,6 +26,7 @@ updated: 2026-04-17 05:18
 updated: 2026-04-17 05:27
 updated: 2026-04-17 05:42
 updated: 2026-04-17 05:58
+updated: 2026-04-19 00:50
 ---
 
 # 🔥 当前工作焦点
@@ -352,3 +353,25 @@ updated: 2026-04-17 05:58
   - 本轮开始前已经存在的 `resident_commit_batch_queue` batch：可进入本轮 background apply
   - 本轮新推进到 `resident_commit_batch_queue` 的 batch：只记为 `prefinalized`，留到下一轮再 commit
 - 这让 resident commit 的最后一段也开始具备稳定的流水线边界，而不是在同一 tick 里边入队边消费。
+- 新增 W4A32/GPTQ Int4 算子级实验路径：
+  - `WeightLoader` 现已支持读取 Qwen3 GPTQ expert linear 的 `qweight / scales / g_idx`
+  - `GPTQLinearWeight` 统一承载最小可用的 4-bit 对称量化权重表示
+  - `quantized_ops.py` 提供 CPU W4A32 operator-only matvec 与 synthetic quantizer
+  - `pim_quantized_runtime.py` 与新的 quantized DPU kernel / host bridge 提供“量化权重常驻加载一次、重复执行 matvec”的 PIM runtime
+- 新增 `benchmarks/benchmark_quant_matvec.py`：
+  - 支持 synthetic W4A32 benchmark
+  - 支持真实 GPTQ expert projection benchmark
+  - 直接对比 CPU vs PIM 的单算子矩阵向量乘，不经过完整 decode 链路
+- synthetic W4A32 operator-only benchmark 已在真实硬件上跑通：
+  - `input_dim=2048`
+  - `output_dim=768`
+  - `group_size=128`
+  - `rank_count=4`
+  - CPU avg 约 `4.77 ms`
+  - PIM avg 约 `52.27 ms`
+  - `max_abs_error ≈ 1.68e-4`
+  当前 synthetic case 下 PIM 仍明显慢于 CPU，说明仅换成 W4A32 并不足以抵消当前 DPU 计算和 host orchestration 成本。
+- `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 已开始拉取：
+  - tokenizer / config / quantize_config 已到本地
+  - `model.safetensors` 仍在下载中
+  - 下一步要在真实 GPTQ expert projection 上验证 tensor layout 与 operator-only CPU/PIM 对比
