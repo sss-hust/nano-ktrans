@@ -443,3 +443,8 @@ tags: [changelog]
 <!-- updated: 2026-04-19 03:45 -->
 
 - 在真实 GPTQ `gate/down` 上做了 rank 与 batch 的 transfer-only breakdown sweep。结果表明：rank 调节主要改变少量传输与常数项，batch 增长时主导时间几乎全部落在 DPU 计算核，问题不是 host 传输扩展性。
+
+<!-- updated: 2026-04-19 04:05 -->
+
+- 为 quantized DPU kernel 增加了 `kernel_mode` 剖析：`transfer_only / unpack_only / dequant_only / full`。
+- 真实 GPTQ `gate/down` 结果显示，性能主瓶颈更偏向 nibble unpack 与反量化阶段，最终乘加带来的额外时间相对更小。
