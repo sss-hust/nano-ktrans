@@ -356,6 +356,8 @@ updated: 2026-04-19 00:50
 - 新增 W4A32/GPTQ Int4 算子级实验路径：
 - W4A32/GPTQ quantized runtime 现已补充分项 timing：host->DPU 输入下发、同步 launch/执行、DPU->host 结果回传与 runtime 总耗时都可在 `benchmark_quant_matvec.py` 中直接观察。
 - quantized PIM operator benchmark 现已拆分权重加载阶段（qweight/scales）与稳态运行阶段（input transfer / launch / output transfer）；真实 Qwen3 GPTQ `gate/down` case 显示稳态时间约 89%~98% 落在 `launch_seconds_avg`，主瓶颈明确在 DPU kernel 执行。
+- 已验证一次 4-row tiled quantized DPU kernel 尝试在真实 `gate/down` case 上反而变慢，当前稳定实现仍保留原始 row-pair kernel；后续优化应优先避免增加 WRAM 占用和 inner-loop 分支。
+- 已完成 quantized kernel 参数 sweep：当前真机上 `TASKLETS=8, BLOCK_FLOATS=64` 对真实 GPTQ `gate/down` 都略优于默认 `TASKLETS=16`，但提升仍很小，结论不变。
 - 真实 Qwen3 GPTQ operator-only 剖析已表明：当前 PIM 路径的时间绝大部分落在 `launch_seconds_avg`，输入/输出传输只占很小比例；瓶颈已经明确偏向 DPU 侧 kernel 执行而不是 host 传输。
   - `WeightLoader` 现已支持读取 Qwen3 GPTQ expert linear 的 `qweight / scales / g_idx`
   - `GPTQLinearWeight` 统一承载最小可用的 4-bit 对称量化权重表示
