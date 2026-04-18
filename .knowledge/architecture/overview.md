@@ -87,6 +87,8 @@ tags: [architecture]
    - `full`：完整 unpack + dequant + matvec
    当前真实 GPTQ 结果显示，瓶颈主要集中在 unpack/dequant 阶段。
 
+11. quantized DPU kernel 现已对每个 block / group 预计算 16 项 dequant LUT，减少 inner loop 中的重复浮点 `(q - zp) * scale` 计算；这已带来明显加速，但还不足以让 PIM operator-only 超过 CPU。
+
 6. 这条路径的目标不是先打通完整 MoE，而是先回答一个更直接的问题：
    - “在同一算子上，使用持久化驻留的 W4A32/GPTQ 权重时，PIM 是否可能比 CPU 更快？”
 

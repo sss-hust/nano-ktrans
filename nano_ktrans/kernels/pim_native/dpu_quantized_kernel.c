@@ -78,6 +78,8 @@ main(void)
     __dma_aligned float scales0_cache[MAX_GROUPS];
     __dma_aligned float scales1_cache[MAX_GROUPS];
     __dma_aligned float output_cache[2];
+    float lut0[1 << BITS_PER_WEIGHT];
+    float lut1[1 << BITS_PER_WEIGHT];
 
     const uint32_t words_per_row = input_dim / WEIGHTS_PER_WORD;
     const float zero_point = (float)(1 << (BITS_PER_WEIGHT - 1));
@@ -114,6 +116,11 @@ main(void)
                     const float scale0 = scales0_cache[group_idx];
                     const float scale1 = scales1_cache[group_idx];
 
+                    for (uint32_t q = 0; q < (1u << BITS_PER_WEIGHT); ++q) {
+                        lut0[q] = ((float)q - zero_point) * scale0;
+                        lut1[q] = ((float)q - zero_point) * scale1;
+                    }
+
                     mram_read(
                         (__mram_ptr void const *)(inputs_mram + ((batch_idx * input_dim) + col)),
                         input_cache,
@@ -141,8 +148,8 @@ main(void)
                                 acc0 += (float)q0;
                                 acc1 += (float)q1;
                             } else {
-                                const float dq0 = ((float)q0 - zero_point) * scale0;
-                                const float dq1 = ((float)q1 - zero_point) * scale1;
+                                const float dq0 = lut0[q0];
+                                const float dq1 = lut1[q1];
                                 if (kernel_mode == 3) {
                                     acc0 += dq0;
                                     acc1 += dq1;
@@ -183,6 +190,11 @@ main(void)
                 const float scale0 = scales0_cache[group_idx];
                 const float scale1 = scales1_cache[group_idx];
 
+                for (uint32_t q = 0; q < (1u << BITS_PER_WEIGHT); ++q) {
+                    lut0[q] = ((float)q - zero_point) * scale0;
+                    lut1[q] = ((float)q - zero_point) * scale1;
+                }
+
                 mram_read(
                     (__mram_ptr void const *)(inputs_mram + ((batch_idx * input_dim) + col)),
                     input_cache,
@@ -205,8 +217,8 @@ main(void)
                         const uint32_t q1 = (packed1 >> shift) & ((1u << BITS_PER_WEIGHT) - 1u);
                         const uint32_t input_idx = (word_idx * WEIGHTS_PER_WORD) + nibble;
                         const float x = input_cache[input_idx];
-                        acc0 += x * (((float)q0 - zero_point) * scale0);
-                        acc1 += x * (((float)q1 - zero_point) * scale1);
+                        acc0 += x * lut0[q0];
+                        acc1 += x * lut1[q1];
                     }
                 }
             }

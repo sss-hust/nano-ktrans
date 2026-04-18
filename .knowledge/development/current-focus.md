@@ -359,6 +359,7 @@ updated: 2026-04-19 00:50
 - 新增 transfer-only kernel mode 后，真实 GPTQ `gate/down` case 的 breakdown 显示：去掉 DPU 计算后，纯输入/输出搬运仅约 `0.69ms~3.18ms`，而完整执行约 `20.3ms~35.2ms`；计算核本体占总时间约 90% 左右。
 - 已完成真实 GPTQ `gate/down` 的 rank 与 batch breakdown sweep：无论 rank 还是 batch 怎么调，`estimated_compute_seconds` 都是主导项；batch 增长时主要是计算核近似线性变慢，纯传输只小幅增长。
 - 已补充 quantized kernel mode 剖析：`transfer_only / unpack_only / dequant_only / full`。真实 GPTQ `gate/down` 表明，`unpack_only` 与 `dequant_only` 都显著增加 launch 时间，而从 `dequant_only` 到 `full` 的额外增量相对更小，当前瓶颈更偏向 nibble unpack + 反量化，而不是最终乘加本身。
+- 已验证 block-level dequant LUT 优化：对真实 GPTQ `gate/down`，PIM operator-only 速度显著提升，`gate@rank24` 约从 `36ms` 降到 `23ms`，`down@rank2` 约从 `20ms` 降到 `11.8ms`；但仍未超过 CPU。
 - 已验证一次 4-row tiled quantized DPU kernel 尝试在真实 `gate/down` case 上反而变慢，当前稳定实现仍保留原始 row-pair kernel；后续优化应优先避免增加 WRAM 占用和 inner-loop 分支。
 - 已完成 quantized kernel 参数 sweep：当前真机上 `TASKLETS=8, BLOCK_FLOATS=64` 对真实 GPTQ `gate/down` 都略优于默认 `TASKLETS=16`，但提升仍很小，结论不变。
 - 真实 Qwen3 GPTQ operator-only 剖析已表明：当前 PIM 路径的时间绝大部分落在 `launch_seconds_avg`，输入/输出传输只占很小比例；瓶颈已经明确偏向 DPU 侧 kernel 执行而不是 host 传输。

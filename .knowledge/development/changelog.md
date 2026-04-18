@@ -448,3 +448,8 @@ tags: [changelog]
 
 - 为 quantized DPU kernel 增加了 `kernel_mode` 剖析：`transfer_only / unpack_only / dequant_only / full`。
 - 真实 GPTQ `gate/down` 结果显示，性能主瓶颈更偏向 nibble unpack 与反量化阶段，最终乘加带来的额外时间相对更小。
+
+<!-- updated: 2026-04-19 04:20 -->
+
+- 在 quantized DPU kernel 中引入 block-level dequant LUT，减少 inner-loop 重复浮点反量化。
+- 真实 GPTQ `gate/down` operator-only benchmark 显示该优化显著降低了 DPU launch/compute 时间，但 PIM 仍未超过 CPU grouped baseline。
