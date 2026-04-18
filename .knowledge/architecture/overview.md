@@ -69,6 +69,9 @@ tags: [architecture]
    - 逐 group scale 反量化
    - dequantized weight 与 float32 input 的矩阵向量乘
 7. quantized runtime 现已暴露分项 profile：
+   - `load_qweight_transfer_seconds`
+   - `load_scale_transfer_seconds`
+   - `load_total_seconds`
    - `input_transfer_seconds_avg`
    - `launch_seconds_avg`
    - `output_transfer_seconds_avg`

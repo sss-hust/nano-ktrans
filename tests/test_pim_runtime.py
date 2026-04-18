@@ -46,11 +46,17 @@ def test_pim_quantized_runtime_matches_cpu():
     assert torch.allclose(actual, expected, atol=5e-2, rtol=5e-2)
     profile = runtime.last_profile()
     assert set(profile) == {
+        "load_qweight_transfer_seconds",
+        "load_scale_transfer_seconds",
+        "load_total_seconds",
         "input_transfer_seconds",
         "launch_seconds",
         "output_transfer_seconds",
         "runtime_total_seconds",
     }
+    assert profile["load_qweight_transfer_seconds"] >= 0.0
+    assert profile["load_scale_transfer_seconds"] >= 0.0
+    assert profile["load_total_seconds"] >= 0.0
     assert profile["input_transfer_seconds"] >= 0.0
     assert profile["launch_seconds"] >= 0.0
     assert profile["output_transfer_seconds"] >= 0.0

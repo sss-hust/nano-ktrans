@@ -38,6 +38,9 @@ static struct dpu_set_t g_set;
 static bool g_initialized = false;
 static bool g_weights_loaded = false;
 static uint64_t g_last_cycles = 0;
+static double g_last_load_qweight_transfer_seconds = 0.0;
+static double g_last_load_scale_transfer_seconds = 0.0;
+static double g_last_load_total_seconds = 0.0;
 static double g_last_input_transfer_seconds = 0.0;
 static double g_last_launch_seconds = 0.0;
 static double g_last_output_transfer_seconds = 0.0;
@@ -141,6 +144,9 @@ pim_quantized_init(
     g_initialized = true;
     g_weights_loaded = false;
     g_last_cycles = 0;
+    g_last_load_qweight_transfer_seconds = 0.0;
+    g_last_load_scale_transfer_seconds = 0.0;
+    g_last_load_total_seconds = 0.0;
     g_last_input_transfer_seconds = 0.0;
     g_last_launch_seconds = 0.0;
     g_last_output_transfer_seconds = 0.0;
@@ -163,6 +169,12 @@ pim_quantized_load_weights(
     int rc = -1;
     uint32_t *qweight_shards = NULL;
     float *scale_shards = NULL;
+    struct timespec total_start;
+    struct timespec total_end;
+    struct timespec qweight_start;
+    struct timespec qweight_end;
+    struct timespec scale_start;
+    struct timespec scale_end;
 
     const uint32_t words_per_row = input_dim / WEIGHTS_PER_WORD;
     const uint32_t num_groups = input_dim / group_size;
@@ -209,6 +221,8 @@ pim_quantized_load_weights(
         goto cleanup;
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &total_start);
+
     const uint32_t *qweight_src = (const uint32_t *)packed_qweights;
     const float *scale_src = (const float *)scales;
     for (dpu_index = 0; dpu_index < g_nr_dpus; ++dpu_index) {
@@ -254,6 +268,7 @@ pim_quantized_load_weights(
     }
 
     dpu_index = 0;
+    clock_gettime(CLOCK_MONOTONIC, &qweight_start);
     DPU_FOREACH(g_set, dpu, dpu_index)
     {
         if (check_dpu_error(
@@ -267,8 +282,10 @@ pim_quantized_load_weights(
             error_buffer, error_buffer_len, "dpu_push_xfer(qweight_mram)") != 0) {
         goto cleanup;
     }
+    clock_gettime(CLOCK_MONOTONIC, &qweight_end);
 
     dpu_index = 0;
+    clock_gettime(CLOCK_MONOTONIC, &scale_start);
     DPU_FOREACH(g_set, dpu, dpu_index)
     {
         if (check_dpu_error(
@@ -282,8 +299,13 @@ pim_quantized_load_weights(
             error_buffer, error_buffer_len, "dpu_push_xfer(scales_mram)") != 0) {
         goto cleanup;
     }
+    clock_gettime(CLOCK_MONOTONIC, &scale_end);
 
     g_weights_loaded = true;
+    clock_gettime(CLOCK_MONOTONIC, &total_end);
+    g_last_load_qweight_transfer_seconds = timespec_diff_seconds(&qweight_start, &qweight_end);
+    g_last_load_scale_transfer_seconds = timespec_diff_seconds(&scale_start, &scale_end);
+    g_last_load_total_seconds = timespec_diff_seconds(&total_start, &total_end);
     rc = 0;
 
 cleanup:
@@ -433,6 +455,9 @@ pim_quantized_shutdown(void)
     g_initialized = false;
     g_weights_loaded = false;
     g_last_cycles = 0;
+    g_last_load_qweight_transfer_seconds = 0.0;
+    g_last_load_scale_transfer_seconds = 0.0;
+    g_last_load_total_seconds = 0.0;
     g_last_input_transfer_seconds = 0.0;
     g_last_launch_seconds = 0.0;
     g_last_output_transfer_seconds = 0.0;
@@ -456,6 +481,24 @@ double
 pim_quantized_last_input_transfer_seconds(void)
 {
     return g_last_input_transfer_seconds;
+}
+
+double
+pim_quantized_last_load_qweight_transfer_seconds(void)
+{
+    return g_last_load_qweight_transfer_seconds;
+}
+
+double
+pim_quantized_last_load_scale_transfer_seconds(void)
+{
+    return g_last_load_scale_transfer_seconds;
+}
+
+double
+pim_quantized_last_load_total_seconds(void)
+{
+    return g_last_load_total_seconds;
 }
 
 double

@@ -73,8 +73,10 @@ def benchmark_cpu_dense(inputs: torch.Tensor, quantized, repeats: int, warmup: i
 
 def benchmark_pim(inputs: torch.Tensor, quantized, repeats: int, warmup: int, rank_count: int, profile: str) -> dict:
     runtime = PIMQuantizedRuntime.get_shared(rank_count=rank_count, profile=profile)
+    load_profile = None
     for _ in range(warmup):
         runtime.linear(inputs, quantized)
+        load_profile = runtime.last_profile()
 
     outputs = None
     durations = []
@@ -97,6 +99,9 @@ def benchmark_pim(inputs: torch.Tensor, quantized, repeats: int, warmup: int, ra
     assert outputs is not None
     return {
         "output": outputs,
+        "load_qweight_transfer_seconds": 0.0 if load_profile is None else load_profile["load_qweight_transfer_seconds"],
+        "load_scale_transfer_seconds": 0.0 if load_profile is None else load_profile["load_scale_transfer_seconds"],
+        "load_total_seconds": 0.0 if load_profile is None else load_profile["load_total_seconds"],
         "seconds_avg": sum(durations) / len(durations),
         "seconds_min": min(durations),
         "seconds_max": max(durations),

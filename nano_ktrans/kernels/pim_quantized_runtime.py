@@ -65,6 +65,12 @@ class PIMQuantizedRuntime:
         self._lib.pim_quantized_run.restype = ctypes.c_int
         self._lib.pim_quantized_last_cycles.argtypes = []
         self._lib.pim_quantized_last_cycles.restype = ctypes.c_uint64
+        self._lib.pim_quantized_last_load_qweight_transfer_seconds.argtypes = []
+        self._lib.pim_quantized_last_load_qweight_transfer_seconds.restype = ctypes.c_double
+        self._lib.pim_quantized_last_load_scale_transfer_seconds.argtypes = []
+        self._lib.pim_quantized_last_load_scale_transfer_seconds.restype = ctypes.c_double
+        self._lib.pim_quantized_last_load_total_seconds.argtypes = []
+        self._lib.pim_quantized_last_load_total_seconds.restype = ctypes.c_double
         self._lib.pim_quantized_last_input_transfer_seconds.argtypes = []
         self._lib.pim_quantized_last_input_transfer_seconds.restype = ctypes.c_double
         self._lib.pim_quantized_last_launch_seconds.argtypes = []
@@ -213,6 +219,9 @@ class PIMQuantizedRuntime:
 
     def last_profile(self) -> dict[str, float]:
         return {
+            "load_qweight_transfer_seconds": float(self._lib.pim_quantized_last_load_qweight_transfer_seconds()),
+            "load_scale_transfer_seconds": float(self._lib.pim_quantized_last_load_scale_transfer_seconds()),
+            "load_total_seconds": float(self._lib.pim_quantized_last_load_total_seconds()),
             "input_transfer_seconds": float(self._lib.pim_quantized_last_input_transfer_seconds()),
             "launch_seconds": float(self._lib.pim_quantized_last_launch_seconds()),
             "output_transfer_seconds": float(self._lib.pim_quantized_last_output_transfer_seconds()),

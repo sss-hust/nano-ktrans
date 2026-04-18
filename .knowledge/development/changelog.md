@@ -421,3 +421,8 @@ tags: [changelog]
 
 - 为 W4A32/GPTQ PIM quantized runtime 补充了分项 profiling，现可单独观察 host->DPU 输入传输、DPU launch/执行、DPU->host 回传与 runtime 总耗时。
 - 在真实 `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 上复测 `gate/down` operator-only case 后确认：当前 PIM 时间绝大部分集中在 `launch_seconds_avg`，说明瓶颈主要在 DPU 侧 kernel 执行而不是 host 传输。
+
+<!-- updated: 2026-04-19 02:35 -->
+
+- quantized PIM runtime 现已拆分权重加载与稳态运行 profiling：可分别观察 qweight/scales 常驻加载时间，以及运行期的 input transfer / DPU launch / output transfer。
+- 在真实 Qwen3 GPTQ `gate/down` case 上，稳态 PIM 时间约 89%~98% 集中在 `launch_seconds_avg`，进一步确认当前瓶颈主要在 DPU kernel 执行而不是 host 传输。
