@@ -434,3 +434,8 @@ tags: [changelog]
 <!-- updated: 2026-04-19 03:10 -->
 
 - 对 quantized DPU kernel 做了参数 sweep：`TASKLETS=8` 在真实 GPTQ `gate/down` case 上略优于默认 `16`，而 `BLOCK_FLOATS=32/128` 基本无帮助；当前最佳稳定配置仍只带来很小改进。
+
+<!-- updated: 2026-04-19 03:25 -->
+
+- 为 quantized DPU kernel 增加了 transfer-only 模式，并在 benchmark 中输出 `pim_breakdown`。
+- 真实 Qwen3 GPTQ `gate/down` case 表明：纯输入/输出搬运只占几毫秒，完整 PIM operator 时间的绝大部分仍是 DPU kernel 计算本体。

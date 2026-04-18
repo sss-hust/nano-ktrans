@@ -50,6 +50,7 @@ static uint32_t g_input_dim = 0;
 static uint32_t g_output_dim = 0;
 static uint32_t g_group_size = 0;
 static uint32_t g_num_groups = 0;
+static uint32_t g_kernel_mode = 0;
 static size_t g_rows_per_dpu = 0;
 static size_t g_shard_output_dim = 0;
 static uint32_t *g_valid_rows = NULL;
@@ -159,6 +160,7 @@ pim_quantized_load_weights(
     uint32_t input_dim,
     uint32_t output_dim,
     uint32_t group_size,
+    uint32_t kernel_mode,
     const void *packed_qweights,
     const void *scales,
     char *error_buffer,
@@ -198,6 +200,7 @@ pim_quantized_load_weights(
     g_output_dim = output_dim;
     g_group_size = group_size;
     g_num_groups = num_groups;
+    g_kernel_mode = kernel_mode;
     g_rows_per_dpu = ((size_t)output_dim + (size_t)g_nr_dpus - 1u) / (size_t)g_nr_dpus;
     g_shard_output_dim = g_rows_per_dpu + (g_rows_per_dpu % 2u);
     shard_qweight_words = g_shard_output_dim * (size_t)words_per_row;
@@ -264,6 +267,11 @@ pim_quantized_load_weights(
     if (check_dpu_error(
             dpu_broadcast_to(g_set, "num_groups", 0, &g_num_groups, sizeof(g_num_groups), DPU_XFER_DEFAULT),
             error_buffer, error_buffer_len, "dpu_broadcast_to(num_groups)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(
+            dpu_broadcast_to(g_set, "kernel_mode", 0, &g_kernel_mode, sizeof(g_kernel_mode), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(kernel_mode)") != 0) {
         goto cleanup;
     }
 
@@ -467,6 +475,7 @@ pim_quantized_shutdown(void)
     g_output_dim = 0;
     g_group_size = 0;
     g_num_groups = 0;
+    g_kernel_mode = 0;
     g_rows_per_dpu = 0;
     g_shard_output_dim = 0;
 }

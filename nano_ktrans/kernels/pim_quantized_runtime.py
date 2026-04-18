@@ -49,6 +49,7 @@ class PIMQuantizedRuntime:
             ctypes.c_uint32,
             ctypes.c_uint32,
             ctypes.c_uint32,
+            ctypes.c_uint32,
             ctypes.c_void_p,
             ctypes.c_void_p,
             ctypes.c_char_p,
@@ -147,7 +148,7 @@ class PIMQuantizedRuntime:
             and batch_size * padded_output_dim <= cls.MAX_OUTPUT_FLOATS
         )
 
-    def linear(self, inputs: torch.Tensor, quantized: GPTQLinearWeight) -> torch.Tensor:
+    def linear(self, inputs: torch.Tensor, quantized: GPTQLinearWeight, *, kernel_mode: int = 0) -> torch.Tensor:
         if inputs.ndim != 2:
             raise ValueError(f"Expected 2D inputs, got shape={tuple(inputs.shape)}")
         batch_size, input_dim = inputs.shape
@@ -185,13 +186,14 @@ class PIMQuantizedRuntime:
             padded_scales[:output_dim, :] = scales_f32
             scales_f32 = padded_scales
 
-        signature = (padded_input_dim, padded_output_dim, quantized.group_size)
+        signature = (padded_input_dim, padded_output_dim, quantized.group_size, kernel_mode)
         if self._loaded_signature != signature:
             error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
             rc = self._lib.pim_quantized_load_weights(
                 ctypes.c_uint32(padded_input_dim),
                 ctypes.c_uint32(padded_output_dim),
                 ctypes.c_uint32(quantized.group_size),
+                ctypes.c_uint32(kernel_mode),
                 ctypes.c_void_p(qweight_i32.data_ptr()),
                 ctypes.c_void_p(scales_f32.data_ptr()),
                 error_buffer,

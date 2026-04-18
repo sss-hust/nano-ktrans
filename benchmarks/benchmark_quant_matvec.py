@@ -116,6 +116,24 @@ def benchmark_pim(inputs: torch.Tensor, quantized, repeats: int, warmup: int, ra
     }
 
 
+def benchmark_pim_breakdown(inputs: torch.Tensor, quantized, rank_count: int, profile: str) -> dict:
+    runtime = PIMQuantizedRuntime.get_shared(rank_count=rank_count, profile=profile)
+    runtime.linear(inputs, quantized, kernel_mode=1)
+    transfer_only = runtime.last_profile()
+    runtime.linear(inputs, quantized, kernel_mode=0)
+    full = runtime.last_profile()
+    return {
+        "transfer_only_runtime_total_seconds": transfer_only["runtime_total_seconds"],
+        "transfer_only_input_transfer_seconds": transfer_only["input_transfer_seconds"],
+        "transfer_only_output_transfer_seconds": transfer_only["output_transfer_seconds"],
+        "full_runtime_total_seconds": full["runtime_total_seconds"],
+        "estimated_compute_seconds": max(
+            0.0,
+            full["runtime_total_seconds"] - transfer_only["runtime_total_seconds"],
+        ),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Operator-only W4A32 CPU vs PIM matvec benchmark.")
     parser.add_argument("--model-path", help="Local path to GPTQ Int4 model.")
@@ -179,6 +197,12 @@ def main() -> None:
         rank_count=args.rank_count,
         profile=args.profile,
     )
+    pim_breakdown = benchmark_pim_breakdown(
+        inputs,
+        quantized,
+        rank_count=args.rank_count,
+        profile=args.profile,
+    )
 
     diff = (cpu_result["output"] - pim_result["output"]).abs()
     dense_vs_grouped = (cpu_dense_result["output"] - cpu_result["output"]).abs()
@@ -195,6 +219,7 @@ def main() -> None:
         "cpu_grouped": {k: v for k, v in cpu_result.items() if k != "output"},
         "cpu_dense": {k: v for k, v in cpu_dense_result.items() if k != "output"},
         "pim": {k: v for k, v in pim_result.items() if k != "output"},
+        "pim_breakdown": pim_breakdown,
         "max_abs_error": float(diff.max().item()),
         "mean_abs_error": float(diff.mean().item()),
         "max_abs_error_cpu_dense_vs_grouped": float(dense_vs_grouped.max().item()),

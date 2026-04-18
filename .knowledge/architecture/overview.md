@@ -78,6 +78,8 @@ tags: [architecture]
    - `runtime_total_seconds_avg`
 8. 当前真实 GPTQ operator-only 结果表明，W4A32 PIM 路径的大头时间集中在 `launch_seconds_avg`，说明主瓶颈是 DPU kernel 执行而不是 host 端输入/输出搬运。
 
+9. quantized benchmark 现已支持 `transfer-only` 剖析模式，可在不做 DPU dequant/matvec 的情况下测纯 host<->DPU 传输下界，用于和完整算子路径拆分对比。
+
 6. 这条路径的目标不是先打通完整 MoE，而是先回答一个更直接的问题：
    - “在同一算子上，使用持久化驻留的 W4A32/GPTQ 权重时，PIM 是否可能比 CPU 更快？”
 

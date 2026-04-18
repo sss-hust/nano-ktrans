@@ -48,6 +48,7 @@ __host uint32_t input_dim;
 __host uint32_t output_dim;
 __host uint32_t group_size;
 __host uint32_t num_groups;
+__host uint32_t kernel_mode;
 __host uint64_t kernel_cycles;
 
 __mram_noinit uint32_t qweight_mram[MAX_QWEIGHT_WORDS];
@@ -83,6 +84,16 @@ main(void)
 
     for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
         for (uint32_t row = tasklet_id * 2; row < output_dim; row += NR_TASKLETS * 2) {
+            if (kernel_mode != 0) {
+                output_cache[0] = 0.0f;
+                output_cache[1] = 0.0f;
+                mram_write(
+                    output_cache,
+                    (__mram_ptr void *)(outputs_mram + ((batch_idx * output_dim) + row)),
+                    2 * sizeof(float));
+                continue;
+            }
+
             float acc0 = 0.0f;
             float acc1 = 0.0f;
 

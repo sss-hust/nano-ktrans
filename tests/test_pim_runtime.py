@@ -61,6 +61,9 @@ def test_pim_quantized_runtime_matches_cpu():
     assert profile["launch_seconds"] >= 0.0
     assert profile["output_transfer_seconds"] >= 0.0
     assert profile["runtime_total_seconds"] >= 0.0
+    transfer_only = runtime.linear(inputs, quantized, kernel_mode=1)
+    assert transfer_only.shape == expected.shape
+    assert torch.count_nonzero(transfer_only) == 0
 
 
 @pytest.mark.skipif(not _has_real_dpu(), reason="Real UPMEM hardware and toolchain are required.")
