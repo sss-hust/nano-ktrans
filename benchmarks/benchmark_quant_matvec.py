@@ -79,11 +79,20 @@ def benchmark_pim(inputs: torch.Tensor, quantized, repeats: int, warmup: int, ra
     outputs = None
     durations = []
     cycles = []
+    input_transfer = []
+    launch = []
+    output_transfer = []
+    runtime_total = []
     for _ in range(repeats):
         start = time.perf_counter()
         outputs = runtime.linear(inputs, quantized)
         durations.append(time.perf_counter() - start)
         cycles.append(runtime.last_cycles())
+        phase_profile = runtime.last_profile()
+        input_transfer.append(phase_profile["input_transfer_seconds"])
+        launch.append(phase_profile["launch_seconds"])
+        output_transfer.append(phase_profile["output_transfer_seconds"])
+        runtime_total.append(phase_profile["runtime_total_seconds"])
 
     assert outputs is not None
     return {
@@ -95,6 +104,10 @@ def benchmark_pim(inputs: torch.Tensor, quantized, repeats: int, warmup: int, ra
         "kernel_cycles_min": min(cycles),
         "kernel_cycles_max": max(cycles),
         "runtime_dpu_count": runtime.num_dpus(),
+        "input_transfer_seconds_avg": sum(input_transfer) / len(input_transfer),
+        "launch_seconds_avg": sum(launch) / len(launch),
+        "output_transfer_seconds_avg": sum(output_transfer) / len(output_transfer),
+        "runtime_total_seconds_avg": sum(runtime_total) / len(runtime_total),
     }
 
 

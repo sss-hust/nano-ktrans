@@ -68,6 +68,13 @@ tags: [architecture]
    - int4 unpack
    - 逐 group scale 反量化
    - dequantized weight 与 float32 input 的矩阵向量乘
+7. quantized runtime 现已暴露分项 profile：
+   - `input_transfer_seconds_avg`
+   - `launch_seconds_avg`
+   - `output_transfer_seconds_avg`
+   - `runtime_total_seconds_avg`
+8. 当前真实 GPTQ operator-only 结果表明，W4A32 PIM 路径的大头时间集中在 `launch_seconds_avg`，说明主瓶颈是 DPU kernel 执行而不是 host 端输入/输出搬运。
+
 6. 这条路径的目标不是先打通完整 MoE，而是先回答一个更直接的问题：
    - “在同一算子上，使用持久化驻留的 W4A32/GPTQ 权重时，PIM 是否可能比 CPU 更快？”
 

@@ -416,3 +416,8 @@ tags: [changelog]
 - <!-- updated: 2026-04-17 05:58 --> **[resident-commit-finalize-ready-queue-diagnostics]** `HybridMoE.diagnostics()`、`MigrationPipelineRuntime`、scheduler summary 与 `LLM.reset_offload_diagnostics()` 已补齐 `resident_commit_finalize_ready_queue` 的 size/limit/utilization/enqueued/committed/background_enqueued 指标，当前 `tests/test_core.py + tests/test_pim_runtime.py` 仍为 `126 passed, 1 warning`。
 - <!-- updated: 2026-04-17 06:20 --> **[benchmark-background-worker]** `benchmark_inference.py` 与 `example.py` 现已显式支持 `--enable-background-offload-worker` 和 `--background-offload-poll-interval-seconds`，真实 benchmark 路径不再只能走前台 refresh hook，可直接接通后台 offload worker。
 - <!-- updated: 2026-04-17 06:20 --> **[benchmark-run-worker-lifecycle]** `run_single_generation()` 现在会像 `LLM.generate()` 一样，在单次生成前启动 background offload worker、结束后停止；补充 benchmark worker 生命周期回归后，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `127 passed, 1 warning`。
+
+<!-- updated: 2026-04-19 02:20 -->
+
+- 为 W4A32/GPTQ PIM quantized runtime 补充了分项 profiling，现可单独观察 host->DPU 输入传输、DPU launch/执行、DPU->host 回传与 runtime 总耗时。
+- 在真实 `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 上复测 `gate/down` operator-only case 后确认：当前 PIM 时间绝大部分集中在 `launch_seconds_avg`，说明瓶颈主要在 DPU 侧 kernel 执行而不是 host 传输。

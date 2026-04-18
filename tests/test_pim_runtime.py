@@ -44,6 +44,17 @@ def test_pim_quantized_runtime_matches_cpu():
 
     assert actual.shape == expected.shape
     assert torch.allclose(actual, expected, atol=5e-2, rtol=5e-2)
+    profile = runtime.last_profile()
+    assert set(profile) == {
+        "input_transfer_seconds",
+        "launch_seconds",
+        "output_transfer_seconds",
+        "runtime_total_seconds",
+    }
+    assert profile["input_transfer_seconds"] >= 0.0
+    assert profile["launch_seconds"] >= 0.0
+    assert profile["output_transfer_seconds"] >= 0.0
+    assert profile["runtime_total_seconds"] >= 0.0
 
 
 @pytest.mark.skipif(not _has_real_dpu(), reason="Real UPMEM hardware and toolchain are required.")

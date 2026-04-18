@@ -136,5 +136,11 @@ Notes:
 - JSON output now includes both `cpu_grouped` and `cpu_dense` baselines:
   - `cpu_grouped` is closer to the operator path actually executed on PIM
   - `cpu_dense` is a lower-bound CPU baseline after full dequantization
+- PIM timing is now split into:
+  - `input_transfer_seconds_avg`
+  - `launch_seconds_avg`
+  - `output_transfer_seconds_avg`
+  - `runtime_total_seconds_avg`
+  so operator-only runs can separate host->DPU input staging, synchronous DPU launch/compute, and DPU->host result readback.
 - PIM weights are persisted inside the quantized runtime after `load_weights`; benchmark timing focuses on repeated operator execution, not full model inference.
 - This benchmark is intentionally operator-only and does not include routing, overlap scheduling, or full MoE execution.

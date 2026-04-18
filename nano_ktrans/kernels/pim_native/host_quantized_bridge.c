@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <time.h>
 
 #ifndef MAX_QWEIGHT_WORDS
 #define MAX_QWEIGHT_WORDS 2097152
@@ -37,6 +38,10 @@ static struct dpu_set_t g_set;
 static bool g_initialized = false;
 static bool g_weights_loaded = false;
 static uint64_t g_last_cycles = 0;
+static double g_last_input_transfer_seconds = 0.0;
+static double g_last_launch_seconds = 0.0;
+static double g_last_output_transfer_seconds = 0.0;
+static double g_last_total_seconds = 0.0;
 static uint32_t g_nr_dpus = 0;
 static uint32_t g_input_dim = 0;
 static uint32_t g_output_dim = 0;
@@ -57,6 +62,14 @@ set_error(char *error_buffer, size_t error_buffer_len, const char *fmt, ...)
     va_start(args, fmt);
     vsnprintf(error_buffer, error_buffer_len, fmt, args);
     va_end(args);
+}
+
+static double
+timespec_diff_seconds(const struct timespec *start, const struct timespec *end)
+{
+    const time_t sec = end->tv_sec - start->tv_sec;
+    const long nsec = end->tv_nsec - start->tv_nsec;
+    return (double)sec + ((double)nsec / 1000000000.0);
 }
 
 static int
@@ -128,6 +141,10 @@ pim_quantized_init(
     g_initialized = true;
     g_weights_loaded = false;
     g_last_cycles = 0;
+    g_last_input_transfer_seconds = 0.0;
+    g_last_launch_seconds = 0.0;
+    g_last_output_transfer_seconds = 0.0;
+    g_last_total_seconds = 0.0;
     return 0;
 }
 
@@ -289,6 +306,14 @@ pim_quantized_run(
     uint64_t max_cycles = 0;
     uint64_t *kernel_cycles = NULL;
     float *output_shards = NULL;
+    struct timespec total_start;
+    struct timespec total_end;
+    struct timespec input_start;
+    struct timespec input_end;
+    struct timespec launch_start;
+    struct timespec launch_end;
+    struct timespec output_start;
+    struct timespec output_end;
     const size_t input_floats = (size_t)batch_size * (size_t)g_input_dim;
     const size_t shard_output_floats = (size_t)batch_size * g_shard_output_dim;
 
@@ -312,21 +337,28 @@ pim_quantized_run(
         goto cleanup;
     }
 
+    clock_gettime(CLOCK_MONOTONIC, &total_start);
+
     if (check_dpu_error(
             dpu_broadcast_to(g_set, "batch_size", 0, &batch_size, sizeof(batch_size), DPU_XFER_DEFAULT),
             error_buffer, error_buffer_len, "dpu_broadcast_to(batch_size)") != 0) {
         goto cleanup;
     }
+    clock_gettime(CLOCK_MONOTONIC, &input_start);
     if (check_dpu_error(
             dpu_broadcast_to(g_set, "inputs_mram", 0, inputs, input_floats * sizeof(float), DPU_XFER_DEFAULT),
             error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_mram)") != 0) {
         goto cleanup;
     }
+    clock_gettime(CLOCK_MONOTONIC, &input_end);
+    clock_gettime(CLOCK_MONOTONIC, &launch_start);
     if (check_dpu_error(dpu_launch(g_set, DPU_SYNCHRONOUS), error_buffer, error_buffer_len, "dpu_launch") != 0) {
         goto cleanup;
     }
+    clock_gettime(CLOCK_MONOTONIC, &launch_end);
 
     dpu_index = 0;
+    clock_gettime(CLOCK_MONOTONIC, &output_start);
     DPU_FOREACH(g_set, dpu, dpu_index)
     {
         if (check_dpu_error(
@@ -355,6 +387,7 @@ pim_quantized_run(
             error_buffer, error_buffer_len, "dpu_push_xfer(kernel_cycles)") != 0) {
         goto cleanup;
     }
+    clock_gettime(CLOCK_MONOTONIC, &output_end);
 
     float *output_dst = (float *)outputs;
     for (dpu_index = 0; dpu_index < g_nr_dpus; ++dpu_index) {
@@ -373,6 +406,11 @@ pim_quantized_run(
     }
 
     g_last_cycles = max_cycles;
+    clock_gettime(CLOCK_MONOTONIC, &total_end);
+    g_last_input_transfer_seconds = timespec_diff_seconds(&input_start, &input_end);
+    g_last_launch_seconds = timespec_diff_seconds(&launch_start, &launch_end);
+    g_last_output_transfer_seconds = timespec_diff_seconds(&output_start, &output_end);
+    g_last_total_seconds = timespec_diff_seconds(&total_start, &total_end);
     rc = 0;
 
 cleanup:
@@ -395,6 +433,10 @@ pim_quantized_shutdown(void)
     g_initialized = false;
     g_weights_loaded = false;
     g_last_cycles = 0;
+    g_last_input_transfer_seconds = 0.0;
+    g_last_launch_seconds = 0.0;
+    g_last_output_transfer_seconds = 0.0;
+    g_last_total_seconds = 0.0;
     g_nr_dpus = 0;
     g_input_dim = 0;
     g_output_dim = 0;
@@ -408,6 +450,30 @@ uint64_t
 pim_quantized_last_cycles(void)
 {
     return g_last_cycles;
+}
+
+double
+pim_quantized_last_input_transfer_seconds(void)
+{
+    return g_last_input_transfer_seconds;
+}
+
+double
+pim_quantized_last_launch_seconds(void)
+{
+    return g_last_launch_seconds;
+}
+
+double
+pim_quantized_last_output_transfer_seconds(void)
+{
+    return g_last_output_transfer_seconds;
+}
+
+double
+pim_quantized_last_total_seconds(void)
+{
+    return g_last_total_seconds;
 }
 
 uint32_t

@@ -354,6 +354,8 @@ updated: 2026-04-19 00:50
   - 本轮新推进到 `resident_commit_batch_queue` 的 batch：只记为 `prefinalized`，留到下一轮再 commit
 - 这让 resident commit 的最后一段也开始具备稳定的流水线边界，而不是在同一 tick 里边入队边消费。
 - 新增 W4A32/GPTQ Int4 算子级实验路径：
+- W4A32/GPTQ quantized runtime 现已补充分项 timing：host->DPU 输入下发、同步 launch/执行、DPU->host 结果回传与 runtime 总耗时都可在 `benchmark_quant_matvec.py` 中直接观察。
+- 真实 Qwen3 GPTQ operator-only 剖析已表明：当前 PIM 路径的时间绝大部分落在 `launch_seconds_avg`，输入/输出传输只占很小比例；瓶颈已经明确偏向 DPU 侧 kernel 执行而不是 host 传输。
   - `WeightLoader` 现已支持读取 Qwen3 GPTQ expert linear 的 `qweight / scales / g_idx`
   - `GPTQLinearWeight` 统一承载最小可用的 4-bit 对称量化权重表示
   - `quantized_ops.py` 提供 CPU W4A32 operator-only matvec 与 synthetic quantizer

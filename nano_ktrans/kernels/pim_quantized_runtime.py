@@ -65,6 +65,14 @@ class PIMQuantizedRuntime:
         self._lib.pim_quantized_run.restype = ctypes.c_int
         self._lib.pim_quantized_last_cycles.argtypes = []
         self._lib.pim_quantized_last_cycles.restype = ctypes.c_uint64
+        self._lib.pim_quantized_last_input_transfer_seconds.argtypes = []
+        self._lib.pim_quantized_last_input_transfer_seconds.restype = ctypes.c_double
+        self._lib.pim_quantized_last_launch_seconds.argtypes = []
+        self._lib.pim_quantized_last_launch_seconds.restype = ctypes.c_double
+        self._lib.pim_quantized_last_output_transfer_seconds.argtypes = []
+        self._lib.pim_quantized_last_output_transfer_seconds.restype = ctypes.c_double
+        self._lib.pim_quantized_last_total_seconds.argtypes = []
+        self._lib.pim_quantized_last_total_seconds.restype = ctypes.c_double
         self._lib.pim_quantized_num_dpus.argtypes = []
         self._lib.pim_quantized_num_dpus.restype = ctypes.c_uint32
         self._lib.pim_quantized_shutdown.argtypes = []
@@ -202,6 +210,14 @@ class PIMQuantizedRuntime:
 
     def last_cycles(self) -> int:
         return int(self._lib.pim_quantized_last_cycles())
+
+    def last_profile(self) -> dict[str, float]:
+        return {
+            "input_transfer_seconds": float(self._lib.pim_quantized_last_input_transfer_seconds()),
+            "launch_seconds": float(self._lib.pim_quantized_last_launch_seconds()),
+            "output_transfer_seconds": float(self._lib.pim_quantized_last_output_transfer_seconds()),
+            "runtime_total_seconds": float(self._lib.pim_quantized_last_total_seconds()),
+        }
 
     def num_dpus(self) -> int:
         return int(self._lib.pim_quantized_num_dpus())
