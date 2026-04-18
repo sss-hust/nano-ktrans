@@ -16,10 +16,11 @@ tags: [changelog]
   - shape=`2048 -> 768`
   - `group_size=128`
   - `rank_count=4`
-  - CPU avg ≈ `4.77 ms`
+  - CPU grouped avg ≈ `8.42 ms`
+  - CPU dense avg ≈ `4.06 ms`
   - PIM avg ≈ `52.27 ms`
   - `max_abs_error ≈ 1.68e-4`
-  当前 synthetic W4A32 operator-only 路径下，PIM 明显慢于 CPU。
+  当前 synthetic W4A32 operator-only 路径下，PIM 明显慢于 CPU grouped / dense 两条基线。
 - 已开始拉取 `Qwen/Qwen3-30B-A3B-GPTQ-Int4`：
   - `config.json`、`quantize_config.json` 已就绪
   - `model.safetensors` 仍未完成下载

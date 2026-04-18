@@ -53,13 +53,21 @@ def test_weight_loader_loads_gptq_expert_linear(tmp_path):
 
 
 def test_cpu_w4a32_matvec_matches_linear_from_dequantized_weight():
-    from nano_ktrans.kernels.quantized_ops import cpu_w4a32_matvec, quantize_symmetric_w4a32
+    from nano_ktrans.kernels.quantized_ops import (
+        cpu_w4a32_matvec,
+        cpu_w4a32_matvec_dense,
+        quantize_symmetric_w4a32,
+    )
 
     weight = torch.randn(24, 128, dtype=torch.float32)
     inputs = torch.randn(3, 128, dtype=torch.float32)
     quantized = quantize_symmetric_w4a32(weight, group_size=64, linear_prefix="synthetic")
 
     result = cpu_w4a32_matvec(inputs, quantized)
+    dense_result = cpu_w4a32_matvec_dense(inputs, quantized)
     expected = torch.nn.functional.linear(inputs, quantized.dequantize())
 
+    assert result.dequantized_weight is None
+    assert torch.allclose(result.output, dense_result.output, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(dense_result.output, expected, atol=1e-5, rtol=1e-5)
     assert torch.allclose(result.output, expected, atol=1e-5, rtol=1e-5)

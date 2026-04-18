@@ -367,10 +367,11 @@ updated: 2026-04-19 00:50
   - `output_dim=768`
   - `group_size=128`
   - `rank_count=4`
-  - CPU avg 约 `4.77 ms`
+  - CPU grouped avg 约 `8.42 ms`
+  - CPU dense avg 约 `4.06 ms`
   - PIM avg 约 `52.27 ms`
   - `max_abs_error ≈ 1.68e-4`
-  当前 synthetic case 下 PIM 仍明显慢于 CPU，说明仅换成 W4A32 并不足以抵消当前 DPU 计算和 host orchestration 成本。
+  当前 synthetic case 下 PIM 仍明显慢于 CPU grouped / dense 两条基线，说明仅换成 W4A32 并不足以抵消当前 DPU 计算和 host orchestration 成本。
 - `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 已开始拉取：
   - tokenizer / config / quantize_config 已到本地
   - `model.safetensors` 仍在下载中

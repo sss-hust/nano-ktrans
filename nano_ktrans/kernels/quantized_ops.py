@@ -11,7 +11,7 @@ from .weight_loader import GPTQLinearWeight
 @dataclass
 class W4A32MatvecResult:
     output: torch.Tensor
-    dequantized_weight: torch.Tensor
+    dequantized_weight: torch.Tensor | None
 
 
 def quantize_symmetric_w4a32(
@@ -72,7 +72,59 @@ def pack_int4_matrix(qvalues: torch.Tensor) -> torch.Tensor:
     return packed.contiguous()
 
 
-def cpu_w4a32_matvec(
+def _unpack_packed_words(
+    packed_words: torch.Tensor,
+    *,
+    bits: int,
+) -> torch.Tensor:
+    values_per_word = 32 // bits
+    shifts = torch.arange(values_per_word, dtype=torch.int32, device=packed_words.device) * bits
+    unpacked = ((packed_words.to(dtype=torch.int32).unsqueeze(-1) >> shifts) & ((1 << bits) - 1)).to(dtype=torch.float32)
+    return unpacked.reshape(packed_words.shape[0], packed_words.shape[1] * values_per_word)
+
+
+def cpu_w4a32_matvec_grouped(
+    inputs: torch.Tensor,
+    quantized: GPTQLinearWeight,
+) -> W4A32MatvecResult:
+    if inputs.ndim != 2:
+        raise ValueError(f"Expected 2D inputs for W4A32 matvec, got shape={tuple(inputs.shape)}")
+    if inputs.shape[1] != quantized.input_dim:
+        raise ValueError(
+            f"Input dim mismatch for W4A32 matvec: inputs.shape={tuple(inputs.shape)}, "
+            f"quantized.input_dim={quantized.input_dim}"
+        )
+
+    inputs_f32 = inputs.to(dtype=torch.float32)
+    batch_size = inputs_f32.shape[0]
+    output = torch.zeros(batch_size, quantized.output_dim, dtype=torch.float32)
+    values_per_word = quantized.values_per_word
+    zero_point_value = float(1 << (quantized.bits - 1))
+
+    for group_idx in range(quantized.num_groups):
+        start = group_idx * quantized.group_size
+        end = min(start + quantized.group_size, quantized.input_dim)
+        start_word = start // values_per_word
+        end_word = (end + values_per_word - 1) // values_per_word
+
+        packed = quantized.qweight[:, start_word:end_word]
+        qvalues = _unpack_packed_words(packed, bits=quantized.bits)
+        offset = start - (start_word * values_per_word)
+        qvalues = qvalues[:, offset: offset + (end - start)]
+
+        scale = quantized.scales[:, group_idx].unsqueeze(1)
+        if quantized.zero_points is None:
+            zero = torch.full_like(scale, zero_point_value)
+        else:
+            zero = quantized.zero_points[:, group_idx].unsqueeze(1)
+
+        dequant_group = (qvalues - zero) * scale
+        output += F.linear(inputs_f32[:, start:end], dequant_group)
+
+    return W4A32MatvecResult(output=output, dequantized_weight=None)
+
+
+def cpu_w4a32_matvec_dense(
     inputs: torch.Tensor,
     quantized: GPTQLinearWeight,
 ) -> W4A32MatvecResult:
@@ -87,3 +139,10 @@ def cpu_w4a32_matvec(
     weight = quantized.dequantize()
     output = F.linear(inputs.to(dtype=torch.float32), weight)
     return W4A32MatvecResult(output=output, dequantized_weight=weight)
+
+
+def cpu_w4a32_matvec(
+    inputs: torch.Tensor,
+    quantized: GPTQLinearWeight,
+) -> W4A32MatvecResult:
+    return cpu_w4a32_matvec_grouped(inputs, quantized)

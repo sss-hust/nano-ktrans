@@ -95,7 +95,8 @@ Important:
 
 This benchmark compares only the `W4A32` matvec operator:
 
-- CPU: GPTQ-style symmetric INT4 dequantization + `matvec`
+- CPU grouped: GPTQ-style symmetric INT4 dequantization per group + `matvec`
+- CPU dense: dequantize full weight first, then run dense `matvec`
 - PIM: resident INT4 weight shards + on-DPU dequantization + `matvec`
 
 Synthetic validation:
@@ -132,5 +133,8 @@ source /usr/upmem_env.sh hw
 Notes:
 
 - The current implementation assumes GPTQ `sym=true` and sequential `g_idx`.
+- JSON output now includes both `cpu_grouped` and `cpu_dense` baselines:
+  - `cpu_grouped` is closer to the operator path actually executed on PIM
+  - `cpu_dense` is a lower-bound CPU baseline after full dequantization
 - PIM weights are persisted inside the quantized runtime after `load_weights`; benchmark timing focuses on repeated operator execution, not full model inference.
 - This benchmark is intentionally operator-only and does not include routing, overlap scheduling, or full MoE execution.

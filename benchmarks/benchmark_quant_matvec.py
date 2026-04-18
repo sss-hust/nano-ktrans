@@ -8,7 +8,11 @@ from pathlib import Path
 import torch
 
 from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
-from nano_ktrans.kernels.quantized_ops import cpu_w4a32_matvec, quantize_symmetric_w4a32
+from nano_ktrans.kernels.quantized_ops import (
+    cpu_w4a32_matvec,
+    cpu_w4a32_matvec_dense,
+    quantize_symmetric_w4a32,
+)
 from nano_ktrans.kernels.weight_loader import ExpertWeightLoader
 
 
@@ -36,6 +40,26 @@ def benchmark_cpu(inputs: torch.Tensor, quantized, repeats: int, warmup: int) ->
     for _ in range(repeats):
         start = time.perf_counter()
         outputs = cpu_w4a32_matvec(inputs, quantized).output
+        durations.append(time.perf_counter() - start)
+
+    assert outputs is not None
+    return {
+        "output": outputs,
+        "seconds_avg": sum(durations) / len(durations),
+        "seconds_min": min(durations),
+        "seconds_max": max(durations),
+    }
+
+
+def benchmark_cpu_dense(inputs: torch.Tensor, quantized, repeats: int, warmup: int) -> dict:
+    for _ in range(warmup):
+        cpu_w4a32_matvec_dense(inputs, quantized)
+
+    outputs = None
+    durations = []
+    for _ in range(repeats):
+        start = time.perf_counter()
+        outputs = cpu_w4a32_matvec_dense(inputs, quantized).output
         durations.append(time.perf_counter() - start)
 
     assert outputs is not None
@@ -128,6 +152,7 @@ def main() -> None:
 
     inputs = torch.randn(args.batch_size, quantized.input_dim, dtype=torch.float32)
     cpu_result = benchmark_cpu(inputs, quantized, repeats=args.repeats, warmup=args.warmup)
+    cpu_dense_result = benchmark_cpu_dense(inputs, quantized, repeats=args.repeats, warmup=args.warmup)
     pim_result = benchmark_pim(
         inputs,
         quantized,
@@ -138,6 +163,7 @@ def main() -> None:
     )
 
     diff = (cpu_result["output"] - pim_result["output"]).abs()
+    dense_vs_grouped = (cpu_dense_result["output"] - cpu_result["output"]).abs()
     result = {
         "source": source,
         "bits": quantized.bits,
@@ -148,12 +174,17 @@ def main() -> None:
         "batch_size": args.batch_size,
         "repeats": args.repeats,
         "warmup": args.warmup,
-        "cpu": {k: v for k, v in cpu_result.items() if k != "output"},
+        "cpu_grouped": {k: v for k, v in cpu_result.items() if k != "output"},
+        "cpu_dense": {k: v for k, v in cpu_dense_result.items() if k != "output"},
         "pim": {k: v for k, v in pim_result.items() if k != "output"},
         "max_abs_error": float(diff.max().item()),
         "mean_abs_error": float(diff.mean().item()),
-        "speedup_pim_vs_cpu": (
+        "max_abs_error_cpu_dense_vs_grouped": float(dense_vs_grouped.max().item()),
+        "speedup_pim_vs_cpu_grouped": (
             cpu_result["seconds_avg"] / pim_result["seconds_avg"] if pim_result["seconds_avg"] > 0 else None
+        ),
+        "speedup_pim_vs_cpu_dense": (
+            cpu_dense_result["seconds_avg"] / pim_result["seconds_avg"] if pim_result["seconds_avg"] > 0 else None
         ),
     }
 
