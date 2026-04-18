@@ -439,3 +439,7 @@ tags: [changelog]
 
 - 为 quantized DPU kernel 增加了 transfer-only 模式，并在 benchmark 中输出 `pim_breakdown`。
 - 真实 Qwen3 GPTQ `gate/down` case 表明：纯输入/输出搬运只占几毫秒，完整 PIM operator 时间的绝大部分仍是 DPU kernel 计算本体。
+
+<!-- updated: 2026-04-19 03:45 -->
+
+- 在真实 GPTQ `gate/down` 上做了 rank 与 batch 的 transfer-only breakdown sweep。结果表明：rank 调节主要改变少量传输与常数项，batch 增长时主导时间几乎全部落在 DPU 计算核，问题不是 host 传输扩展性。
