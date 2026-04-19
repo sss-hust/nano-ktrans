@@ -53,6 +53,10 @@
 #define MAX_LUT_INT16 (MAX_SCALE_FLOATS * (1 << BITS_PER_WEIGHT))
 #endif
 
+#ifndef MAX_RUNTIME_LUT_INT16
+#define MAX_RUNTIME_LUT_INT16 131072
+#endif
+
 BARRIER_INIT(work_barrier, NR_TASKLETS);
 
 __host uint32_t batch_size;
@@ -70,6 +74,7 @@ __mram_noinit float outputs_mram[MAX_OUTPUT_FLOATS];
 __mram_noinit int16_t lut_mram[MAX_LUT_INT16];
 __mram_noinit int8_t inputs_i8_mram[MAX_INPUT_INT8];
 __mram_noinit int32_t outputs_i32_mram[MAX_OUTPUT_INT32];
+__mram_noinit int16_t runtime_lut_mram[MAX_RUNTIME_LUT_INT16];
 
 int
 main(void)
@@ -105,6 +110,77 @@ main(void)
 
     for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
         for (uint32_t row = tasklet_id * 2; row < output_dim; row += NR_TASKLETS * 2) {
+            if (kernel_mode == 5) {
+                int32_t acc0 = 0;
+                int32_t acc1 = 0;
+
+                for (uint32_t col = 0; col < input_dim; col += BLOCK_FLOATS) {
+                    const uint32_t word_offset = col / WEIGHTS_PER_WORD;
+                    const uint32_t words_this_block = BLOCK_FLOATS / WEIGHTS_PER_WORD;
+                    const uint32_t group_idx = col / group_size;
+                    const uint32_t block_idx = col / BLOCK_FLOATS;
+                    const uint32_t blocks_per_batch = input_dim / BLOCK_FLOATS;
+                    const uint32_t runtime_lut_offset0 =
+                        ((((batch_idx * output_dim) + row) * blocks_per_batch) + block_idx)
+                        * (1u << BITS_PER_WEIGHT);
+                    const uint32_t runtime_lut_offset1 =
+                        (((((batch_idx * output_dim) + (row + 1)) * blocks_per_batch) + block_idx)
+                        * (1u << BITS_PER_WEIGHT));
+                    const uint32_t lut_row_offset0 =
+                        ((row * num_groups) + group_idx) * (1u << BITS_PER_WEIGHT);
+                    const uint32_t lut_row_offset1 =
+                        (((row + 1) * num_groups) + group_idx) * (1u << BITS_PER_WEIGHT);
+                    int32_t block_acc0 = 0;
+                    int32_t block_acc1 = 0;
+
+                    mram_read(
+                        (__mram_ptr void const *)(inputs_i8_mram + ((batch_idx * input_dim) + col)),
+                        input_i8_cache,
+                        BLOCK_FLOATS * sizeof(int8_t));
+                    mram_read(
+                        (__mram_ptr void const *)(runtime_lut_mram + runtime_lut_offset0),
+                        lut0_i16,
+                        sizeof(lut0_i16));
+                    mram_read(
+                        (__mram_ptr void const *)(runtime_lut_mram + runtime_lut_offset1),
+                        lut1_i16,
+                        sizeof(lut1_i16));
+                    mram_read(
+                        (__mram_ptr void const *)(qweight_mram + ((row * words_per_row) + word_offset)),
+                        qweight0_cache,
+                        words_this_block * sizeof(uint32_t));
+                    mram_read(
+                        (__mram_ptr void const *)(qweight_mram + (((row + 1) * words_per_row) + word_offset)),
+                        qweight1_cache,
+                        words_this_block * sizeof(uint32_t));
+
+                    for (uint32_t word_idx = 0; word_idx < words_this_block; ++word_idx) {
+                        const uint32_t packed0 = qweight0_cache[word_idx];
+                        const uint32_t packed1 = qweight1_cache[word_idx];
+                        for (uint32_t nibble = 0; nibble < WEIGHTS_PER_WORD; ++nibble) {
+                            const uint32_t shift = nibble * BITS_PER_WEIGHT;
+                            const uint32_t q0 = (packed0 >> shift) & ((1u << BITS_PER_WEIGHT) - 1u);
+                            const uint32_t q1 = (packed1 >> shift) & ((1u << BITS_PER_WEIGHT) - 1u);
+                            const uint32_t input_idx = (word_idx * WEIGHTS_PER_WORD) + nibble;
+                            const int32_t x = (int32_t)input_i8_cache[input_idx];
+                            block_acc0 += x * (int32_t)lut0_i16[q0];
+                            block_acc1 += x * (int32_t)lut1_i16[q1];
+                        }
+                    }
+
+                    acc0 += block_acc0;
+                    acc1 += block_acc1;
+                }
+
+                output_i32_cache[0] = acc0;
+                output_i32_cache[1] = acc1;
+                mram_write(
+                    output_i32_cache,
+                    (__mram_ptr void *)(outputs_i32_mram + ((batch_idx * output_dim) + row)),
+                    2 * sizeof(int32_t));
+                continue;
+            }
+
             if (kernel_mode == 4) {
                 int32_t acc0 = 0;
                 int32_t acc1 = 0;
