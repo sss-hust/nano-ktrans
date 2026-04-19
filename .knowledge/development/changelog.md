@@ -222,6 +222,7 @@ tags: [changelog]
 - <!-- updated: 2026-04-19 02:10 --> **[quantized-fixed-point-limit]** 新增了更激进的 `kernel_mode=5` block-aware runtime LUT 原型，但当前在真实 Qwen3 gate/down 形状下会因 `runtime int16 lut too large` 超过 MRAM/bridge 预算，因此 benchmark 目前只记录该模式不可用，而不作为主路径。
 - <!-- updated: 2026-04-19 04:30 --> **[quantized-fixed-point-stabilize]** `kernel_mode=4` 的 activation quantization 已收口成按 batch 的单尺度路径，避免了之前 block 级量化却只用单一回标定因子造成的数学不一致；`mode=5/6` 继续保留为实验实现，但已从默认测试和 benchmark 主路径中降级，避免污染稳定结果。
 - <!-- updated: 2026-04-19 04:30 --> **[quantized-fixed-point-batch-results]** 修正后在真实 `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 上重新验证：`batch=1` 时 `gate` case 为 `5.79ms cpu_grouped vs 4.47ms pim_int8_fixed`，`down` case 为 `3.42ms cpu_grouped vs 1.34ms pim_int8_fixed`；`batch=4` 时 `gate` 退化为约 `0.56x` CPU grouped，而 `down` 仍可达到约 `0.92x` CPU grouped，说明当前整数化路径已明显优于 soft-float，但优势仍依赖 shape 与 batch 大小。
+- <!-- updated: 2026-04-19 04:45 --> **[quantized-fixed-point-cleanup]** 已移除未验证且输出异常的 `kernel_mode=6` int16 prototype，只保留 `kernel_mode=4` 作为默认稳定整数化路径、`kernel_mode=5` 作为需显式开启的实验路径；`benchmark_quant_matvec.py` 与 `test_pim_runtime.py` 已同步收口到这套边界。
 
 <!-- updated: 2026-04-15 07:53 -->
 

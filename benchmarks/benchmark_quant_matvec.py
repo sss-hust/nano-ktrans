@@ -206,14 +206,8 @@ def benchmark_pim_breakdown(
     dequant_only = runtime.last_profile()
     runtime.linear(inputs, quantized, kernel_mode=4)
     int8_fixed = runtime.last_profile()
-    int16_fixed = None
     int8_block_fixed = None
     if include_experimental:
-        try:
-            runtime.linear(inputs, quantized, kernel_mode=6)
-            int16_fixed = runtime.last_profile()
-        except RuntimeError as exc:
-            int16_fixed = {"error": str(exc)}
         try:
             runtime.linear(inputs, quantized, kernel_mode=5)
             int8_block_fixed = runtime.last_profile()
@@ -228,12 +222,8 @@ def benchmark_pim_breakdown(
         "unpack_only_runtime_total_seconds": unpack_only["runtime_total_seconds"],
         "dequant_only_runtime_total_seconds": dequant_only["runtime_total_seconds"],
         "int8_fixed_runtime_total_seconds": int8_fixed["runtime_total_seconds"],
-        "int16_fixed_runtime_total_seconds": (
-            int16_fixed["runtime_total_seconds"]
-            if int16_fixed is not None and "runtime_total_seconds" in int16_fixed
-            else None
-        ),
-        "int16_fixed_error": None if int16_fixed is None else int16_fixed.get("error"),
+        "int16_fixed_runtime_total_seconds": None,
+        "int16_fixed_error": None,
         "int8_block_fixed_runtime_total_seconds": (
             int8_block_fixed["runtime_total_seconds"]
             if int8_block_fixed is not None and "runtime_total_seconds" in int8_block_fixed
@@ -333,19 +323,6 @@ def main() -> None:
         profile=args.profile,
         kernel_mode=4,
     )
-    pim_int16_fixed_result = (
-        maybe_benchmark_pim_mode(
-            inputs,
-            quantized,
-            repeats=args.repeats,
-            warmup=args.warmup,
-            rank_count=args.rank_count,
-            profile=args.profile,
-            kernel_mode=6,
-        )
-        if args.include_experimental_modes
-        else None
-    )
     pim_int8_block_fixed_result = (
         maybe_benchmark_pim_mode(
             inputs,
@@ -369,9 +346,6 @@ def main() -> None:
 
     diff = (cpu_result["output"] - pim_result["output"]).abs()
     diff_int8_fixed = (cpu_result["output"] - pim_int8_fixed_result["output"]).abs()
-    diff_int16_fixed = None
-    if pim_int16_fixed_result is not None and "output" in pim_int16_fixed_result:
-        diff_int16_fixed = (cpu_result["output"] - pim_int16_fixed_result["output"]).abs()
     diff_int8_block_fixed = None
     if pim_int8_block_fixed_result is not None and "output" in pim_int8_block_fixed_result:
         diff_int8_block_fixed = (cpu_result["output"] - pim_int8_block_fixed_result["output"]).abs()
@@ -390,11 +364,7 @@ def main() -> None:
         "cpu_dense": {k: v for k, v in cpu_dense_result.items() if k != "output"},
         "pim": {k: v for k, v in pim_result.items() if k != "output"},
         "pim_int8_fixed": {k: v for k, v in pim_int8_fixed_result.items() if k != "output"},
-        "pim_int16_fixed": (
-            {k: v for k, v in pim_int16_fixed_result.items() if k != "output"}
-            if pim_int16_fixed_result is not None
-            else None
-        ),
+        "pim_int16_fixed": None,
         "pim_int8_block_fixed": (
             {k: v for k, v in pim_int8_block_fixed_result.items() if k != "output"}
             if pim_int8_block_fixed_result is not None
@@ -405,12 +375,8 @@ def main() -> None:
         "mean_abs_error": float(diff.mean().item()),
         "max_abs_error_pim_int8_fixed": float(diff_int8_fixed.max().item()),
         "mean_abs_error_pim_int8_fixed": float(diff_int8_fixed.mean().item()),
-        "max_abs_error_pim_int16_fixed": (
-            float(diff_int16_fixed.max().item()) if diff_int16_fixed is not None else None
-        ),
-        "mean_abs_error_pim_int16_fixed": (
-            float(diff_int16_fixed.mean().item()) if diff_int16_fixed is not None else None
-        ),
+        "max_abs_error_pim_int16_fixed": None,
+        "mean_abs_error_pim_int16_fixed": None,
         "max_abs_error_pim_int8_block_fixed": (
             float(diff_int8_block_fixed.max().item()) if diff_int8_block_fixed is not None else None
         ),
@@ -434,20 +400,8 @@ def main() -> None:
             if pim_int8_fixed_result["seconds_avg"] > 0
             else None
         ),
-        "speedup_pim_int16_fixed_vs_cpu_grouped": (
-            cpu_result["seconds_avg"] / pim_int16_fixed_result["seconds_avg"]
-            if pim_int16_fixed_result is not None
-            and "seconds_avg" in pim_int16_fixed_result
-            and pim_int16_fixed_result["seconds_avg"] > 0
-            else None
-        ),
-        "speedup_pim_int16_fixed_vs_cpu_dense": (
-            cpu_dense_result["seconds_avg"] / pim_int16_fixed_result["seconds_avg"]
-            if pim_int16_fixed_result is not None
-            and "seconds_avg" in pim_int16_fixed_result
-            and pim_int16_fixed_result["seconds_avg"] > 0
-            else None
-        ),
+        "speedup_pim_int16_fixed_vs_cpu_grouped": None,
+        "speedup_pim_int16_fixed_vs_cpu_dense": None,
         "speedup_pim_int8_block_fixed_vs_cpu_grouped": (
             cpu_result["seconds_avg"] / pim_int8_block_fixed_result["seconds_avg"]
             if pim_int8_block_fixed_result is not None
@@ -467,13 +421,7 @@ def main() -> None:
             if pim_int8_fixed_result["seconds_avg"] > 0
             else None
         ),
-        "speedup_pim_int16_fixed_vs_pim_full": (
-            pim_result["seconds_avg"] / pim_int16_fixed_result["seconds_avg"]
-            if pim_int16_fixed_result is not None
-            and "seconds_avg" in pim_int16_fixed_result
-            and pim_int16_fixed_result["seconds_avg"] > 0
-            else None
-        ),
+        "speedup_pim_int16_fixed_vs_pim_full": None,
         "speedup_pim_int8_block_fixed_vs_pim_full": (
             pim_result["seconds_avg"] / pim_int8_block_fixed_result["seconds_avg"]
             if pim_int8_block_fixed_result is not None
