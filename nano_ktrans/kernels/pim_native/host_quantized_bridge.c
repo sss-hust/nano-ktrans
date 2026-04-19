@@ -22,8 +22,20 @@
 #define MAX_INPUT_FLOATS 65536
 #endif
 
+#ifndef MAX_INPUT_INT8
+#define MAX_INPUT_INT8 MAX_INPUT_FLOATS
+#endif
+
 #ifndef MAX_OUTPUT_FLOATS
 #define MAX_OUTPUT_FLOATS 65536
+#endif
+
+#ifndef MAX_OUTPUT_INT32
+#define MAX_OUTPUT_INT32 MAX_OUTPUT_FLOATS
+#endif
+
+#ifndef MAX_LUT_INT16
+#define MAX_LUT_INT16 (MAX_SCALE_FLOATS * (1 << BITS_PER_WEIGHT))
 #endif
 
 #ifndef BITS_PER_WEIGHT
@@ -51,9 +63,13 @@ static uint32_t g_output_dim = 0;
 static uint32_t g_group_size = 0;
 static uint32_t g_num_groups = 0;
 static uint32_t g_kernel_mode = 0;
+static float g_input_scale = 1.0f;
 static size_t g_rows_per_dpu = 0;
 static size_t g_shard_output_dim = 0;
 static uint32_t *g_valid_rows = NULL;
+static int16_t *g_lut_i16_shards = NULL;
+static int8_t *g_input_i8_shards = NULL;
+static int32_t *g_output_i32_shards = NULL;
 
 static void
 set_error(char *error_buffer, size_t error_buffer_len, const char *fmt, ...)
@@ -171,6 +187,7 @@ pim_quantized_load_weights(
     int rc = -1;
     uint32_t *qweight_shards = NULL;
     float *scale_shards = NULL;
+    int16_t *lut_i16_shards = NULL;
     struct timespec total_start;
     struct timespec total_end;
     struct timespec qweight_start;
@@ -182,6 +199,7 @@ pim_quantized_load_weights(
     const uint32_t num_groups = input_dim / group_size;
     size_t shard_qweight_words = 0;
     size_t shard_scale_floats = 0;
+    size_t shard_lut_i16 = 0;
 
     if (!g_initialized) {
         set_error(error_buffer, error_buffer_len, "pim_quantized_init must be called first");
@@ -205,6 +223,7 @@ pim_quantized_load_weights(
     g_shard_output_dim = g_rows_per_dpu + (g_rows_per_dpu % 2u);
     shard_qweight_words = g_shard_output_dim * (size_t)words_per_row;
     shard_scale_floats = g_shard_output_dim * (size_t)num_groups;
+    shard_lut_i16 = shard_scale_floats * (size_t)(1u << BITS_PER_WEIGHT);
 
     if (shard_qweight_words > MAX_QWEIGHT_WORDS) {
         set_error(error_buffer, error_buffer_len, "qweight shard too large");
@@ -214,12 +233,19 @@ pim_quantized_load_weights(
         set_error(error_buffer, error_buffer_len, "scale shard too large");
         return -1;
     }
+    if (shard_lut_i16 > MAX_LUT_INT16) {
+        set_error(error_buffer, error_buffer_len, "lut shard too large");
+        return -1;
+    }
 
     free(g_valid_rows);
+    free(g_lut_i16_shards);
+    g_lut_i16_shards = NULL;
     g_valid_rows = calloc(g_nr_dpus, sizeof(*g_valid_rows));
     qweight_shards = calloc((size_t)g_nr_dpus * shard_qweight_words, sizeof(*qweight_shards));
     scale_shards = calloc((size_t)g_nr_dpus * shard_scale_floats, sizeof(*scale_shards));
-    if (g_valid_rows == NULL || qweight_shards == NULL || scale_shards == NULL) {
+    lut_i16_shards = calloc((size_t)g_nr_dpus * shard_lut_i16, sizeof(*lut_i16_shards));
+    if (g_valid_rows == NULL || qweight_shards == NULL || scale_shards == NULL || lut_i16_shards == NULL) {
         set_error(error_buffer, error_buffer_len, "failed to allocate weight shard buffers");
         goto cleanup;
     }
@@ -234,6 +260,7 @@ pim_quantized_load_weights(
         const size_t local_rows = rows_remaining < g_rows_per_dpu ? rows_remaining : g_rows_per_dpu;
         uint32_t *qweight_ptr = qweight_shards + ((size_t)dpu_index * shard_qweight_words);
         float *scale_ptr = scale_shards + ((size_t)dpu_index * shard_scale_floats);
+        int16_t *lut_ptr = lut_i16_shards + ((size_t)dpu_index * shard_lut_i16);
 
         g_valid_rows[dpu_index] = (uint32_t)local_rows;
         for (size_t local_row = 0; local_row < local_rows; ++local_row) {
@@ -245,6 +272,22 @@ pim_quantized_load_weights(
                 scale_ptr + (local_row * (size_t)num_groups),
                 scale_src + (((row_start + local_row) * (size_t)num_groups)),
                 (size_t)num_groups * sizeof(float));
+            for (size_t group_idx = 0; group_idx < (size_t)num_groups; ++group_idx) {
+                const float scale =
+                    scale_src[((row_start + local_row) * (size_t)num_groups) + group_idx];
+                int16_t *group_lut = lut_ptr
+                    + (((local_row * (size_t)num_groups) + group_idx) * (1u << BITS_PER_WEIGHT));
+                for (uint32_t q = 0; q < (1u << BITS_PER_WEIGHT); ++q) {
+                    const int32_t centered = (int32_t)q - (int32_t)(1u << (BITS_PER_WEIGHT - 1));
+                    int32_t value = (int32_t)(centered * scale * 256.0f);
+                    if (value > INT16_MAX) {
+                        value = INT16_MAX;
+                    } else if (value < INT16_MIN) {
+                        value = INT16_MIN;
+                    }
+                    group_lut[q] = (int16_t)value;
+                }
+            }
         }
     }
 
@@ -273,6 +316,23 @@ pim_quantized_load_weights(
             dpu_broadcast_to(g_set, "kernel_mode", 0, &g_kernel_mode, sizeof(g_kernel_mode), DPU_XFER_DEFAULT),
             error_buffer, error_buffer_len, "dpu_broadcast_to(kernel_mode)") != 0) {
         goto cleanup;
+    }
+
+    if (g_kernel_mode == 4) {
+        dpu_index = 0;
+        DPU_FOREACH(g_set, dpu, dpu_index)
+        {
+            if (check_dpu_error(
+                    dpu_prepare_xfer(dpu, lut_i16_shards + ((size_t)dpu_index * shard_lut_i16)),
+                    error_buffer, error_buffer_len, "dpu_prepare_xfer(lut_mram)") != 0) {
+                goto cleanup;
+            }
+        }
+        if (check_dpu_error(
+                dpu_push_xfer(g_set, DPU_XFER_TO_DPU, "lut_mram", 0, shard_lut_i16 * sizeof(int16_t), DPU_XFER_DEFAULT),
+                error_buffer, error_buffer_len, "dpu_push_xfer(lut_mram)") != 0) {
+            goto cleanup;
+        }
     }
 
     dpu_index = 0;
@@ -315,8 +375,11 @@ pim_quantized_load_weights(
     g_last_load_scale_transfer_seconds = timespec_diff_seconds(&scale_start, &scale_end);
     g_last_load_total_seconds = timespec_diff_seconds(&total_start, &total_end);
     rc = 0;
+    g_lut_i16_shards = lut_i16_shards;
+    lut_i16_shards = NULL;
 
 cleanup:
+    free(lut_i16_shards);
     free(scale_shards);
     free(qweight_shards);
     return rc;
@@ -336,6 +399,8 @@ pim_quantized_run(
     uint64_t max_cycles = 0;
     uint64_t *kernel_cycles = NULL;
     float *output_shards = NULL;
+    int8_t *input_i8_shards = NULL;
+    int32_t *output_i32_shards = NULL;
     struct timespec total_start;
     struct timespec total_end;
     struct timespec input_start;
@@ -346,6 +411,8 @@ pim_quantized_run(
     struct timespec output_end;
     const size_t input_floats = (size_t)batch_size * (size_t)g_input_dim;
     const size_t shard_output_floats = (size_t)batch_size * g_shard_output_dim;
+    const size_t input_i8_count = input_floats;
+    const size_t shard_output_i32 = shard_output_floats;
 
     if (!g_initialized || !g_weights_loaded) {
         set_error(error_buffer, error_buffer_len, "weights must be loaded before pim_quantized_run");
@@ -359,10 +426,21 @@ pim_quantized_run(
         set_error(error_buffer, error_buffer_len, "input/output shape too large");
         return -1;
     }
+    if (g_kernel_mode == 4 && (input_i8_count > MAX_INPUT_INT8 || shard_output_i32 > MAX_OUTPUT_INT32)) {
+        set_error(error_buffer, error_buffer_len, "int8/int32 input/output shape too large");
+        return -1;
+    }
 
     kernel_cycles = calloc(g_nr_dpus, sizeof(*kernel_cycles));
     output_shards = calloc((size_t)g_nr_dpus * shard_output_floats, sizeof(*output_shards));
-    if (kernel_cycles == NULL || output_shards == NULL) {
+    if (g_kernel_mode == 4) {
+        input_i8_shards = calloc(input_i8_count, sizeof(*input_i8_shards));
+        output_i32_shards = calloc((size_t)g_nr_dpus * shard_output_i32, sizeof(*output_i32_shards));
+    }
+    if (
+        kernel_cycles == NULL || output_shards == NULL
+        || (g_kernel_mode == 4 && (input_i8_shards == NULL || output_i32_shards == NULL))
+    ) {
         set_error(error_buffer, error_buffer_len, "failed to allocate run buffers");
         goto cleanup;
     }
@@ -375,9 +453,34 @@ pim_quantized_run(
         goto cleanup;
     }
     clock_gettime(CLOCK_MONOTONIC, &input_start);
-    if (check_dpu_error(
-            dpu_broadcast_to(g_set, "inputs_mram", 0, inputs, input_floats * sizeof(float), DPU_XFER_DEFAULT),
-            error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_mram)") != 0) {
+    if (g_kernel_mode == 4) {
+        const float *inputs_f32 = (const float *)inputs;
+        float max_abs = 0.0f;
+        for (size_t idx = 0; idx < input_floats; ++idx) {
+            const float value = inputs_f32[idx];
+            const float abs_value = value >= 0.0f ? value : -value;
+            if (abs_value > max_abs) {
+                max_abs = abs_value;
+            }
+        }
+        g_input_scale = max_abs > 0.0f ? (max_abs / 127.0f) : 1.0f;
+        for (size_t idx = 0; idx < input_i8_count; ++idx) {
+            float scaled = inputs_f32[idx] / g_input_scale;
+            if (scaled > 127.0f) {
+                scaled = 127.0f;
+            } else if (scaled < -127.0f) {
+                scaled = -127.0f;
+            }
+            input_i8_shards[idx] = (int8_t)(scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
+        }
+        if (check_dpu_error(
+                dpu_broadcast_to(g_set, "inputs_i8_mram", 0, input_i8_shards, input_i8_count * sizeof(int8_t), DPU_XFER_DEFAULT),
+                error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_i8_mram)") != 0) {
+            goto cleanup;
+        }
+    } else if (check_dpu_error(
+                   dpu_broadcast_to(g_set, "inputs_mram", 0, inputs, input_floats * sizeof(float), DPU_XFER_DEFAULT),
+                   error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_mram)") != 0) {
         goto cleanup;
     }
     clock_gettime(CLOCK_MONOTONIC, &input_end);
@@ -389,18 +492,34 @@ pim_quantized_run(
 
     dpu_index = 0;
     clock_gettime(CLOCK_MONOTONIC, &output_start);
-    DPU_FOREACH(g_set, dpu, dpu_index)
-    {
+    if (g_kernel_mode == 4) {
+        DPU_FOREACH(g_set, dpu, dpu_index)
+        {
+            if (check_dpu_error(
+                    dpu_prepare_xfer(dpu, output_i32_shards + ((size_t)dpu_index * shard_output_i32)),
+                    error_buffer, error_buffer_len, "dpu_prepare_xfer(outputs_i32_mram)") != 0) {
+                goto cleanup;
+            }
+        }
         if (check_dpu_error(
-                dpu_prepare_xfer(dpu, output_shards + ((size_t)dpu_index * shard_output_floats)),
-                error_buffer, error_buffer_len, "dpu_prepare_xfer(outputs_mram)") != 0) {
+                dpu_push_xfer(g_set, DPU_XFER_FROM_DPU, "outputs_i32_mram", 0, shard_output_i32 * sizeof(int32_t), DPU_XFER_DEFAULT),
+                error_buffer, error_buffer_len, "dpu_push_xfer(outputs_i32_mram)") != 0) {
             goto cleanup;
         }
-    }
-    if (check_dpu_error(
-            dpu_push_xfer(g_set, DPU_XFER_FROM_DPU, "outputs_mram", 0, shard_output_floats * sizeof(float), DPU_XFER_DEFAULT),
-            error_buffer, error_buffer_len, "dpu_push_xfer(outputs_mram)") != 0) {
-        goto cleanup;
+    } else {
+        DPU_FOREACH(g_set, dpu, dpu_index)
+        {
+            if (check_dpu_error(
+                    dpu_prepare_xfer(dpu, output_shards + ((size_t)dpu_index * shard_output_floats)),
+                    error_buffer, error_buffer_len, "dpu_prepare_xfer(outputs_mram)") != 0) {
+                goto cleanup;
+            }
+        }
+        if (check_dpu_error(
+                dpu_push_xfer(g_set, DPU_XFER_FROM_DPU, "outputs_mram", 0, shard_output_floats * sizeof(float), DPU_XFER_DEFAULT),
+                error_buffer, error_buffer_len, "dpu_push_xfer(outputs_mram)") != 0) {
+            goto cleanup;
+        }
     }
 
     dpu_index = 0;
@@ -423,15 +542,25 @@ pim_quantized_run(
     for (dpu_index = 0; dpu_index < g_nr_dpus; ++dpu_index) {
         const uint32_t local_rows = g_valid_rows[dpu_index];
         const size_t row_start = (size_t)dpu_index * g_rows_per_dpu;
-        const float *shard_ptr = output_shards + ((size_t)dpu_index * shard_output_floats);
         if (kernel_cycles[dpu_index] > max_cycles) {
             max_cycles = kernel_cycles[dpu_index];
         }
         for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-            memcpy(
-                output_dst + (((size_t)batch_idx * (size_t)g_output_dim) + row_start),
-                shard_ptr + ((size_t)batch_idx * g_shard_output_dim),
-                (size_t)local_rows * sizeof(float));
+            if (g_kernel_mode == 4) {
+                const int32_t *shard_ptr_i32 =
+                    output_i32_shards + ((size_t)dpu_index * shard_output_i32) + ((size_t)batch_idx * g_shard_output_dim);
+                for (uint32_t local_row = 0; local_row < local_rows; ++local_row) {
+                    output_dst[((size_t)batch_idx * (size_t)g_output_dim) + row_start + local_row] =
+                        ((float)shard_ptr_i32[local_row]) * (g_input_scale / 256.0f);
+                }
+            } else {
+                const float *shard_ptr =
+                    output_shards + ((size_t)dpu_index * shard_output_floats) + ((size_t)batch_idx * g_shard_output_dim);
+                memcpy(
+                    output_dst + (((size_t)batch_idx * (size_t)g_output_dim) + row_start),
+                    shard_ptr,
+                    (size_t)local_rows * sizeof(float));
+            }
         }
     }
 
@@ -444,6 +573,8 @@ pim_quantized_run(
     rc = 0;
 
 cleanup:
+    free(output_i32_shards);
+    free(input_i8_shards);
     free(output_shards);
     free(kernel_cycles);
     return rc;
@@ -457,6 +588,8 @@ pim_quantized_shutdown(void)
     }
 
     free(g_valid_rows);
+    free(g_lut_i16_shards);
+    g_lut_i16_shards = NULL;
     g_valid_rows = NULL;
     dpu_free(g_set);
     memset(&g_set, 0, sizeof(g_set));

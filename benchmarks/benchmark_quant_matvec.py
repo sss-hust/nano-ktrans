@@ -116,20 +116,90 @@ def benchmark_pim(inputs: torch.Tensor, quantized, repeats: int, warmup: int, ra
     }
 
 
+def benchmark_pim_mode(
+    inputs: torch.Tensor,
+    quantized,
+    repeats: int,
+    warmup: int,
+    rank_count: int,
+    profile: str,
+    *,
+    kernel_mode: int,
+) -> dict:
+    runtime = PIMQuantizedRuntime.get_shared(rank_count=rank_count, profile=profile)
+    for _ in range(warmup):
+        runtime.linear(inputs, quantized, kernel_mode=kernel_mode)
+
+    outputs = None
+    durations = []
+    cycles = []
+    input_transfer = []
+    launch = []
+    output_transfer = []
+    runtime_total = []
+    for _ in range(repeats):
+        start = time.perf_counter()
+        outputs = runtime.linear(inputs, quantized, kernel_mode=kernel_mode)
+        durations.append(time.perf_counter() - start)
+        cycles.append(runtime.last_cycles())
+        phase_profile = runtime.last_profile()
+        input_transfer.append(phase_profile["input_transfer_seconds"])
+        launch.append(phase_profile["launch_seconds"])
+        output_transfer.append(phase_profile["output_transfer_seconds"])
+        runtime_total.append(phase_profile["runtime_total_seconds"])
+
+    assert outputs is not None
+    return {
+        "output": outputs,
+        "seconds_avg": sum(durations) / len(durations),
+        "seconds_min": min(durations),
+        "seconds_max": max(durations),
+        "kernel_cycles_avg": sum(cycles) / len(cycles),
+        "kernel_cycles_min": min(cycles),
+        "kernel_cycles_max": max(cycles),
+        "runtime_dpu_count": runtime.num_dpus(),
+        "input_transfer_seconds_avg": sum(input_transfer) / len(input_transfer),
+        "launch_seconds_avg": sum(launch) / len(launch),
+        "output_transfer_seconds_avg": sum(output_transfer) / len(output_transfer),
+        "runtime_total_seconds_avg": sum(runtime_total) / len(runtime_total),
+    }
+
+
 def benchmark_pim_breakdown(inputs: torch.Tensor, quantized, rank_count: int, profile: str) -> dict:
     runtime = PIMQuantizedRuntime.get_shared(rank_count=rank_count, profile=profile)
     runtime.linear(inputs, quantized, kernel_mode=1)
     transfer_only = runtime.last_profile()
+    runtime.linear(inputs, quantized, kernel_mode=2)
+    unpack_only = runtime.last_profile()
+    runtime.linear(inputs, quantized, kernel_mode=3)
+    dequant_only = runtime.last_profile()
+    runtime.linear(inputs, quantized, kernel_mode=4)
+    int8_fixed = runtime.last_profile()
     runtime.linear(inputs, quantized, kernel_mode=0)
     full = runtime.last_profile()
     return {
         "transfer_only_runtime_total_seconds": transfer_only["runtime_total_seconds"],
         "transfer_only_input_transfer_seconds": transfer_only["input_transfer_seconds"],
         "transfer_only_output_transfer_seconds": transfer_only["output_transfer_seconds"],
+        "unpack_only_runtime_total_seconds": unpack_only["runtime_total_seconds"],
+        "dequant_only_runtime_total_seconds": dequant_only["runtime_total_seconds"],
+        "int8_fixed_runtime_total_seconds": int8_fixed["runtime_total_seconds"],
         "full_runtime_total_seconds": full["runtime_total_seconds"],
         "estimated_compute_seconds": max(
             0.0,
             full["runtime_total_seconds"] - transfer_only["runtime_total_seconds"],
+        ),
+        "estimated_unpack_seconds": max(
+            0.0,
+            unpack_only["runtime_total_seconds"] - transfer_only["runtime_total_seconds"],
+        ),
+        "estimated_dequant_seconds": max(
+            0.0,
+            dequant_only["runtime_total_seconds"] - unpack_only["runtime_total_seconds"],
+        ),
+        "estimated_mac_seconds": max(
+            0.0,
+            full["runtime_total_seconds"] - dequant_only["runtime_total_seconds"],
         ),
     }
 
@@ -197,6 +267,15 @@ def main() -> None:
         rank_count=args.rank_count,
         profile=args.profile,
     )
+    pim_int8_fixed_result = benchmark_pim_mode(
+        inputs,
+        quantized,
+        repeats=args.repeats,
+        warmup=args.warmup,
+        rank_count=args.rank_count,
+        profile=args.profile,
+        kernel_mode=4,
+    )
     pim_breakdown = benchmark_pim_breakdown(
         inputs,
         quantized,
@@ -205,6 +284,7 @@ def main() -> None:
     )
 
     diff = (cpu_result["output"] - pim_result["output"]).abs()
+    diff_int8_fixed = (cpu_result["output"] - pim_int8_fixed_result["output"]).abs()
     dense_vs_grouped = (cpu_dense_result["output"] - cpu_result["output"]).abs()
     result = {
         "source": source,
@@ -219,15 +299,33 @@ def main() -> None:
         "cpu_grouped": {k: v for k, v in cpu_result.items() if k != "output"},
         "cpu_dense": {k: v for k, v in cpu_dense_result.items() if k != "output"},
         "pim": {k: v for k, v in pim_result.items() if k != "output"},
+        "pim_int8_fixed": {k: v for k, v in pim_int8_fixed_result.items() if k != "output"},
         "pim_breakdown": pim_breakdown,
         "max_abs_error": float(diff.max().item()),
         "mean_abs_error": float(diff.mean().item()),
+        "max_abs_error_pim_int8_fixed": float(diff_int8_fixed.max().item()),
+        "mean_abs_error_pim_int8_fixed": float(diff_int8_fixed.mean().item()),
         "max_abs_error_cpu_dense_vs_grouped": float(dense_vs_grouped.max().item()),
         "speedup_pim_vs_cpu_grouped": (
             cpu_result["seconds_avg"] / pim_result["seconds_avg"] if pim_result["seconds_avg"] > 0 else None
         ),
         "speedup_pim_vs_cpu_dense": (
             cpu_dense_result["seconds_avg"] / pim_result["seconds_avg"] if pim_result["seconds_avg"] > 0 else None
+        ),
+        "speedup_pim_int8_fixed_vs_cpu_grouped": (
+            cpu_result["seconds_avg"] / pim_int8_fixed_result["seconds_avg"]
+            if pim_int8_fixed_result["seconds_avg"] > 0
+            else None
+        ),
+        "speedup_pim_int8_fixed_vs_cpu_dense": (
+            cpu_dense_result["seconds_avg"] / pim_int8_fixed_result["seconds_avg"]
+            if pim_int8_fixed_result["seconds_avg"] > 0
+            else None
+        ),
+        "speedup_pim_int8_fixed_vs_pim_full": (
+            pim_result["seconds_avg"] / pim_int8_fixed_result["seconds_avg"]
+            if pim_int8_fixed_result["seconds_avg"] > 0
+            else None
         ),
     }
 
