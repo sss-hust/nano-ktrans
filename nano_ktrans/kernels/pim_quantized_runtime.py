@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import ctypes
+import fcntl
 import os
 import subprocess
 import threading
@@ -95,7 +96,7 @@ class PIMQuantizedRuntime:
         )
         if rc != 0:
             raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
-        self._loaded_signature: tuple[int, int, int] | None = None
+        self._loaded_signature: tuple[int, int, int, int, int] | None = None
 
     @classmethod
     def get_shared(cls, *, profile: str = "", rank_count: int = 1) -> "PIMQuantizedRuntime":
@@ -112,23 +113,27 @@ class PIMQuantizedRuntime:
     def _build_if_needed(cls, native_dir: Path, build_dir: Path) -> None:
         kernel_path = build_dir / "pim_quantized_kernel"
         lib_path = build_dir / "libpim_quantized_bridge.so"
+        lock_path = build_dir / ".build.lock"
         sources = [
             native_dir / "build.sh",
             native_dir / "dpu_quantized_kernel.c",
             native_dir / "host_quantized_bridge.c",
         ]
-        if kernel_path.exists() and lib_path.exists():
-            newest_source = max(path.stat().st_mtime for path in sources)
-            oldest_artifact = min(kernel_path.stat().st_mtime, lib_path.stat().st_mtime)
-            if oldest_artifact >= newest_source:
-                return
+        build_dir.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if kernel_path.exists() and lib_path.exists():
+                newest_source = max(path.stat().st_mtime for path in sources)
+                oldest_artifact = min(kernel_path.stat().st_mtime, lib_path.stat().st_mtime)
+                if oldest_artifact >= newest_source:
+                    return
 
-        subprocess.run(
-            ["bash", str(native_dir / "build.sh")],
-            check=True,
-            cwd=str(native_dir),
-            env=os.environ.copy(),
-        )
+            subprocess.run(
+                ["bash", str(native_dir / "build.sh")],
+                check=True,
+                cwd=str(native_dir),
+                env=os.environ.copy(),
+            )
 
     @classmethod
     def supports_shape(cls, batch_size: int, input_dim: int, output_dim: int, group_size: int) -> bool:
@@ -186,7 +191,7 @@ class PIMQuantizedRuntime:
             padded_scales[:output_dim, :] = scales_f32
             scales_f32 = padded_scales
 
-        signature = (padded_input_dim, padded_output_dim, quantized.group_size, kernel_mode)
+        signature = (padded_input_dim, padded_output_dim, quantized.group_size, kernel_mode, id(quantized))
         if self._loaded_signature != signature:
             error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
             rc = self._lib.pim_quantized_load_weights(

@@ -44,6 +44,7 @@ updated: 2026-04-19 02:10
 - [x] 已新增一个最小整数化原型 `kernel_mode=4`：host 端按 batch 将输入量化为 int8、按组生成 int16 dequant LUT，DPU 侧执行 `int8 x int16 -> int32` accumulate，再在 host 侧按 batch 回标定输出
 - [x] `kernel_mode=4` 现已恢复为默认验证的稳定整数化主线；真实 Qwen3 GPTQ `batch=1` 下，`gate` 已达到约 `1.30x` CPU grouped，`down` 已达到约 `2.54x` CPU grouped
 - [x] `kernel_mode=4` 的真实 rank sweet spot 已经摸清：`gate batch=1` 在 `8~32 ranks` 都能超过 CPU，`down batch=1` 在 `1~8 ranks` 都能超过 CPU，其中 `4 ranks` 最优；但 `batch=8` 时两类 shape 都会退到 `0.56x~0.63x` CPU grouped，优势无法保持
+- [x] `kernel_mode=4` 已补齐 DPU batch-tile 数据流和权重缓存修正：quantized runtime 不再错误复用“同 shape 不同权重”的旧 resident weights，real-DPU 回归新增 `batch=4` 覆盖；当前 `down batch=4` 已接近 CPU grouped 持平，但 `gate batch=4` 仍未翻盘
 - [ ] 继续验证并收敛整数化 quantized kernel，重点比较 `soft-float full` 与 `int8 fixed-point` 的速度/误差权衡，并观察 `batch>1` 时优势是否能保持
 - [ ] 评估更激进的 block-aware runtime LUT 路径；当前 `kernel_mode=5` 因 MRAM 容量限制暂不适用于真实 Qwen3 gate/down 形状
 - [x] 将 `pim_shadow` 接入主推理链路并记录 PIM 可见性与路由统计
