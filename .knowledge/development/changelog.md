@@ -464,3 +464,8 @@ tags: [changelog]
 
 - 在 quantized DPU kernel 中引入 block-level dequant LUT，减少 inner-loop 重复浮点反量化。
 - 真实 GPTQ `gate/down` operator-only benchmark 显示该优化显著降低了 DPU launch/compute 时间，但 PIM 仍未超过 CPU grouped baseline。
+
+<!-- updated: 2026-04-19 12:40 -->
+
+- `kernel_mode=4` 现已补齐 `FIXED_BATCH_TILE` 编译期开关，允许在真实 DPU 上对 int8 fixed-point 路径做 batch-tile sweep，而无需手改 kernel 源码。
+- 在真实 `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 上完成 `FIXED_BATCH_TILE=1/2/4/8` sweep：`down batch=4` 因 shape-gated fallback 基本维持在接近 CPU grouped 的水平，但 `gate batch=4/8` 没有出现稳定优于 CPU grouped 的 tile 配置；tile 主要改变常数项，尚不足以解决大输入维度下 `batch>1` 的核心瓶颈。

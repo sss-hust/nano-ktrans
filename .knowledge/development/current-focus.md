@@ -28,6 +28,7 @@ updated: 2026-04-17 05:42
 updated: 2026-04-17 05:58
 updated: 2026-04-19 00:50
 updated: 2026-04-19 02:10
+updated: 2026-04-19 12:40
 ---
 
 # 🔥 当前工作焦点
@@ -45,6 +46,7 @@ updated: 2026-04-19 02:10
 - [x] `kernel_mode=4` 现已恢复为默认验证的稳定整数化主线；真实 Qwen3 GPTQ `batch=1` 下，`gate` 已达到约 `1.30x` CPU grouped，`down` 已达到约 `2.54x` CPU grouped
 - [x] `kernel_mode=4` 的真实 rank sweet spot 已经摸清：`gate batch=1` 在 `8~32 ranks` 都能超过 CPU，`down batch=1` 在 `1~8 ranks` 都能超过 CPU，其中 `4 ranks` 最优；但 `batch=8` 时两类 shape 都会退到 `0.56x~0.63x` CPU grouped，优势无法保持
 - [x] `kernel_mode=4` 已补齐 DPU batch-tile 数据流和权重缓存修正：quantized runtime 不再错误复用“同 shape 不同权重”的旧 resident weights，real-DPU 回归新增 `batch=4` 覆盖；当前 `down batch=4` 已接近 CPU grouped 持平，但 `gate batch=4` 仍未翻盘
+- [x] 已对 `kernel_mode=4` 做真实 `FIXED_BATCH_TILE=1/2/4/8` sweep：`down batch=4` 因 shape-gated fallback 基本不受影响，而 `gate batch=4/8` 没有出现稳定的 tile sweet spot；当前 `tile=4/8` 最多只带来小幅波动，不足以把 `gate batch>1` 稳定拉回 CPU grouped 之上
 - [ ] 继续验证并收敛整数化 quantized kernel，重点比较 `soft-float full` 与 `int8 fixed-point` 的速度/误差权衡，并观察 `batch>1` 时优势是否能保持
 - [ ] 评估更激进的 block-aware runtime LUT 路径；当前 `kernel_mode=5` 因 MRAM 容量限制暂不适用于真实 Qwen3 gate/down 形状
 - [x] 将 `pim_shadow` 接入主推理链路并记录 PIM 可见性与路由统计
