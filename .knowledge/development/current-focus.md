@@ -41,8 +41,9 @@ updated: 2026-04-19 02:10
 - [x] 真实 `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 权重的 operator-only `gate/up/down` projection 已在真机跑通，并确认当前 `W4A32 + soft-float dequant` 路径显著慢于 CPU grouped baseline
 - [x] quantized PIM operator 已补齐 `transfer_only / unpack_only / dequant_only / full` 分项 profiling，确认主瓶颈在 DPU 侧 unpack/dequant 计算本体，不在 host 传输
 - [x] quantized DPU kernel 已接入 block-level dequant LUT，真实 GPTQ case 下 PIM operator 时间明显下降，但仍未超过 CPU
-- [x] 已新增一个最小整数化原型 `kernel_mode=4`：host 端将输入量化为 int8、按组生成 int16 dequant LUT，DPU 侧执行 `int8 x int16 -> int32` accumulate，再在 host 侧回标定输出
-- [ ] 继续验证并收敛整数化 quantized kernel，重点比较 `soft-float full` 与 `int8 fixed-point` 的速度/误差权衡
+- [x] 已新增一个最小整数化原型 `kernel_mode=4`：host 端按 batch 将输入量化为 int8、按组生成 int16 dequant LUT，DPU 侧执行 `int8 x int16 -> int32` accumulate，再在 host 侧按 batch 回标定输出
+- [x] `kernel_mode=4` 现已恢复为默认验证的稳定整数化主线；真实 Qwen3 GPTQ `batch=1` 下，`gate` 已达到约 `1.30x` CPU grouped，`down` 已达到约 `2.54x` CPU grouped
+- [ ] 继续验证并收敛整数化 quantized kernel，重点比较 `soft-float full` 与 `int8 fixed-point` 的速度/误差权衡，并观察 `batch>1` 时优势是否能保持
 - [ ] 评估更激进的 block-aware runtime LUT 路径；当前 `kernel_mode=5` 因 MRAM 容量限制暂不适用于真实 Qwen3 gate/down 形状
 - [x] 将 `pim_shadow` 接入主推理链路并记录 PIM 可见性与路由统计
 - [x] 为 `PIMMoEBackend` 接入最小真实 DPU 数值执行

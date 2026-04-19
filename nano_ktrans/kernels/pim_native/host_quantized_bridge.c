@@ -26,6 +26,10 @@
 #define MAX_INPUT_INT8 MAX_INPUT_FLOATS
 #endif
 
+#ifndef MAX_INPUT_INT16
+#define MAX_INPUT_INT16 MAX_INPUT_FLOATS
+#endif
+
 #ifndef MAX_OUTPUT_FLOATS
 #define MAX_OUTPUT_FLOATS 65536
 #endif
@@ -72,11 +76,13 @@ static uint32_t g_group_size = 0;
 static uint32_t g_num_groups = 0;
 static uint32_t g_kernel_mode = 0;
 static float g_input_scale = 1.0f;
+static int32_t g_lut_q_scale = 256;
 static size_t g_rows_per_dpu = 0;
 static size_t g_shard_output_dim = 0;
 static uint32_t *g_valid_rows = NULL;
 static int16_t *g_lut_i16_shards = NULL;
 static int8_t *g_input_i8_shards = NULL;
+static int16_t *g_input_i16_shards = NULL;
 static int32_t *g_output_i32_shards = NULL;
 static int16_t *g_runtime_lut_i16_shards = NULL;
 
@@ -288,9 +294,10 @@ pim_quantized_load_weights(
                     scale_src[((row_start + local_row) * (size_t)num_groups) + group_idx];
                 int16_t *group_lut = lut_ptr
                     + (((local_row * (size_t)num_groups) + group_idx) * (1u << BITS_PER_WEIGHT));
+                const int32_t lut_q_scale = (g_kernel_mode == 6) ? 16 : 256;
                 for (uint32_t q = 0; q < (1u << BITS_PER_WEIGHT); ++q) {
                     const int32_t centered = (int32_t)q - (int32_t)(1u << (BITS_PER_WEIGHT - 1));
-                    int32_t value = (int32_t)(centered * scale * 256.0f);
+                    int32_t value = (int32_t)(centered * scale * (float)lut_q_scale);
                     if (value > INT16_MAX) {
                         value = INT16_MAX;
                     } else if (value < INT16_MIN) {
@@ -329,7 +336,7 @@ pim_quantized_load_weights(
         goto cleanup;
     }
 
-    if (g_kernel_mode == 4 || g_kernel_mode == 5) {
+    if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6) {
         dpu_index = 0;
         DPU_FOREACH(g_set, dpu, dpu_index)
         {
@@ -381,6 +388,7 @@ pim_quantized_load_weights(
     clock_gettime(CLOCK_MONOTONIC, &scale_end);
 
     g_weights_loaded = true;
+    g_lut_q_scale = (g_kernel_mode == 6) ? 16 : 256;
     clock_gettime(CLOCK_MONOTONIC, &total_end);
     g_last_load_qweight_transfer_seconds = timespec_diff_seconds(&qweight_start, &qweight_end);
     g_last_load_scale_transfer_seconds = timespec_diff_seconds(&scale_start, &scale_end);
@@ -411,8 +419,10 @@ pim_quantized_run(
     uint64_t *kernel_cycles = NULL;
     float *output_shards = NULL;
     int8_t *input_i8_shards = NULL;
+    int16_t *input_i16_shards = NULL;
     int32_t *output_i32_shards = NULL;
     int16_t *runtime_lut_i16_shards = NULL;
+    float *input_scales = NULL;
     struct timespec total_start;
     struct timespec total_end;
     struct timespec input_start;
@@ -446,6 +456,10 @@ pim_quantized_run(
         set_error(error_buffer, error_buffer_len, "int8/int32 input/output shape too large");
         return -1;
     }
+    if (g_kernel_mode == 6 && (input_i8_count > MAX_INPUT_INT16 || shard_output_i32 > MAX_OUTPUT_INT32)) {
+        set_error(error_buffer, error_buffer_len, "int16/int32 input/output shape too large");
+        return -1;
+    }
     if (g_kernel_mode == 5 && runtime_lut_i16_count > MAX_RUNTIME_LUT_INT16) {
         set_error(error_buffer, error_buffer_len, "runtime int16 lut too large");
         return -1;
@@ -459,11 +473,19 @@ pim_quantized_run(
         if (g_kernel_mode == 5) {
             runtime_lut_i16_shards = calloc(runtime_lut_i16_count, sizeof(*runtime_lut_i16_shards));
         }
+        if (g_kernel_mode == 4) {
+            input_scales = calloc(batch_size, sizeof(*input_scales));
+        }
+    } else if (g_kernel_mode == 6) {
+        input_i16_shards = calloc(input_i8_count, sizeof(*input_i16_shards));
+        output_i32_shards = calloc((size_t)g_nr_dpus * shard_output_i32, sizeof(*output_i32_shards));
     }
     if (
         kernel_cycles == NULL || output_shards == NULL
         || ((g_kernel_mode == 4 || g_kernel_mode == 5)
             && (input_i8_shards == NULL || output_i32_shards == NULL))
+        || (g_kernel_mode == 4 && input_scales == NULL)
+        || (g_kernel_mode == 6 && (input_i16_shards == NULL || output_i32_shards == NULL))
         || (g_kernel_mode == 5 && runtime_lut_i16_shards == NULL)
     ) {
         set_error(error_buffer, error_buffer_len, "failed to allocate run buffers");
@@ -478,7 +500,37 @@ pim_quantized_run(
         goto cleanup;
     }
     clock_gettime(CLOCK_MONOTONIC, &input_start);
-    if (g_kernel_mode == 4 || g_kernel_mode == 5) {
+    if (g_kernel_mode == 4) {
+        const float *inputs_f32 = (const float *)inputs;
+        for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+            const size_t batch_offset = (size_t)batch_idx * (size_t)g_input_dim;
+            float max_abs = 0.0f;
+            for (uint32_t col = 0; col < g_input_dim; ++col) {
+                const float value = inputs_f32[batch_offset + col];
+                const float abs_value = value >= 0.0f ? value : -value;
+                if (abs_value > max_abs) {
+                    max_abs = abs_value;
+                }
+            }
+            input_scales[batch_idx] = max_abs > 0.0f ? (max_abs / 127.0f) : 1.0f;
+            for (uint32_t col = 0; col < g_input_dim; ++col) {
+                float scaled = inputs_f32[batch_offset + col] / input_scales[batch_idx];
+                if (scaled > 127.0f) {
+                    scaled = 127.0f;
+                } else if (scaled < -127.0f) {
+                    scaled = -127.0f;
+                }
+                input_i8_shards[batch_offset + col] =
+                    (int8_t)(scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
+            }
+        }
+        g_input_scale = batch_size > 0 ? input_scales[0] : 1.0f;
+        if (check_dpu_error(
+                dpu_broadcast_to(g_set, "inputs_i8_mram", 0, input_i8_shards, input_i8_count * sizeof(int8_t), DPU_XFER_DEFAULT),
+                error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_i8_mram)") != 0) {
+            goto cleanup;
+        }
+    } else if (g_kernel_mode == 5) {
         const float *inputs_f32 = (const float *)inputs;
         for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
             for (size_t block_idx = 0; block_idx < blocks_per_batch; ++block_idx) {
@@ -529,7 +581,7 @@ pim_quantized_run(
                 error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_i8_mram)") != 0) {
             goto cleanup;
         }
-        if (g_kernel_mode == 5 && check_dpu_error(
+        if (check_dpu_error(
                 dpu_broadcast_to(
                     g_set,
                     "runtime_lut_mram",
@@ -540,6 +592,31 @@ pim_quantized_run(
                 error_buffer,
                 error_buffer_len,
                 "dpu_broadcast_to(runtime_lut_mram)") != 0) {
+            goto cleanup;
+        }
+    } else if (g_kernel_mode == 6) {
+        const float *inputs_f32 = (const float *)inputs;
+        float max_abs = 0.0f;
+        for (size_t idx = 0; idx < input_floats; ++idx) {
+            const float value = inputs_f32[idx];
+            const float abs_value = value >= 0.0f ? value : -value;
+            if (abs_value > max_abs) {
+                max_abs = abs_value;
+            }
+        }
+        g_input_scale = max_abs > 0.0f ? (max_abs / 32767.0f) : 1.0f;
+        for (size_t idx = 0; idx < input_i8_count; ++idx) {
+            float scaled = inputs_f32[idx] / g_input_scale;
+            if (scaled > 32767.0f) {
+                scaled = 32767.0f;
+            } else if (scaled < -32767.0f) {
+                scaled = -32767.0f;
+            }
+            input_i16_shards[idx] = (int16_t)(scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
+        }
+        if (check_dpu_error(
+                dpu_broadcast_to(g_set, "inputs_i16_mram", 0, input_i16_shards, input_i8_count * sizeof(int16_t), DPU_XFER_DEFAULT),
+                error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_i16_mram)") != 0) {
             goto cleanup;
         }
     } else if (check_dpu_error(
@@ -610,16 +687,19 @@ pim_quantized_run(
             max_cycles = kernel_cycles[dpu_index];
         }
         for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-            if (g_kernel_mode == 4 || g_kernel_mode == 5) {
+            if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6) {
                 const int32_t *shard_ptr_i32 =
                     output_i32_shards + ((size_t)dpu_index * shard_output_i32) + ((size_t)batch_idx * g_shard_output_dim);
                 for (uint32_t local_row = 0; local_row < local_rows; ++local_row) {
                     if (g_kernel_mode == 5) {
                         output_dst[((size_t)batch_idx * (size_t)g_output_dim) + row_start + local_row] =
-                            ((float)shard_ptr_i32[local_row]) / 256.0f;
+                            ((float)shard_ptr_i32[local_row]) / (float)g_lut_q_scale;
+                    } else if (g_kernel_mode == 4) {
+                        output_dst[((size_t)batch_idx * (size_t)g_output_dim) + row_start + local_row] =
+                            ((float)shard_ptr_i32[local_row]) * (input_scales[batch_idx] / (float)g_lut_q_scale);
                     } else {
                         output_dst[((size_t)batch_idx * (size_t)g_output_dim) + row_start + local_row] =
-                            ((float)shard_ptr_i32[local_row]) * (g_input_scale / 256.0f);
+                            ((float)shard_ptr_i32[local_row]) * (g_input_scale / (float)g_lut_q_scale);
                     }
                 }
             } else {
@@ -643,7 +723,9 @@ pim_quantized_run(
 
 cleanup:
     free(runtime_lut_i16_shards);
+    free(input_scales);
     free(output_i32_shards);
+    free(input_i16_shards);
     free(input_i8_shards);
     free(output_shards);
     free(kernel_cycles);
@@ -683,6 +765,8 @@ pim_quantized_shutdown(void)
     g_kernel_mode = 0;
     g_rows_per_dpu = 0;
     g_shard_output_dim = 0;
+    free(g_input_i16_shards);
+    g_input_i16_shards = NULL;
 }
 
 uint64_t

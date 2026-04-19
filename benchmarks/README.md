@@ -98,6 +98,7 @@ This benchmark compares only the `W4A32` matvec operator:
 - CPU grouped: GPTQ-style symmetric INT4 dequantization per group + `matvec`
 - CPU dense: dequantize full weight first, then run dense `matvec`
 - PIM: resident INT4 weight shards + on-DPU dequantization + `matvec`
+- PIM int8 fixed-point: host-side `A8` quantization + group `int16` dequant LUT + on-DPU `int8 x int16 -> int32`
 
 Synthetic validation:
 
@@ -136,6 +137,7 @@ Notes:
 - JSON output now includes both `cpu_grouped` and `cpu_dense` baselines:
   - `cpu_grouped` is closer to the operator path actually executed on PIM
   - `cpu_dense` is a lower-bound CPU baseline after full dequantization
+- JSON output also includes `pim_int8_fixed`, which is the current stable integerized prototype path. More aggressive `mode=5/6` experiments are omitted from the default benchmark output; pass `--include-experimental-modes` only when you explicitly want to probe unfinished kernels.
 - PIM timing is now split into:
   - `input_transfer_seconds_avg`
   - `launch_seconds_avg`

@@ -68,10 +68,6 @@ def test_pim_quantized_runtime_matches_cpu():
     assert int8_fixed.shape == expected.shape
     assert torch.isfinite(int8_fixed).all()
     assert torch.allclose(int8_fixed, expected, atol=1.5, rtol=5e-1)
-    int8_block_fixed = runtime.linear(inputs, quantized, kernel_mode=5)
-    assert int8_block_fixed.shape == expected.shape
-    assert torch.isfinite(int8_block_fixed).all()
-    # Block-fixed prototype is still experimental; validate execution path only.
 
 
 @pytest.mark.skipif(not _has_real_dpu(), reason="Real UPMEM hardware and toolchain are required.")

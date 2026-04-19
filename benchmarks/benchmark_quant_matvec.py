@@ -189,7 +189,14 @@ def maybe_benchmark_pim_mode(
         return {"error": str(exc)}
 
 
-def benchmark_pim_breakdown(inputs: torch.Tensor, quantized, rank_count: int, profile: str) -> dict:
+def benchmark_pim_breakdown(
+    inputs: torch.Tensor,
+    quantized,
+    rank_count: int,
+    profile: str,
+    *,
+    include_experimental: bool = False,
+) -> dict:
     runtime = PIMQuantizedRuntime.get_shared(rank_count=rank_count, profile=profile)
     runtime.linear(inputs, quantized, kernel_mode=1)
     transfer_only = runtime.last_profile()
@@ -199,11 +206,19 @@ def benchmark_pim_breakdown(inputs: torch.Tensor, quantized, rank_count: int, pr
     dequant_only = runtime.last_profile()
     runtime.linear(inputs, quantized, kernel_mode=4)
     int8_fixed = runtime.last_profile()
-    try:
-        runtime.linear(inputs, quantized, kernel_mode=5)
-        int8_block_fixed = runtime.last_profile()
-    except RuntimeError as exc:
-        int8_block_fixed = {"error": str(exc)}
+    int16_fixed = None
+    int8_block_fixed = None
+    if include_experimental:
+        try:
+            runtime.linear(inputs, quantized, kernel_mode=6)
+            int16_fixed = runtime.last_profile()
+        except RuntimeError as exc:
+            int16_fixed = {"error": str(exc)}
+        try:
+            runtime.linear(inputs, quantized, kernel_mode=5)
+            int8_block_fixed = runtime.last_profile()
+        except RuntimeError as exc:
+            int8_block_fixed = {"error": str(exc)}
     runtime.linear(inputs, quantized, kernel_mode=0)
     full = runtime.last_profile()
     return {
@@ -213,10 +228,18 @@ def benchmark_pim_breakdown(inputs: torch.Tensor, quantized, rank_count: int, pr
         "unpack_only_runtime_total_seconds": unpack_only["runtime_total_seconds"],
         "dequant_only_runtime_total_seconds": dequant_only["runtime_total_seconds"],
         "int8_fixed_runtime_total_seconds": int8_fixed["runtime_total_seconds"],
-        "int8_block_fixed_runtime_total_seconds": (
-            int8_block_fixed["runtime_total_seconds"] if "runtime_total_seconds" in int8_block_fixed else None
+        "int16_fixed_runtime_total_seconds": (
+            int16_fixed["runtime_total_seconds"]
+            if int16_fixed is not None and "runtime_total_seconds" in int16_fixed
+            else None
         ),
-        "int8_block_fixed_error": int8_block_fixed.get("error"),
+        "int16_fixed_error": None if int16_fixed is None else int16_fixed.get("error"),
+        "int8_block_fixed_runtime_total_seconds": (
+            int8_block_fixed["runtime_total_seconds"]
+            if int8_block_fixed is not None and "runtime_total_seconds" in int8_block_fixed
+            else None
+        ),
+        "int8_block_fixed_error": None if int8_block_fixed is None else int8_block_fixed.get("error"),
         "full_runtime_total_seconds": full["runtime_total_seconds"],
         "estimated_compute_seconds": max(
             0.0,
@@ -248,6 +271,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--rank-count", type=int, default=1)
     parser.add_argument("--profile", default="")
+    parser.add_argument("--include-experimental-modes", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--synthetic", action="store_true", help="Use synthetic W4A32 weights instead of GPTQ model.")
     parser.add_argument("--synthetic-input-dim", type=int, default=2048)
@@ -309,24 +333,45 @@ def main() -> None:
         profile=args.profile,
         kernel_mode=4,
     )
-    pim_int8_block_fixed_result = maybe_benchmark_pim_mode(
-        inputs,
-        quantized,
-        repeats=args.repeats,
-        warmup=args.warmup,
-        rank_count=args.rank_count,
-        profile=args.profile,
-        kernel_mode=5,
+    pim_int16_fixed_result = (
+        maybe_benchmark_pim_mode(
+            inputs,
+            quantized,
+            repeats=args.repeats,
+            warmup=args.warmup,
+            rank_count=args.rank_count,
+            profile=args.profile,
+            kernel_mode=6,
+        )
+        if args.include_experimental_modes
+        else None
+    )
+    pim_int8_block_fixed_result = (
+        maybe_benchmark_pim_mode(
+            inputs,
+            quantized,
+            repeats=args.repeats,
+            warmup=args.warmup,
+            rank_count=args.rank_count,
+            profile=args.profile,
+            kernel_mode=5,
+        )
+        if args.include_experimental_modes
+        else None
     )
     pim_breakdown = benchmark_pim_breakdown(
         inputs,
         quantized,
         rank_count=args.rank_count,
         profile=args.profile,
+        include_experimental=args.include_experimental_modes,
     )
 
     diff = (cpu_result["output"] - pim_result["output"]).abs()
     diff_int8_fixed = (cpu_result["output"] - pim_int8_fixed_result["output"]).abs()
+    diff_int16_fixed = None
+    if pim_int16_fixed_result is not None and "output" in pim_int16_fixed_result:
+        diff_int16_fixed = (cpu_result["output"] - pim_int16_fixed_result["output"]).abs()
     diff_int8_block_fixed = None
     if pim_int8_block_fixed_result is not None and "output" in pim_int8_block_fixed_result:
         diff_int8_block_fixed = (cpu_result["output"] - pim_int8_block_fixed_result["output"]).abs()
@@ -345,6 +390,11 @@ def main() -> None:
         "cpu_dense": {k: v for k, v in cpu_dense_result.items() if k != "output"},
         "pim": {k: v for k, v in pim_result.items() if k != "output"},
         "pim_int8_fixed": {k: v for k, v in pim_int8_fixed_result.items() if k != "output"},
+        "pim_int16_fixed": (
+            {k: v for k, v in pim_int16_fixed_result.items() if k != "output"}
+            if pim_int16_fixed_result is not None
+            else None
+        ),
         "pim_int8_block_fixed": (
             {k: v for k, v in pim_int8_block_fixed_result.items() if k != "output"}
             if pim_int8_block_fixed_result is not None
@@ -355,6 +405,12 @@ def main() -> None:
         "mean_abs_error": float(diff.mean().item()),
         "max_abs_error_pim_int8_fixed": float(diff_int8_fixed.max().item()),
         "mean_abs_error_pim_int8_fixed": float(diff_int8_fixed.mean().item()),
+        "max_abs_error_pim_int16_fixed": (
+            float(diff_int16_fixed.max().item()) if diff_int16_fixed is not None else None
+        ),
+        "mean_abs_error_pim_int16_fixed": (
+            float(diff_int16_fixed.mean().item()) if diff_int16_fixed is not None else None
+        ),
         "max_abs_error_pim_int8_block_fixed": (
             float(diff_int8_block_fixed.max().item()) if diff_int8_block_fixed is not None else None
         ),
@@ -378,6 +434,20 @@ def main() -> None:
             if pim_int8_fixed_result["seconds_avg"] > 0
             else None
         ),
+        "speedup_pim_int16_fixed_vs_cpu_grouped": (
+            cpu_result["seconds_avg"] / pim_int16_fixed_result["seconds_avg"]
+            if pim_int16_fixed_result is not None
+            and "seconds_avg" in pim_int16_fixed_result
+            and pim_int16_fixed_result["seconds_avg"] > 0
+            else None
+        ),
+        "speedup_pim_int16_fixed_vs_cpu_dense": (
+            cpu_dense_result["seconds_avg"] / pim_int16_fixed_result["seconds_avg"]
+            if pim_int16_fixed_result is not None
+            and "seconds_avg" in pim_int16_fixed_result
+            and pim_int16_fixed_result["seconds_avg"] > 0
+            else None
+        ),
         "speedup_pim_int8_block_fixed_vs_cpu_grouped": (
             cpu_result["seconds_avg"] / pim_int8_block_fixed_result["seconds_avg"]
             if pim_int8_block_fixed_result is not None
@@ -395,6 +465,13 @@ def main() -> None:
         "speedup_pim_int8_fixed_vs_pim_full": (
             pim_result["seconds_avg"] / pim_int8_fixed_result["seconds_avg"]
             if pim_int8_fixed_result["seconds_avg"] > 0
+            else None
+        ),
+        "speedup_pim_int16_fixed_vs_pim_full": (
+            pim_result["seconds_avg"] / pim_int16_fixed_result["seconds_avg"]
+            if pim_int16_fixed_result is not None
+            and "seconds_avg" in pim_int16_fixed_result
+            and pim_int16_fixed_result["seconds_avg"] > 0
             else None
         ),
         "speedup_pim_int8_block_fixed_vs_pim_full": (
