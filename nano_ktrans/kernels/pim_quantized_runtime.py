@@ -7,6 +7,7 @@ import os
 import subprocess
 import threading
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -98,6 +99,16 @@ class PIMQuantizedRuntime:
             raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
         self._loaded_signature: tuple[int, int, int, int, int] | None = None
 
+        # ── Weight residency tracking (NEW) ────────────────────────────
+        self._resident_expert_id: int = 0
+
+        # Cached pre-padded quantized weights: expert_id → (qweight_i32, scales_f32, padded_input_dim, padded_output_dim, group_size, kernel_mode, original_output_dim)
+        self._weight_cache: dict[int, tuple[torch.Tensor, torch.Tensor, int, int, int, int, int]] = {}
+
+        # Stats
+        self.preload_hits: int = 0
+        self.preload_misses: int = 0
+
     @classmethod
     def get_shared(cls, *, profile: str = "", rank_count: int = 1) -> "PIMQuantizedRuntime":
         key = (profile, rank_count)
@@ -152,6 +163,146 @@ class PIMQuantizedRuntime:
             and batch_size * padded_input_dim <= cls.MAX_INPUT_FLOATS
             and batch_size * padded_output_dim <= cls.MAX_OUTPUT_FLOATS
         )
+
+    # ── Weight preparation (shared padding logic) ──────────────────────
+
+    def _prepare_quantized_weights(
+        self,
+        quantized: GPTQLinearWeight,
+        kernel_mode: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, int, int, int]:
+        """
+        Pad quantized weight tensors for DPU consumption.
+        Returns (qweight_i32, scales_f32, padded_input_dim, padded_output_dim, original_output_dim).
+        """
+        input_dim = quantized.input_dim
+        output_dim = quantized.output_dim
+
+        qweight_i32 = quantized.qweight.detach().to(device="cpu", dtype=torch.int32, copy=True).contiguous()
+        scales_f32 = quantized.scales.detach().to(device="cpu", dtype=torch.float32, copy=True).contiguous()
+
+        padded_input_dim = ((input_dim + self.BLOCK_FLOATS - 1) // self.BLOCK_FLOATS) * self.BLOCK_FLOATS
+        padded_output_dim = output_dim + (output_dim % 2)
+
+        if padded_input_dim != input_dim:
+            words_per_row = padded_input_dim // quantized.values_per_word
+            padded_qweight = torch.zeros(output_dim, words_per_row, dtype=torch.int32)
+            padded_qweight[:, :qweight_i32.shape[1]] = qweight_i32
+            qweight_i32 = padded_qweight
+
+        if padded_output_dim != output_dim:
+            padded_qweight_out = torch.zeros(padded_output_dim, qweight_i32.shape[1], dtype=torch.int32)
+            padded_qweight_out[:output_dim, :] = qweight_i32
+            qweight_i32 = padded_qweight_out
+
+            padded_scales = torch.zeros(padded_output_dim, scales_f32.shape[1], dtype=torch.float32)
+            padded_scales[:output_dim, :] = scales_f32
+            scales_f32 = padded_scales
+
+        return qweight_i32, scales_f32, padded_input_dim, padded_output_dim, output_dim
+
+    # ── NEW: preload — load quantized weights to DPU MRAM ──────────────
+
+    def preload(
+        self,
+        expert_id: int,
+        quantized: GPTQLinearWeight,
+        kernel_mode: int = 4,
+    ) -> bool:
+        """
+        Load quantized expert weights to DPU MRAM if not already resident.
+
+        Returns True if weights were actually transferred (cache miss),
+        False if they were already resident (cache hit).
+        """
+        if self._resident_expert_id == expert_id:
+            self.preload_hits += 1
+            return False
+
+        # Get or create padded tensors (cached)
+        if expert_id not in self._weight_cache:
+            qweight_i32, scales_f32, padded_input_dim, padded_output_dim, orig_output_dim = \
+                self._prepare_quantized_weights(quantized, kernel_mode)
+            self._weight_cache[expert_id] = (
+                qweight_i32, scales_f32, padded_input_dim, padded_output_dim,
+                quantized.group_size, kernel_mode, orig_output_dim,
+            )
+
+        qweight_i32, scales_f32, padded_input_dim, padded_output_dim, group_size, km, _orig = \
+            self._weight_cache[expert_id]
+
+        error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
+        rc = self._lib.pim_quantized_load_weights(
+            ctypes.c_uint32(padded_input_dim),
+            ctypes.c_uint32(padded_output_dim),
+            ctypes.c_uint32(group_size),
+            ctypes.c_uint32(km),
+            ctypes.c_void_p(qweight_i32.data_ptr()),
+            ctypes.c_void_p(scales_f32.data_ptr()),
+            error_buffer,
+            len(error_buffer),
+        )
+        if rc != 0:
+            raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+
+        # Also update legacy signature for backward compat
+        self._loaded_signature = (padded_input_dim, padded_output_dim, group_size, km, expert_id)
+        self._resident_expert_id = expert_id
+        self.preload_misses += 1
+        return True
+
+    # ── NEW: infer — run DPU quantized kernel with resident weights ────
+
+    def infer(self, inputs: torch.Tensor) -> torch.Tensor:
+        """
+        Run the DPU quantized kernel using weights already resident in MRAM.
+        Only transfers input activations to DPU.
+        """
+        if self._resident_expert_id == 0:
+            raise RuntimeError("No quantized weights are resident. Call preload() first.")
+
+        if inputs.ndim != 2:
+            raise ValueError("PIMQuantizedRuntime.infer() expects 2D input tensor.")
+
+        batch_size, input_dim = inputs.shape
+        inputs_f32 = inputs.detach().to(device="cpu", dtype=torch.float32, copy=True).contiguous()
+
+        _, _, padded_input_dim, padded_output_dim, _, _, orig_output_dim = \
+            self._weight_cache[self._resident_expert_id]
+
+        if padded_input_dim != input_dim:
+            padded_inputs = torch.zeros(batch_size, padded_input_dim, dtype=torch.float32)
+            padded_inputs[:, :input_dim] = inputs_f32
+            inputs_f32 = padded_inputs
+
+        outputs = torch.empty(batch_size, padded_output_dim, dtype=torch.float32)
+        error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
+        rc = self._lib.pim_quantized_run(
+            ctypes.c_uint32(batch_size),
+            ctypes.c_void_p(inputs_f32.data_ptr()),
+            ctypes.c_void_p(outputs.data_ptr()),
+            error_buffer,
+            len(error_buffer),
+        )
+        if rc != 0:
+            raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+
+        return outputs[:, :orig_output_dim].contiguous()
+
+    # ── NEW: evict — clear DPU weight residency ────────────────────────
+
+    def evict(self) -> None:
+        """Clear the current DPU quantized weight residency."""
+        self._resident_expert_id = 0
+        self._loaded_signature = None
+
+    def evict_cached_weights(self, expert_id: int) -> None:
+        """Remove cached pre-padded weights for a specific expert."""
+        self._weight_cache.pop(expert_id, None)
+        if self._resident_expert_id == expert_id:
+            self.evict()
+
+    # ── Existing API (backward compatible) ──────────────────────────────
 
     def linear(self, inputs: torch.Tensor, quantized: GPTQLinearWeight, *, kernel_mode: int = 0) -> torch.Tensor:
         if inputs.ndim != 2:
@@ -221,6 +372,12 @@ class PIMQuantizedRuntime:
             raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
         return outputs[:, :output_dim].contiguous()
 
+    # ── Query / diagnostics ─────────────────────────────────────────────
+
+    @property
+    def resident_expert_id(self) -> int:
+        return self._resident_expert_id
+
     def last_cycles(self) -> int:
         return int(self._lib.pim_quantized_last_cycles())
 
@@ -241,3 +398,5 @@ class PIMQuantizedRuntime:
     def shutdown(self) -> None:
         self._lib.pim_quantized_shutdown()
         self._loaded_signature = None
+        self._resident_expert_id = 0
+        self._weight_cache.clear()

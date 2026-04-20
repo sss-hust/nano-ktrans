@@ -21,6 +21,7 @@ from .offload_backend import ExpertOffloadBackend, count_visible_pim_ranks, norm
 from .pim_expert_runtime import PIMExpertRuntime
 from .pim_linear_runtime import PIMLinearRuntime
 from .pim_moe import PIMMoEBackend
+from .pim_quantized_runtime import PIMQuantizedRuntime
 from .weight_loader import ExpertWeightLoader
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "PIMExpertRuntime",
     "PIMLinearRuntime",
     "PIMMoEBackend",
+    "PIMQuantizedRuntime",
     "ExpertWeightLoader",
     "count_visible_pim_ranks",
     "normalize_offload_backend_name",

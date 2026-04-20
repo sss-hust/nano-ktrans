@@ -329,7 +329,7 @@ pim_quantized_load_weights(
         goto cleanup;
     }
 
-    if (g_kernel_mode == 4 || g_kernel_mode == 5) {
+    if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6) {
         dpu_index = 0;
         DPU_FOREACH(g_set, dpu, dpu_index)
         {
@@ -442,7 +442,7 @@ pim_quantized_run(
         set_error(error_buffer, error_buffer_len, "input/output shape too large");
         return -1;
     }
-    if ((g_kernel_mode == 4 || g_kernel_mode == 5)
+    if ((g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6)
         && (input_i8_count > MAX_INPUT_INT8 || shard_output_i32 > MAX_OUTPUT_INT32)) {
         set_error(error_buffer, error_buffer_len, "int8/int32 input/output shape too large");
         return -1;
@@ -454,21 +454,21 @@ pim_quantized_run(
 
     kernel_cycles = calloc(g_nr_dpus, sizeof(*kernel_cycles));
     output_shards = calloc((size_t)g_nr_dpus * shard_output_floats, sizeof(*output_shards));
-    if (g_kernel_mode == 4 || g_kernel_mode == 5) {
+    if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6) {
         input_i8_shards = calloc(input_i8_count, sizeof(*input_i8_shards));
         output_i32_shards = calloc((size_t)g_nr_dpus * shard_output_i32, sizeof(*output_i32_shards));
         if (g_kernel_mode == 5) {
             runtime_lut_i16_shards = calloc(runtime_lut_i16_count, sizeof(*runtime_lut_i16_shards));
         }
-        if (g_kernel_mode == 4) {
+        if (g_kernel_mode == 4 || g_kernel_mode == 6) {
             input_scales = calloc(batch_size, sizeof(*input_scales));
         }
     }
     if (
         kernel_cycles == NULL || output_shards == NULL
-        || ((g_kernel_mode == 4 || g_kernel_mode == 5)
+        || ((g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6)
             && (input_i8_shards == NULL || output_i32_shards == NULL))
-        || (g_kernel_mode == 4 && input_scales == NULL)
+        || ((g_kernel_mode == 4 || g_kernel_mode == 6) && input_scales == NULL)
         || (g_kernel_mode == 5 && runtime_lut_i16_shards == NULL)
     ) {
         set_error(error_buffer, error_buffer_len, "failed to allocate run buffers");
@@ -483,7 +483,7 @@ pim_quantized_run(
         goto cleanup;
     }
     clock_gettime(CLOCK_MONOTONIC, &input_start);
-    if (g_kernel_mode == 4) {
+    if (g_kernel_mode == 4 || g_kernel_mode == 6) {
         const float *inputs_f32 = (const float *)inputs;
         for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
             const size_t batch_offset = (size_t)batch_idx * (size_t)g_input_dim;
@@ -591,7 +591,7 @@ pim_quantized_run(
 
     dpu_index = 0;
     clock_gettime(CLOCK_MONOTONIC, &output_start);
-    if (g_kernel_mode == 4) {
+    if (g_kernel_mode == 4 || g_kernel_mode == 6) {
         DPU_FOREACH(g_set, dpu, dpu_index)
         {
             if (check_dpu_error(
@@ -645,14 +645,14 @@ pim_quantized_run(
             max_cycles = kernel_cycles[dpu_index];
         }
         for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-            if (g_kernel_mode == 4 || g_kernel_mode == 5) {
+            if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6) {
                 const int32_t *shard_ptr_i32 =
                     output_i32_shards + ((size_t)dpu_index * shard_output_i32) + ((size_t)batch_idx * g_shard_output_dim);
                 for (uint32_t local_row = 0; local_row < local_rows; ++local_row) {
                     if (g_kernel_mode == 5) {
                         output_dst[((size_t)batch_idx * (size_t)g_output_dim) + row_start + local_row] =
                             ((float)shard_ptr_i32[local_row]) / 256.0f;
-                    } else if (g_kernel_mode == 4) {
+                    } else if (g_kernel_mode == 4 || g_kernel_mode == 6) {
                         output_dst[((size_t)batch_idx * (size_t)g_output_dim) + row_start + local_row] =
                             ((float)shard_ptr_i32[local_row]) * (input_scales[batch_idx] / 256.0f);
                     }

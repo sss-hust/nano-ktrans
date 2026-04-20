@@ -9,6 +9,7 @@ from .cpu_moe import CPUMoEBackend
 from .offload_backend import count_visible_pim_ranks
 from .pim_expert_runtime import PIMExpertRuntime
 from .pim_linear_runtime import PIMLinearRuntime
+from .pim_quantized_runtime import PIMQuantizedRuntime
 from nano_ktrans.utils.context import get_context
 
 
@@ -64,10 +65,12 @@ class PIMMoEBackend(CPUMoEBackend):
         self.real_dpu_linear_calls = 0
         self.real_dpu_expert_calls = 0
         self.real_dpu_fused_expert_calls = 0
+        self.real_dpu_quantized_calls = 0
         self.last_kernel_cycles = 0
         self.fallback_counts: dict[str, int] = {}
         self.runtime = None
         self.expert_runtime = None
+        self.quantized_runtime: Optional[PIMQuantizedRuntime] = None
         super().__init__(
             layer_idx=layer_idx,
             num_experts=num_experts,
@@ -87,6 +90,8 @@ class PIMMoEBackend(CPUMoEBackend):
             self.backend_name = "pim"
             self.runtime = self._try_init_runtime()
             self.expert_runtime = self._try_init_expert_runtime()
+            if self.is_gptq:
+                self.quantized_runtime = self._try_init_quantized_runtime()
         else:
             self.backend_name = "pim_shadow"
 
@@ -120,6 +125,22 @@ class PIMMoEBackend(CPUMoEBackend):
             )
         except Exception:
             self._record_fallback("expert_runtime_init_failed")
+            return None
+
+    def _try_init_quantized_runtime(self) -> Optional[PIMQuantizedRuntime]:
+        if not self.has_cpu_experts:
+            return None
+        if self.visible_pim_ranks <= 0:
+            return None
+        if not self.is_gptq:
+            return None
+        try:
+            return PIMQuantizedRuntime.get_shared(
+                profile=self.pim_profile,
+                rank_count=max(1, self.pim_rank_count),
+            )
+        except Exception:
+            self._record_fallback("quantized_runtime_init_failed")
             return None
 
     # ── Expert ID for weight residency tracking ────────────────────────
@@ -173,6 +194,51 @@ class PIMMoEBackend(CPUMoEBackend):
         self.last_kernel_cycles = self.runtime.last_cycles()
         return output
 
+    # ── Quantized expert path (W4A32 preload + infer) ──────────────────
+
+    def _run_expert_quantized_on_dpu(
+        self,
+        states: torch.Tensor,
+        cpu_slot: int,
+    ) -> torch.Tensor:
+        """Run expert MLP on DPU using quantized (GPTQ) weights with preload caching."""
+        if self.quantized_runtime is None:
+            raise RuntimeError("PIM quantized runtime is not available.")
+
+        gptq = self._gptq_experts.get(cpu_slot)
+        if gptq is None:
+            raise RuntimeError(f"No GPTQ weights for cpu_slot={cpu_slot}")
+
+        kernel_mode = 4  # int8 fixed-point (best for batch=1 decode)
+
+        # Each projection gets its own expert_id namespace to avoid collisions
+        # since the quantized runtime can only hold one set of weights at a time.
+        # We use 3 sequential calls: gate, up, down — each preloads its own weights.
+        base_eid = self._expert_id(cpu_slot)
+
+        # Gate projection
+        gate_eid = base_eid ^ 0x1111111111111111
+        self.quantized_runtime.preload(gate_eid, gptq["gate"], kernel_mode)
+        gate = self.quantized_runtime.infer(states)
+
+        # Up projection
+        up_eid = base_eid ^ 0x2222222222222222
+        self.quantized_runtime.preload(up_eid, gptq["up"], kernel_mode)
+        up = self.quantized_runtime.infer(states)
+
+        # SiLU activation on host
+        hidden = F.silu(gate) * up
+
+        # Down projection
+        down_eid = base_eid ^ 0x3333333333333333
+        self.quantized_runtime.preload(down_eid, gptq["down"], kernel_mode)
+        output = self.quantized_runtime.infer(hidden)
+
+        self.real_dpu_quantized_calls += 3
+        self.real_dpu_expert_calls += 1
+        self.last_kernel_cycles = self.quantized_runtime.last_cycles()
+        return output
+
     # ── Speculative preload at end of prefill ──────────────────────────
 
     def _speculative_preload(self, topk_ids: torch.Tensor) -> None:
@@ -215,7 +281,7 @@ class PIMMoEBackend(CPUMoEBackend):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> bool:
-        if self.runtime is None and self.expert_runtime is None:
+        if self.runtime is None and self.expert_runtime is None and self.quantized_runtime is None:
             self._record_fallback("runtime_unavailable")
             return False
 
@@ -261,7 +327,11 @@ class PIMMoEBackend(CPUMoEBackend):
             activated_cpu_experts.append((expert_idx, cpu_slot, token_indices, match))
 
         # ── Sort: currently resident expert goes LAST (stays in MRAM) ──
-        resident_eid = self.expert_runtime._resident_expert_id if self.expert_runtime else 0
+        resident_eid = 0
+        if self.quantized_runtime is not None:
+            resident_eid = self.quantized_runtime.resident_expert_id
+        elif self.expert_runtime is not None:
+            resident_eid = self.expert_runtime._resident_expert_id
         activated_cpu_experts.sort(
             key=lambda x: (1 if self._expert_id(x[1]) == resident_eid else 0,)
         )
@@ -269,6 +339,13 @@ class PIMMoEBackend(CPUMoEBackend):
         # ── Process each expert ────────────────────────────────────────
         for expert_idx, cpu_slot, token_indices, match in activated_cpu_experts:
             states = flat_cpu[token_indices]
+
+            # Priority 1: Quantized DPU path (GPTQ weights)
+            can_use_quantized = (
+                self.quantized_runtime is not None
+                and self.is_gptq
+                and cpu_slot in self._gptq_experts
+            )
 
             can_use_fused = (
                 self.expert_runtime is not None
@@ -285,7 +362,13 @@ class PIMMoEBackend(CPUMoEBackend):
                 and self.runtime.supports_shape(states.shape[0], self.intermediate_size, self.hidden_size)
             )
 
-            if self.pim_kernel_variant == "fused" and can_use_fused:
+            if can_use_quantized:
+                try:
+                    expert_output = self._run_expert_quantized_on_dpu(states, cpu_slot)
+                except Exception:
+                    self._record_fallback("expert_quantized_dpu_run_failed")
+                    expert_output = self._compute_expert_output_cpu(states, cpu_slot).to(dtype=torch.float32)
+            elif self.pim_kernel_variant == "fused" and can_use_fused:
                 try:
                     expert_output = self._run_expert_fused_on_dpu(states, cpu_slot)
                 except Exception:
@@ -349,29 +432,30 @@ class PIMMoEBackend(CPUMoEBackend):
     def notify_expert_evicted(self, expert_idx: int, residency_before: str) -> None:
         """
         Clean up DPU-resident weights when an expert is evicted from GPU to PIM/CPU.
-        
-        This is called when an expert is demoted from GPU, allowing us to clear
-        any pre-padded cached weights stored on the DPU to prevent stale data or conflicts.
         """
-        if self.expert_runtime is None:
-            return
-        
-        # Get the CPU slot for this expert
         cpu_slot = self.cpu_expert_lookup.get(int(expert_idx))
         if cpu_slot is None:
             return
-        
-        # Clear cached weights and DPU residency for this expert
-        try:
-            eid = self._expert_id(cpu_slot)
-            # If this expert is currently resident on DPU, evict it
-            if self.expert_runtime.resident_expert_id == eid:
-                self.expert_runtime.evict()
-            # Also clear pre-padded weight cache
-            self.expert_runtime.evict_cached_weights(eid)
-        except Exception:
-            # Silently ignore if evict fails - this is best-effort cleanup
-            pass
+
+        eid = self._expert_id(cpu_slot)
+
+        # Clean up fp32 expert runtime
+        if self.expert_runtime is not None:
+            try:
+                if self.expert_runtime.resident_expert_id == eid:
+                    self.expert_runtime.evict()
+                self.expert_runtime.evict_cached_weights(eid)
+            except Exception:
+                pass
+
+        # Clean up quantized runtime (all 3 projection IDs)
+        if self.quantized_runtime is not None:
+            try:
+                for xor_mask in (0x1111111111111111, 0x2222222222222222, 0x3333333333333333):
+                    proj_eid = eid ^ xor_mask
+                    self.quantized_runtime.evict_cached_weights(proj_eid)
+            except Exception:
+                pass
 
     def diagnostics(self) -> dict[str, Any]:
         diagnostics = super().diagnostics()
@@ -400,13 +484,21 @@ class PIMMoEBackend(CPUMoEBackend):
                 "real_dpu_linear_calls": self.real_dpu_linear_calls,
                 "real_dpu_expert_calls": self.real_dpu_expert_calls,
                 "real_dpu_fused_expert_calls": self.real_dpu_fused_expert_calls,
+                "real_dpu_quantized_calls": self.real_dpu_quantized_calls,
                 "last_kernel_cycles": self.last_kernel_cycles,
                 "fallback_counts": dict(self.fallback_counts),
-                # NEW: weight residency diagnostics
+                "is_gptq": self.is_gptq,
+                # Weight residency diagnostics (fp32 expert runtime)
                 "expert_runtime_preload_hits": 0 if self.expert_runtime is None else self.expert_runtime.preload_hits,
                 "expert_runtime_preload_misses": 0 if self.expert_runtime is None else self.expert_runtime.preload_misses,
                 "expert_runtime_resident_expert_id": 0 if self.expert_runtime is None else self.expert_runtime.resident_expert_id,
                 "expert_runtime_weight_cache_size": 0 if self.expert_runtime is None else len(self.expert_runtime._weight_cache),
+                # Weight residency diagnostics (quantized runtime)
+                "quantized_runtime_available": self.quantized_runtime is not None,
+                "quantized_runtime_preload_hits": 0 if self.quantized_runtime is None else self.quantized_runtime.preload_hits,
+                "quantized_runtime_preload_misses": 0 if self.quantized_runtime is None else self.quantized_runtime.preload_misses,
+                "quantized_runtime_resident_expert_id": 0 if self.quantized_runtime is None else self.quantized_runtime.resident_expert_id,
+                "quantized_runtime_weight_cache_size": 0 if self.quantized_runtime is None else len(self.quantized_runtime._weight_cache),
             }
         )
         return diagnostics

@@ -8,7 +8,7 @@ CPUMoEBackend: CPU 端 MoE 专家计算的核心后端。
    高效异步数据传输（避免每次推理都重新分配内存）。
 
 2. **权重加载和量化**: 从 SafeTensor 文件中读取 FP16/BF16 权重，通过 C++ 在线
-   量化为 INT4/INT8 格式并存储在 CPU 内存中。
+   量化为 INT4/INT8 格式并存储在 CPU 内存中。支持 GPTQ 量化权重直接加载。
 
 3. **异步 Forward**: 利用 CPUInfer 线程池的 submit_with_cuda_stream 接口，
    将专家计算任务提交到 CPU 上异步执行，同时 GPU 继续处理其他专家。
@@ -44,7 +44,7 @@ CPUMoEBackend: CPU 端 MoE 专家计算的核心后端。
 """
 
 import os
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -52,7 +52,7 @@ from nano_ktrans.utils.context import get_context
 
 from .cpu_infer import CPUInferEngine
 from .offload_backend import ExpertOffloadBackend
-from .weight_loader import ExpertWeightLoader
+from .weight_loader import ExpertWeightLoader, GPTQLinearWeight
 
 try:
     from kt_kernel import kt_kernel_ext  # noqa: F401
@@ -185,6 +185,9 @@ class CPUMoEBackend(ExpertOffloadBackend):
         self.has_cpu_experts = bool((~gpu_experts_mask.bool()).any().item())
         self.cpu_expert_lookup: Dict[int, int] = {}
         self.backend_name = "cpu"
+        self.is_gptq = False
+        # Per-expert GPTQ weights: cpu_slot → {proj: GPTQLinearWeight}
+        self._gptq_experts: Dict[int, Dict[str, GPTQLinearWeight]] = {}
 
         if not self.has_cpu_experts:
             self.gpu_experts_mask = gpu_experts_mask.to(dtype=torch.uint8, device="cpu")
@@ -209,6 +212,13 @@ class CPUMoEBackend(ExpertOffloadBackend):
 
         # ===== 加载原始专家权重 =====
         loader = ExpertWeightLoader(weight_path)
+
+        # ===== 检测 GPTQ 量化权重 =====
+        self._detect_and_load_gptq(
+            loader, layer_idx, num_experts, gpu_experts_mask,
+            expert_key_template, expert_proj_names,
+        )
+
         stacked = loader.load_layer_experts_stacked(
             layer_idx,
             num_experts,
@@ -271,6 +281,69 @@ class CPUMoEBackend(ExpertOffloadBackend):
         self._gate_proj = self._gate_proj.index_select(0, cpu_expert_indices).to(dtype=self.fallback_dtype).contiguous()
         self._up_proj = self._up_proj.index_select(0, cpu_expert_indices).to(dtype=self.fallback_dtype).contiguous()
         self._down_proj = self._down_proj.index_select(0, cpu_expert_indices).to(dtype=self.fallback_dtype).contiguous()
+
+    def _detect_and_load_gptq(
+        self,
+        loader: ExpertWeightLoader,
+        layer_idx: int,
+        num_experts: int,
+        gpu_experts_mask: torch.Tensor,
+        expert_key_template: Optional[str],
+        expert_proj_names: Optional[Dict[str, str]],
+    ) -> None:
+        """Detect if model uses GPTQ quantization and load per-expert quantized weights."""
+        if not loader._quantize_config:
+            return
+        bits = loader._quantize_config.get("bits")
+        if bits is None:
+            return
+
+        # Build key template for GPTQ loading
+        gptq_key_template = expert_key_template or \
+            "model.layers.{layer}.block_sparse_moe.experts.{expert}.{proj}.weight"
+
+        # Check if qweight keys exist for the first CPU expert
+        cpu_expert_indices = torch.where(~gpu_experts_mask.bool())[0].tolist()
+        if not cpu_expert_indices:
+            return
+
+        first_expert = cpu_expert_indices[0]
+        proj_map = expert_proj_names or {"gate": "w1", "up": "w3", "down": "w2"}
+        # Try to find a qweight key for the first projection of the first CPU expert
+        test_proj = list(proj_map.values())[0]
+        test_key = gptq_key_template.format(layer=layer_idx, expert=first_expert, proj=test_proj)
+        if test_key.endswith(".weight"):
+            test_prefix = test_key[:-len(".weight")]
+        else:
+            test_prefix = test_key
+        qweight_key = test_prefix + ".qweight"
+        if qweight_key not in loader._key_to_file:
+            return
+
+        # GPTQ detected — load per-expert quantized weights
+        self.is_gptq = True
+        for slot, expert_idx in enumerate(cpu_expert_indices):
+            expert_gptq: Dict[str, GPTQLinearWeight] = {}
+            for proj_name in ["gate", "up", "down"]:
+                try:
+                    gptq_weight = loader.load_gptq_expert_linear(
+                        layer_idx=layer_idx,
+                        expert_idx=expert_idx,
+                        proj_name=proj_name,
+                        key_template=gptq_key_template,
+                        proj_name_map=expert_proj_names,
+                    )
+                    expert_gptq[proj_name] = gptq_weight
+                except (KeyError, ValueError):
+                    # If any projection fails, abandon GPTQ for this layer
+                    self.is_gptq = False
+                    self._gptq_experts.clear()
+                    return
+            self._gptq_experts[slot] = expert_gptq
+
+        if self.is_gptq:
+            print(f"  [CPUMoEBackend] Layer {layer_idx}: GPTQ-Int{bits} weights detected "
+                  f"({len(self._gptq_experts)} CPU experts)")
 
     def update_gpu_expert_mask(self, gpu_experts_mask: torch.Tensor) -> None:
         self.gpu_experts_mask = gpu_experts_mask.to(dtype=torch.uint8, device="cpu")
