@@ -119,6 +119,17 @@ def main():
         choices=list(SCHEDULER_PROFILE_NAMES),
         help="Scheduler preset. 'baseline' keeps current behavior, 'overlap_safe' prefers ready-only decode promotions, 'eager' is more aggressive.",
     )
+    parser.add_argument(
+        "--enable-background-offload-worker",
+        action="store_true",
+        help="Enable the experimental background offload worker during generation.",
+    )
+    parser.add_argument(
+        "--background-offload-poll-interval-seconds",
+        type=float,
+        default=0.005,
+        help="Polling interval in seconds for the experimental background offload worker.",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=256)
     args = parser.parse_args()
 
@@ -150,6 +161,8 @@ def main():
         scheduler_prefetch_candidate_budget_per_layer=args.scheduler_prefetch_candidate_budget_per_layer,
         scheduler_prepared_cache_budget_per_layer=args.scheduler_prepared_cache_budget_per_layer,
         scheduler_profile=args.scheduler_profile,
+        enable_background_offload_worker=args.enable_background_offload_worker,
+        background_offload_poll_interval_seconds=args.background_offload_poll_interval_seconds,
     )
     
     # Generation test

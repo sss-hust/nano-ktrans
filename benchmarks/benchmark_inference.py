@@ -28,35 +28,39 @@ def run_single_generation(llm: LLM, prompt: str, max_new_tokens: int) -> dict[st
     input_ids = inputs.input_ids.to(llm.device)
     prompt_tokens = int(input_ids.shape[1])
 
-    synchronize_if_needed(llm.device)
-    total_start = time.perf_counter()
-
-    synchronize_if_needed(llm.device)
-    prefill_start = time.perf_counter()
-    logits = llm.engine.prefill(input_ids)
-    synchronize_if_needed(llm.device)
-    prefill_seconds = time.perf_counter() - prefill_start
-
-    next_token = torch.argmax(logits[0, -1, :], dim=-1).unsqueeze(0).unsqueeze(0)
-    generated_ids = [next_token.item()]
-    decode_seconds = 0.0
-
-    for i in range(max_new_tokens - 1):
+    llm.engine.start_background_offload_worker()
+    try:
         synchronize_if_needed(llm.device)
-        step_start = time.perf_counter()
-        logits = llm.engine.decode_step(next_token, prompt_tokens + i)
+        total_start = time.perf_counter()
+
         synchronize_if_needed(llm.device)
-        decode_seconds += time.perf_counter() - step_start
+        prefill_start = time.perf_counter()
+        logits = llm.engine.prefill(input_ids)
+        synchronize_if_needed(llm.device)
+        prefill_seconds = time.perf_counter() - prefill_start
 
         next_token = torch.argmax(logits[0, -1, :], dim=-1).unsqueeze(0).unsqueeze(0)
-        token_id = next_token.item()
-        generated_ids.append(token_id)
-        if token_id == llm.tokenizer.eos_token_id:
-            break
+        generated_ids = [next_token.item()]
+        decode_seconds = 0.0
 
-    synchronize_if_needed(llm.device)
-    total_seconds = time.perf_counter() - total_start
-    output_text = llm.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        for i in range(max_new_tokens - 1):
+            synchronize_if_needed(llm.device)
+            step_start = time.perf_counter()
+            logits = llm.engine.decode_step(next_token, prompt_tokens + i)
+            synchronize_if_needed(llm.device)
+            decode_seconds += time.perf_counter() - step_start
+
+            next_token = torch.argmax(logits[0, -1, :], dim=-1).unsqueeze(0).unsqueeze(0)
+            token_id = next_token.item()
+            generated_ids.append(token_id)
+            if token_id == llm.tokenizer.eos_token_id:
+                break
+
+        synchronize_if_needed(llm.device)
+        total_seconds = time.perf_counter() - total_start
+        output_text = llm.tokenizer.decode(generated_ids, skip_special_tokens=True)
+    finally:
+        llm.engine.stop_background_offload_worker()
 
     generated_tokens = len(generated_ids)
     decode_tps = generated_tokens / decode_seconds if decode_seconds > 0 else None
@@ -104,6 +108,8 @@ def benchmark_backend(
     scheduler_prefetch_candidate_budget_per_layer: int | None,
     scheduler_prepared_cache_budget_per_layer: int | None,
     scheduler_profile: str,
+    enable_background_offload_worker: bool,
+    background_offload_poll_interval_seconds: float,
 ) -> dict[str, Any]:
     llm = None
     offload_backend = "cpu"
@@ -175,6 +181,8 @@ def benchmark_backend(
             scheduler_prefetch_candidate_budget_per_layer=scheduler_prefetch_candidate_budget_per_layer,
             scheduler_prepared_cache_budget_per_layer=scheduler_prepared_cache_budget_per_layer,
             scheduler_profile=scheduler_profile,
+            enable_background_offload_worker=enable_background_offload_worker,
+            background_offload_poll_interval_seconds=background_offload_poll_interval_seconds,
         )
         synchronize_if_needed(llm.device)
         load_seconds = time.perf_counter() - load_start
@@ -336,6 +344,17 @@ def parse_args() -> argparse.Namespace:
         help="Scheduler preset for dynamic expert migration experiments.",
     )
     parser.add_argument(
+        "--enable-background-offload-worker",
+        action="store_true",
+        help="Enable the experimental background offload worker during benchmarked generation runs.",
+    )
+    parser.add_argument(
+        "--background-offload-poll-interval-seconds",
+        type=float,
+        default=0.005,
+        help="Polling interval in seconds for the experimental background offload worker.",
+    )
+    parser.add_argument(
         "--scheduler-profile-sweep",
         nargs="+",
         choices=list(SCHEDULER_PROFILE_NAMES),
@@ -392,6 +411,8 @@ def main() -> None:
                 scheduler_prefetch_candidate_budget_per_layer=args.scheduler_prefetch_candidate_budget_per_layer,
                 scheduler_prepared_cache_budget_per_layer=args.scheduler_prepared_cache_budget_per_layer,
                 scheduler_profile=scheduler_profile,
+                enable_background_offload_worker=args.enable_background_offload_worker,
+                background_offload_poll_interval_seconds=args.background_offload_poll_interval_seconds,
             )
             result["scheduler_profile"] = scheduler_profile
             results["results"].append(result)

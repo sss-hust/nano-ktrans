@@ -5,6 +5,27 @@ tags: [changelog]
 
 # 📝 变更日志
 
+## 2026-04-19
+
+- 新增 GPTQ/W4A32 单算子实验路径：
+  - `nano_ktrans/kernels/weight_loader.py` 新增 `GPTQLinearWeight`、Qwen3 GPTQ expert linear 读取和最小 dequant 支持
+  - `nano_ktrans/kernels/quantized_ops.py` 新增 CPU W4A32 matvec 和 synthetic quantizer
+  - `nano_ktrans/kernels/pim_quantized_runtime.py`、`pim_native/dpu_quantized_kernel.c`、`pim_native/host_quantized_bridge.c` 新增 PIM quantized runtime，支持量化权重常驻加载后重复执行 matvec
+  - `benchmarks/benchmark_quant_matvec.py` 新增 operator-only benchmark，可直接比较 CPU/PIM 的量化矩阵向量乘
+- 已在真实机器上跑通 synthetic W4A32 算子 benchmark：
+  - shape=`2048 -> 768`
+  - `group_size=128`
+  - `rank_count=4`
+  - CPU grouped avg ≈ `8.42 ms`
+  - CPU dense avg ≈ `4.06 ms`
+  - PIM avg ≈ `52.27 ms`
+  - `max_abs_error ≈ 1.68e-4`
+  当前 synthetic W4A32 operator-only 路径下，PIM 明显慢于 CPU grouped / dense 两条基线。
+- 已开始拉取 `Qwen/Qwen3-30B-A3B-GPTQ-Int4`：
+  - `config.json`、`quantize_config.json` 已就绪
+  - `model.safetensors` 仍未完成下载
+  - 后续需要在真实 GPTQ 权重上验证 tensor layout 和 operator-only benchmark
+
 ## 2026-04-17
 
 ### 2026-04-17 03:38 - Final staged resident commit queue
@@ -193,6 +214,17 @@ tags: [changelog]
 
 - `LayerExpertState` 新增 `last_access_step` 与 `last_residency_change_step`，scheduler 已开始维护这些 anti-thrashing 元数据。
 - 当前 cooldown / idle-age 逻辑先以配置和诊断形式接入，默认值保持不改变现有行为。
+
+## 2026-04-19
+
+- <!-- updated: 2026-04-19 02:10 --> **[quantized-fixed-point]** quantized PIM operator 新增 `kernel_mode=4` 的最小整数化路径：host 端将输入按张量量化成 int8、按 group 生成 int16 dequant LUT，DPU 侧执行 `int8 x int16 -> int32` accumulate，host 再统一回标定输出；`benchmark_quant_matvec.py` 已能同时输出 `pim` 与 `pim_int8_fixed`。
+- <!-- updated: 2026-04-19 02:10 --> **[quantized-fixed-point-results]** 在真实 `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 上，`kernel_mode=4` 明显快于现有 soft-float `full` 路径：`gate` case 从约 `28.46ms` 降到约 `7.38ms`，`down` case 从约 `11.82ms` 降到约 `2.76ms`；但误差增大到约 `max_abs_error ~ 0.83-0.96`，属于“速度有明显改善、精度仍需继续收敛”的原型状态。
+- <!-- updated: 2026-04-19 02:10 --> **[quantized-fixed-point-limit]** 新增了更激进的 `kernel_mode=5` block-aware runtime LUT 原型，但当前在真实 Qwen3 gate/down 形状下会因 `runtime int16 lut too large` 超过 MRAM/bridge 预算，因此 benchmark 目前只记录该模式不可用，而不作为主路径。
+- <!-- updated: 2026-04-19 04:30 --> **[quantized-fixed-point-stabilize]** `kernel_mode=4` 的 activation quantization 已收口成按 batch 的单尺度路径，避免了之前 block 级量化却只用单一回标定因子造成的数学不一致；`mode=5/6` 继续保留为实验实现，但已从默认测试和 benchmark 主路径中降级，避免污染稳定结果。
+- <!-- updated: 2026-04-19 04:30 --> **[quantized-fixed-point-batch-results]** 修正后在真实 `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 上重新验证：`batch=1` 时 `gate` case 为 `5.79ms cpu_grouped vs 4.47ms pim_int8_fixed`，`down` case 为 `3.42ms cpu_grouped vs 1.34ms pim_int8_fixed`；`batch=4` 时 `gate` 退化为约 `0.56x` CPU grouped，而 `down` 仍可达到约 `0.92x` CPU grouped，说明当前整数化路径已明显优于 soft-float，但优势仍依赖 shape 与 batch 大小。
+- <!-- updated: 2026-04-19 04:45 --> **[quantized-fixed-point-cleanup]** 已移除未验证且输出异常的 `kernel_mode=6` int16 prototype，只保留 `kernel_mode=4` 作为默认稳定整数化路径、`kernel_mode=5` 作为需显式开启的实验路径；`benchmark_quant_matvec.py` 与 `test_pim_runtime.py` 已同步收口到这套边界。
+- <!-- updated: 2026-04-19 05:05 --> **[quantized-fixed-point-rank-sweep]** 已补齐稳定 `kernel_mode=4` 的真实 Qwen3 GPTQ rank sweep：`gate batch=1` 在 `8/16/24/32 ranks` 下均能超过 CPU grouped，其中 `8 ranks` 达到约 `2.31x`；`down batch=1` 在 `1/2/4/8 ranks` 下均能超过 CPU grouped，其中 `4 ranks` 达到约 `2.77x`。但 `batch=4` 时只剩 `gate@16 ranks` 接近持平、`down@2 ranks` 接近持平；`batch=8` 时 `gate@16 ranks` 与 `down@2 ranks` 分别退化到约 `0.56x` 与 `0.63x` CPU grouped，说明当前整数化路径的有效工作区仍主要集中在 decode 风格的小 batch。 
+- <!-- updated: 2026-04-19 05:35 --> **[quantized-fixed-point-batch-tile]** `kernel_mode=4` 已新增“大输入维度才启用”的 DPU batch-tile 数据流，用于在 batched gate/up 这类 shape 上复用 qweight/LUT 读取；同时修复了 `PIMQuantizedRuntime` 只按 shape 缓存 resident quantized weights 的问题，避免同 shape synthetic 测试错误复用旧权重。新增 real-DPU `batch=4` 正确性回归后，当前 `down batch=4` 已达到约 `0.95x` CPU grouped，`gate batch=4` 仍约 `0.72x` CPU grouped，说明 batch-tile 让 batched 路径更稳，但还不足以把所有 shape 都推进到 CPU 之上。
 
 <!-- updated: 2026-04-15 07:53 -->
 
@@ -393,3 +425,47 @@ tags: [changelog]
 - <!-- updated: 2026-04-17 05:42 --> **[resident-commit-apply-queue-diagnostics]** `HybridMoE.diagnostics()`、`MigrationPipelineRuntime`、scheduler summary 与 `LLM.reset_offload_diagnostics()` 已补齐 `resident_commit_apply_queue` 的 size/limit/utilization/enqueued/committed/background_enqueued 指标，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `126 passed, 1 warning`。
 - <!-- updated: 2026-04-17 05:58 --> **[resident-commit-finalize-ready-queue]** resident commit 现已继续拆成 `resident_commit_apply_queue -> resident_commit_finalize_ready_queue -> resident set`：background tick 可先把 preexisting apply batches 预推进到 finalize-ready queue，真正 final resident apply 只消费 tick 开始前已存在的 finalize-ready batches。
 - <!-- updated: 2026-04-17 05:58 --> **[resident-commit-finalize-ready-queue-diagnostics]** `HybridMoE.diagnostics()`、`MigrationPipelineRuntime`、scheduler summary 与 `LLM.reset_offload_diagnostics()` 已补齐 `resident_commit_finalize_ready_queue` 的 size/limit/utilization/enqueued/committed/background_enqueued 指标，当前 `tests/test_core.py + tests/test_pim_runtime.py` 仍为 `126 passed, 1 warning`。
+- <!-- updated: 2026-04-17 06:20 --> **[benchmark-background-worker]** `benchmark_inference.py` 与 `example.py` 现已显式支持 `--enable-background-offload-worker` 和 `--background-offload-poll-interval-seconds`，真实 benchmark 路径不再只能走前台 refresh hook，可直接接通后台 offload worker。
+- <!-- updated: 2026-04-17 06:20 --> **[benchmark-run-worker-lifecycle]** `run_single_generation()` 现在会像 `LLM.generate()` 一样，在单次生成前启动 background offload worker、结束后停止；补充 benchmark worker 生命周期回归后，当前 `tests/test_core.py + tests/test_pim_runtime.py` 为 `127 passed, 1 warning`。
+
+<!-- updated: 2026-04-19 02:20 -->
+
+- 为 W4A32/GPTQ PIM quantized runtime 补充了分项 profiling，现可单独观察 host->DPU 输入传输、DPU launch/执行、DPU->host 回传与 runtime 总耗时。
+- 在真实 `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 上复测 `gate/down` operator-only case 后确认：当前 PIM 时间绝大部分集中在 `launch_seconds_avg`，说明瓶颈主要在 DPU 侧 kernel 执行而不是 host 传输。
+
+<!-- updated: 2026-04-19 02:35 -->
+
+- quantized PIM runtime 现已拆分权重加载与稳态运行 profiling：可分别观察 qweight/scales 常驻加载时间，以及运行期的 input transfer / DPU launch / output transfer。
+- 在真实 Qwen3 GPTQ `gate/down` case 上，稳态 PIM 时间约 89%~98% 集中在 `launch_seconds_avg`，进一步确认当前瓶颈主要在 DPU kernel 执行而不是 host 传输。
+
+<!-- updated: 2026-04-19 02:55 -->
+
+- 试验性将 quantized DPU kernel 从 2-row 改为 4-row tile 以复用 input block，但在真实 Qwen3 GPTQ `gate/down` case 上反而变慢；该尝试未保留到代码。
+
+<!-- updated: 2026-04-19 03:10 -->
+
+- 对 quantized DPU kernel 做了参数 sweep：`TASKLETS=8` 在真实 GPTQ `gate/down` case 上略优于默认 `16`，而 `BLOCK_FLOATS=32/128` 基本无帮助；当前最佳稳定配置仍只带来很小改进。
+
+<!-- updated: 2026-04-19 03:25 -->
+
+- 为 quantized DPU kernel 增加了 transfer-only 模式，并在 benchmark 中输出 `pim_breakdown`。
+- 真实 Qwen3 GPTQ `gate/down` case 表明：纯输入/输出搬运只占几毫秒，完整 PIM operator 时间的绝大部分仍是 DPU kernel 计算本体。
+
+<!-- updated: 2026-04-19 03:45 -->
+
+- 在真实 GPTQ `gate/down` 上做了 rank 与 batch 的 transfer-only breakdown sweep。结果表明：rank 调节主要改变少量传输与常数项，batch 增长时主导时间几乎全部落在 DPU 计算核，问题不是 host 传输扩展性。
+
+<!-- updated: 2026-04-19 04:05 -->
+
+- 为 quantized DPU kernel 增加了 `kernel_mode` 剖析：`transfer_only / unpack_only / dequant_only / full`。
+- 真实 GPTQ `gate/down` 结果显示，性能主瓶颈更偏向 nibble unpack 与反量化阶段，最终乘加带来的额外时间相对更小。
+
+<!-- updated: 2026-04-19 04:20 -->
+
+- 在 quantized DPU kernel 中引入 block-level dequant LUT，减少 inner-loop 重复浮点反量化。
+- 真实 GPTQ `gate/down` operator-only benchmark 显示该优化显著降低了 DPU launch/compute 时间，但 PIM 仍未超过 CPU grouped baseline。
+
+<!-- updated: 2026-04-19 12:40 -->
+
+- `kernel_mode=4` 现已补齐 `FIXED_BATCH_TILE` 编译期开关，允许在真实 DPU 上对 int8 fixed-point 路径做 batch-tile sweep，而无需手改 kernel 源码。
+- 在真实 `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 上完成 `FIXED_BATCH_TILE=1/2/4/8` sweep：`down batch=4` 因 shape-gated fallback 基本维持在接近 CPU grouped 的水平，但 `gate batch=4/8` 没有出现稳定优于 CPU grouped 的 tile 配置；tile 主要改变常数项，尚不足以解决大输入维度下 `batch>1` 的核心瓶颈。

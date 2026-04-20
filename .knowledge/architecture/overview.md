@@ -30,12 +30,18 @@ tags: [architecture]
   Python 侧的真实 PIM 线性执行桥，负责构建并加载共享库，调用 UPMEM host bridge，并把 DPU 线性结果回传给 `PIMMoEBackend`。
 - `nano_ktrans/kernels/pim_expert_runtime.py`
   Python 侧的 fused expert 执行桥，负责加载 expert host bridge，并将完整 expert MLP 子图提交给 DPU。
+- `nano_ktrans/kernels/quantized_ops.py`
+  量化算子级基线实现，当前提供 CPU W4A32 operator-only matvec 与 synthetic quantizer，用于脱离完整 decode 链路单独比较量化矩阵向量乘。
+- `nano_ktrans/kernels/pim_quantized_runtime.py`
+  Python 侧的 quantized matvec 执行桥，负责将 packed int4 qweight 与 scales 持久化加载到 PIM，再重复执行 operator-only matvec。
 - `nano_ktrans/kernels/pim_native/`
-  DPU 原生代码目录，当前同时包含 linear kernel、fused expert kernel、对应 host bridge 和 build 脚本。
+  DPU 原生代码目录，当前同时包含 linear kernel、fused expert kernel、quantized matvec kernel、对应 host bridge 和 build 脚本。
 - `benchmarks/benchmark_inference.py`
   统一 benchmark 入口，用于比较 `cpu`、`cuda`、`cuda_cpu_offload`、`cuda_pim_shadow`。
 - `benchmarks/pim_microbench/`
   独立的 UPMEM host/DPU microbenchmark，用来测真实硬件上的传输与整数 kernel 指标。
+- `benchmarks/benchmark_quant_matvec.py`
+  独立 operator-only benchmark，支持 synthetic W4A32 或真实 GPTQ expert projection，直接比较 CPU 与 PIM 的单算子矩阵向量乘。
 
 ## 数据流
 
@@ -45,6 +51,46 @@ tags: [architecture]
 4. 冷 expert 请求通过 `ExpertOffloadBackend` 派发。
 5. `CPUMoEBackend`、`PIMMoEBackend(pim_shadow)` 或 `PIMMoEBackend(pim)` 处理 offloaded expert 请求。
 6. offload 输出与 GPU 输出合并，再交还推理引擎继续 decode。
+
+## 量化算子级实验路径
+
+1. `WeightLoader` 从 GPTQ checkpoint 中读取某个 expert projection 的 `qweight / scales / g_idx`。
+2. 当前最小支持路径假设：
+   - `bits=4`
+   - `sym=true`
+   - `group_size=128`
+   - 顺序 `g_idx`
+3. CPU 基线通过 `GPTQLinearWeight.dequantize()` 还原权重，再执行 `F.linear`，作为 operator-only baseline。
+4. PIM quantized runtime 先将 packed int4 权重与 scales 持久化加载到 DPU：
+   - `pim_quantized_load_weights(...)`
+   - 后续 repeated runs 只走 `pim_quantized_run(...)`
+5. DPU quantized kernel 当前在 DPU 上执行：
+   - int4 unpack
+   - 逐 group scale 反量化
+   - dequantized weight 与 float32 input 的矩阵向量乘
+7. quantized runtime 现已暴露分项 profile：
+   - `load_qweight_transfer_seconds`
+   - `load_scale_transfer_seconds`
+   - `load_total_seconds`
+   - `input_transfer_seconds_avg`
+   - `launch_seconds_avg`
+   - `output_transfer_seconds_avg`
+   - `runtime_total_seconds_avg`
+8. 当前真实 GPTQ operator-only 结果表明，W4A32 PIM 路径的大头时间集中在 `launch_seconds_avg`，说明主瓶颈是 DPU kernel 执行而不是 host 端输入/输出搬运。
+
+9. quantized benchmark 现已支持 `transfer-only` 剖析模式，可在不做 DPU dequant/matvec 的情况下测纯 host<->DPU 传输下界，用于和完整算子路径拆分对比。
+
+10. quantized DPU kernel 现已支持多种 `kernel_mode` 进行阶段剖析：
+   - `transfer_only`：只测 host<->DPU 搬运
+   - `unpack_only`：测 int4 unpack 开销
+   - `dequant_only`：测 unpack + dequant 开销
+   - `full`：完整 unpack + dequant + matvec
+   当前真实 GPTQ 结果显示，瓶颈主要集中在 unpack/dequant 阶段。
+
+11. quantized DPU kernel 现已对每个 block / group 预计算 16 项 dequant LUT，减少 inner loop 中的重复浮点 `(q - zp) * scale` 计算；这已带来明显加速，但还不足以让 PIM operator-only 超过 CPU。
+
+6. 这条路径的目标不是先打通完整 MoE，而是先回答一个更直接的问题：
+   - “在同一算子上，使用持久化驻留的 W4A32/GPTQ 权重时，PIM 是否可能比 CPU 更快？”
 
 ### 当前 decode 迁移执行链
 
@@ -177,6 +223,14 @@ tags: [architecture]
     - layer forward：消费剩余未就绪/未提前应用的迁移，并执行真实 GPU/offload 混合计算
     - backend/offload tier：继续承担 CPU/PIM 数值计算
     这比早期“所有迁移控制都塞在 `HybridMoE.forward()` 里”更接近真正的流水线系统。
+30. benchmark / example 路径现在也已经能显式接通 background offload worker：
+    - `benchmark_inference.py` 和 `example.py` 新增了 `--enable-background-offload-worker`
+    - benchmark 单次 generation 会在 prefill/decode 前启动 worker，结束后停止
+    - 因而真实宿主机上的 `cuda_pim` benchmark 已经可以直接跑到后台 `prefetching -> ready -> warmed -> activated` 路径，而不再只停留在前台 refresh hook
+31. 这意味着当前系统已经不只是“模型内部有 background worker 骨架”，而是：
+    - `LLM.generate()` 可使用后台 worker
+    - `benchmark_inference.py` 的真实测量路径也可使用后台 worker
+    - 后续性能分析终于可以直接验证后台 worker 对真实 `cuda_pim` benchmark 的影响
 30. resident tier 到 staging cache 的路径也开始收敛：
     - `ExpertOffloadBackend` 现在可以导出 resident expert 权重
     - `HybridMoE._request_prefetch()` 会优先尝试从 offload backend 直接拿 resident weights

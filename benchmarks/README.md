@@ -3,6 +3,7 @@
 This directory contains two benchmark entry points:
 
 - `benchmark_inference.py`: benchmarks nano-ktrans inference on `cpu`, `cuda`, `cuda_cpu_offload`, `cuda_pim`, and `cuda_pim_shadow`.
+- `benchmark_quant_matvec.py`: benchmarks operator-only `W4A32` CPU vs PIM matvec on GPTQ-Int4 or synthetic weights.
 - `pim_microbench/`: contains a standalone UPMEM microbenchmark for transfer and kernel timing.
 
 ## Inference Benchmark
@@ -26,6 +27,7 @@ Notes:
 - `cuda_pim` routes offloaded experts through the real experimental PIM backend. In the current implementation, expert linear projections run on DPU while SiLU/gating stays on the host, and larger flattened batches still fall back to CPU.
 - `cuda_pim_shadow` uses the same numerically-correct CPU fallback for offloaded experts but exposes PIM visibility and routing counters inside the main inference path.
 - If CUDA is not available in the current session, CUDA backends are reported as `unavailable` instead of crashing.
+- `benchmark_inference.py` now supports `--enable-background-offload-worker` and `--background-offload-poll-interval-seconds`, so real `cuda_pim` / dynamic-scheduler runs can exercise the staged background migration pipeline during benchmarked generation instead of only inside `example.py`.
 - When `--scheduler-profile-sweep` is used, the output JSON now includes `profile_sweep_summary`, which auto-compares:
   - `decode_tokens_per_second`
   - non-cold promotion totals/ratios (`activated + warm`)
@@ -88,3 +90,59 @@ Important:
 - Real hardware benchmarking requires allocatable UPMEM rank devices. If `dpu_alloc_ranks` fails, the benchmark binary will exit with a DPU allocation error.
 - Simulator runs are useful to validate the benchmark implementation, but not to claim hardware PIM performance.
 - The current PIM microbenchmark is memory-oriented and uses integer arithmetic (`y = x * scalar + 1`). It does **not** measure floating-point throughput or MoE GEMM performance.
+
+## Quantized Operator Benchmark
+
+This benchmark compares only the `W4A32` matvec operator:
+
+- CPU grouped: GPTQ-style symmetric INT4 dequantization per group + `matvec`
+- CPU dense: dequantize full weight first, then run dense `matvec`
+- PIM: resident INT4 weight shards + on-DPU dequantization + `matvec`
+- PIM int8 fixed-point: host-side `A8` quantization + group `int16` dequant LUT + on-DPU `int8 x int16 -> int32`
+
+Synthetic validation:
+
+```bash
+cd /home/yangfu/nano-ktrans
+source /usr/upmem_env.sh hw
+./.venv/bin/python benchmarks/benchmark_quant_matvec.py \
+  --synthetic \
+  --synthetic-input-dim 2048 \
+  --synthetic-output-dim 768 \
+  --synthetic-group-size 128 \
+  --batch-size 1 \
+  --repeats 5 \
+  --rank-count 4
+```
+
+Real GPTQ checkpoint:
+
+```bash
+cd /home/yangfu/nano-ktrans
+source /usr/upmem_env.sh hw
+./.venv/bin/python benchmarks/benchmark_quant_matvec.py \
+  --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 \
+  --layer-idx 0 \
+  --expert-idx 0 \
+  --proj-name gate \
+  --batch-size 1 \
+  --repeats 5 \
+  --rank-count 4 \
+  --json-out benchmarks/results/qwen3_gptq_w4a32_gate.json
+```
+
+Notes:
+
+- The current implementation assumes GPTQ `sym=true` and sequential `g_idx`.
+- JSON output now includes both `cpu_grouped` and `cpu_dense` baselines:
+  - `cpu_grouped` is closer to the operator path actually executed on PIM
+  - `cpu_dense` is a lower-bound CPU baseline after full dequantization
+- JSON output also includes `pim_int8_fixed`, which is the current stable integerized prototype path. More aggressive `mode=5/6` experiments are omitted from the default benchmark output; pass `--include-experimental-modes` only when you explicitly want to probe unfinished kernels.
+- PIM timing is now split into:
+  - `input_transfer_seconds_avg`
+  - `launch_seconds_avg`
+  - `output_transfer_seconds_avg`
+  - `runtime_total_seconds_avg`
+  so operator-only runs can separate host->DPU input staging, synchronous DPU launch/compute, and DPU->host result readback.
+- PIM weights are persisted inside the quantized runtime after `load_weights`; benchmark timing focuses on repeated operator execution, not full model inference.
+- This benchmark is intentionally operator-only and does not include routing, overlap scheduling, or full MoE execution.

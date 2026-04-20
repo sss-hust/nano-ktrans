@@ -32,6 +32,67 @@ def test_pim_linear_runtime_matches_cpu():
 
 
 @pytest.mark.skipif(not _has_real_dpu(), reason="Real UPMEM hardware and toolchain are required.")
+def test_pim_quantized_runtime_matches_cpu():
+    from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+    from nano_ktrans.kernels.quantized_ops import cpu_w4a32_matvec, quantize_symmetric_w4a32
+
+    torch.manual_seed(0)
+    weight = torch.randn(64, 128, dtype=torch.float32)
+    inputs = torch.randn(1, 128, dtype=torch.float32)
+    quantized = quantize_symmetric_w4a32(weight, group_size=64, linear_prefix="synthetic")
+
+    runtime = PIMQuantizedRuntime.get_shared(rank_count=1)
+    expected = cpu_w4a32_matvec(inputs, quantized).output
+    actual = runtime.linear(inputs, quantized)
+
+    assert actual.shape == expected.shape
+    assert torch.allclose(actual, expected, atol=5e-2, rtol=5e-2)
+    profile = runtime.last_profile()
+    assert set(profile) == {
+        "load_qweight_transfer_seconds",
+        "load_scale_transfer_seconds",
+        "load_total_seconds",
+        "input_transfer_seconds",
+        "launch_seconds",
+        "output_transfer_seconds",
+        "runtime_total_seconds",
+    }
+    assert profile["load_qweight_transfer_seconds"] >= 0.0
+    assert profile["load_scale_transfer_seconds"] >= 0.0
+    assert profile["load_total_seconds"] >= 0.0
+    assert profile["input_transfer_seconds"] >= 0.0
+    assert profile["launch_seconds"] >= 0.0
+    assert profile["output_transfer_seconds"] >= 0.0
+    assert profile["runtime_total_seconds"] >= 0.0
+    transfer_only = runtime.linear(inputs, quantized, kernel_mode=1)
+    assert transfer_only.shape == expected.shape
+    assert torch.count_nonzero(transfer_only) == 0
+    int8_fixed = runtime.linear(inputs, quantized, kernel_mode=4)
+    assert int8_fixed.shape == expected.shape
+    assert torch.isfinite(int8_fixed).all()
+    assert torch.allclose(int8_fixed, expected, atol=1.5, rtol=5e-1)
+
+
+@pytest.mark.skipif(not _has_real_dpu(), reason="Real UPMEM hardware and toolchain are required.")
+def test_pim_quantized_runtime_int8_fixed_batch_tile_matches_cpu():
+    from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+    from nano_ktrans.kernels.quantized_ops import cpu_w4a32_matvec, quantize_symmetric_w4a32
+
+    torch.manual_seed(1)
+    weight = torch.randn(64, 128, dtype=torch.float32)
+    inputs = torch.randn(4, 128, dtype=torch.float32)
+    quantized = quantize_symmetric_w4a32(weight, group_size=64, linear_prefix="synthetic")
+
+    runtime = PIMQuantizedRuntime.get_shared(rank_count=1)
+    expected = cpu_w4a32_matvec(inputs, quantized).output
+    actual = runtime.linear(inputs, quantized, kernel_mode=4)
+
+    assert actual.shape == expected.shape
+    assert torch.isfinite(actual).all()
+    assert torch.allclose(actual, expected, atol=1.5, rtol=5e-1)
+
+
+@pytest.mark.skipif(not _has_real_dpu(), reason="Real UPMEM hardware and toolchain are required.")
 def test_pim_moe_backend_real_mode_uses_dpu(tmp_path):
     from nano_ktrans.kernels.pim_moe import PIMMoEBackend
 

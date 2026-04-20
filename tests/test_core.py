@@ -6756,3 +6756,74 @@ class TestDynamicScheduler:
         assert calls["shutdown"] == 1
         assert calls["prefill"] == 1
         assert calls["decode"] == 1
+
+    def test_benchmark_run_single_generation_starts_and_stops_background_worker(self):
+        from benchmarks.benchmark_inference import run_single_generation
+
+        class DummyTokenizer:
+            eos_token_id = 99
+
+            def __call__(self, prompt, return_tensors="pt"):
+                return type(
+                    "Inputs",
+                    (),
+                    {"input_ids": torch.tensor([[11, 12]], dtype=torch.long)},
+                )()
+
+            def decode(self, generated_ids, skip_special_tokens=True):
+                return "decoded"
+
+        class DummyEngine:
+            def __init__(self):
+                self.start_calls = 0
+                self.stop_calls = 0
+                self.prefill_calls = 0
+                self.decode_calls = 0
+
+            def start_background_offload_worker(self):
+                self.start_calls += 1
+
+            def stop_background_offload_worker(self):
+                self.stop_calls += 1
+
+            def prefill(self, input_ids):
+                self.prefill_calls += 1
+                logits = torch.zeros(1, input_ids.shape[1], 128)
+                logits[0, -1, 7] = 1.0
+                return logits
+
+            def decode_step(self, next_token, current_seq_len):
+                self.decode_calls += 1
+                logits = torch.zeros(1, 1, 128)
+                logits[0, -1, 99] = 1.0
+                return logits
+
+        class DummyLLM:
+            def __init__(self):
+                self.device = "cpu"
+                self.tokenizer = DummyTokenizer()
+                self.engine = DummyEngine()
+                self.reset_calls = 0
+
+            def reset_offload_diagnostics(self):
+                self.reset_calls += 1
+
+            def get_offload_diagnostics(self):
+                return {
+                    "dynamic_scheduler": {},
+                    "layers": [],
+                    "offload_refresh": {},
+                    "layer_count": 0,
+                    "scheduler_profile": {},
+                }
+
+        llm = DummyLLM()
+        result = run_single_generation(llm, "hi", max_new_tokens=2)
+
+        assert llm.reset_calls == 1
+        assert llm.engine.start_calls == 1
+        assert llm.engine.stop_calls == 1
+        assert llm.engine.prefill_calls == 1
+        assert llm.engine.decode_calls == 1
+        assert result["generated_tokens"] == 2
+        assert result["output_text"] == "decoded"
