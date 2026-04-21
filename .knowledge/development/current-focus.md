@@ -29,9 +29,35 @@ updated: 2026-04-17 05:58
 updated: 2026-04-19 00:50
 updated: 2026-04-19 02:10
 updated: 2026-04-19 12:40
+updated: 2026-04-21 19:45
+updated: 2026-04-21 20:05
 ---
 
 # 🔥 当前工作焦点
+
+## 本轮新增（2026-04-21）
+
+- [x] 代码质量第一批修复（`fix/code-quality-batch1` 分支，12 文件 +230/−69）
+- [x] PIM + MoE 文献综述（9 篇论文 → ADR-001 + 6 个可借鉴创新点 P1–P6）
+- [x] **P1 落地**：MRS score-aware hotness（HybriMoE）
+      - `update_hotness(..., router_scores=, mrs_alpha=, top_p=)` 新 API
+      - `SchedulerConfig.hotness_mrs_alpha / hotness_top_p`
+      - `HybridMoE.forward` 把 topk_weights 传给 scheduler.observe
+      - 默认关闭，完全向后兼容
+- [x] **P2 落地（最小可用）**：Expert Map Store + prompt 语义预取（fMoE）
+      - 新建 `utils/expert_map_store.py`（~250 行，线程安全 LRU + 两阶段搜索）
+      - `MixtralModel.forward` 用 mean token embedding 做 prompt 锚点
+      - 与 dynamic scheduler 解耦，所有预取走同一 `_request_prefetch` 漏斗
+- [x] 新增 11 个单测（P1×6 + P2×5）；现有 `.knowledge` 已同步更新
+
+下一步（未完成）：
+- [ ] 宿主机跑 `cuda_cpu_offload + MRS on/off` profile sweep，验证 `cold_promotion_penalty` 是否下降
+- [ ] 宿主机跑 `enable_expert_map_store on/off`，验证 `decode_prefetch_hits` 命中率
+- [ ] P3 Fiddler cost model（升级 `pim_prefill_token_threshold` 成 `BackendCostModel`）
+
+---
+
+## 历史焦点（保留）
 
 ## 正在进行
 

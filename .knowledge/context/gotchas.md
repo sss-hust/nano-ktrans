@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-07
+updated: 2026-04-21
 tags: [pitfalls, debugging]
 ---
 
@@ -118,3 +118,53 @@ tags: [pitfalls, debugging]
   - `gpu_experts_mask`
   - `gpu_experts` 中真实存在的模块对象
 - 修复：当前最小可执行数据面已经改成 decode 阶段先 drain migration queue，再同步 materialize / demote GPU experts，并立即调用 backend 的 `update_gpu_expert_mask()`。
+
+<!-- updated: 2026-04-21 20:00 -->
+
+## MRS hotness 必须按 token 数归一化
+
+- 现象：实现 HybriMoE MRS 公式 `S = α·TopP(s) + (1-α)·S` 时，第一版直接把 `torch.scatter_add_(..., router_scores)` 的结果当作新 observation；prefill 阶段一次 observe 看到 512 个 token，score_mass 被推到极大值，后续 decode 的 `(1-α)` 衰减完全盖不住，EMA 永远卡在高位。
+- 根因：MRS 原论文的 `TopP(s)` 是"每次 iteration 的 top-p 分数"，不是"整段序列累加"；prefill 等价于一次性看到很多次 decode。
+- 修复：`utils/expert_runtime_state.py::update_hotness` 在 MRS 分支里做 `score_mass = score_mass / token_count`，保证单次 observe 的贡献落在 `[0, 1]` 合理量级。
+- 经验：所有把 router 概率灌进 EMA 的设计都要考虑 prefill 放大效应；`bincount` 模式同样存在这个问题，只是旧代码没修。
+
+<!-- updated: 2026-04-21 20:00 -->
+
+## `@lru_cache` 对 dict 参数会 TypeError，不是"自动忽略"
+
+- 现象：`rotary_embedding.get_rope(rope_scaling=dict)` 在 Qwen3-30B 等使用 rope_scaling 的 checkpoint 上直接 `TypeError: unhashable type: 'dict'`。
+- 根因：`@lru_cache` 把所有参数拼成缓存 key，dict 是 unhashable。
+- 修复：拆成两层：`_validate_rope_scaling`（不缓存）+ `_build_rope(@lru_cache)`（只缓存 hashable 的 head_size/rotary_dim/max_position/base）。
+- 经验：任何给 `@lru_cache` 函数加非 hashable 参数的 PR 必须拆分，**不要信"反正没人传 dict"**。
+
+<!-- updated: 2026-04-21 20:00 -->
+
+## Expert Map Store 的 prompt 锚点不能用 BOS token embedding
+
+- 现象：Expert Map Store 第一版用 `hidden_states[0]`（第一个 token 的 embedding）作为 prompt 语义向量，但在真实多请求场景下，所有 prompt 的 BOS token 都是同一个，embedding 几乎完全一致，语义搜索退化成随机命中。
+- 修复：改用 `embed_tokens(input_ids).mean(dim=(0, 1))`，跨所有 token 取平均，足以区分不同主题的 prompt，且不需要额外 forward 过一层 encoder。
+- 经验：fMoE 论文 §5.1 已经论证过 "model 自身的 embedding layer 输出就足以做 expert routing 预测"，但要用 **token 维度的 mean** 而不是取首 token。
+
+<!-- updated: 2026-04-21 20:00 -->
+
+## `torch.bincount` 不支持浮点 weight，MRS 必须用 `scatter_add_`
+
+- 现象：想把 router probability mass 累加进 `[num_experts]` 张量时，第一反应是 `bincount(ids, weights=scores)`；但 `torch.bincount` 的 `weights` 只支持 int tensor，给浮点会报 `RuntimeError: bincount only supports 1-d non-negative integral inputs`。
+- 修复：改用 `score_mass.scatter_add_(0, top_ids.reshape(-1), top_values.reshape(-1))`，语义等价且原生支持浮点。
+- 经验：涉及"按 index 累加 float"的场景统一用 `scatter_add_`；`bincount` 仅限二值/计数。
+
+<!-- updated: 2026-04-21 20:00 -->
+
+## 向后兼容：给 scheduler.observe 加新参数要保留双计数器
+
+- 现象：`DynamicExpertScheduler.observe` 增加 `topk_weights` kwargs 时，必须考虑"MRS 开启但某些调用路径没传 weights"的场景（例如 profile 调用、测试调用）。
+- 修复：`observe` 内部判断 `use_mrs = hotness_mrs_alpha is not None and topk_weights is not None`；两条路径分别累加 `hotness_mrs_observations / hotness_bincount_observations` 两个计数。
+- 经验：**benchmark 如果看不到"新路径实际跑了多少次 vs 回退到旧路径多少次"，就没法判断新 feature 是否生效**。所有 feature flag 式改动都应该同时埋点新旧路径。
+
+<!-- updated: 2026-04-21 20:00 -->
+
+## `record_router_probs` 不要放进 `_pipeline_lock` 块里
+
+- 现象：Expert Map Store 第一版在 `HybridMoE.forward` 的 `with self._pipeline_lock:` 块内部调用 `_record_router_probs`；`_pipeline_lock` 本意是保护 migration lifecycle / resident set / prepared tier 等共享状态，会被 background worker 持锁。放 record 进去等于无辜阻塞 background worker。
+- 修复：`_record_router_probs` 只写 per-iteration 的 in-flight `ExpertMap`（由 `attach_expert_map` 挂到 `self._current_expert_map`，单线程），完全不触及共享状态，挪到 lock 外。
+- 经验：**任何只改 per-request / per-iteration 私有对象的操作都不应持 shared pipeline lock**；否则锁粒度越来越粗、background worker 越来越难真正并行。
