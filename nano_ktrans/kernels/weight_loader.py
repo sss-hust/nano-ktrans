@@ -94,16 +94,16 @@ class ExpertWeightLoader:
         self._quantize_config = self._load_quantize_config()
 
     def _load_quantize_config(self) -> Dict[str, object]:
+        import json
+
         for filename in ("quantize_config.json", "config.json"):
             path = os.path.join(self.weight_path, filename)
             if not os.path.exists(path):
                 continue
             try:
-                import json
-
                 with open(path, "r", encoding="utf-8") as handle:
                     payload = json.load(handle)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 continue
             if filename == "quantize_config.json":
                 return payload

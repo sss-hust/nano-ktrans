@@ -44,14 +44,40 @@ class RotaryEmbedding(nn.Module):
         key = apply_rotary_emb(key, cos, sin)
         return query, key
 
+
+def _validate_rope_scaling(rope_scaling: dict | None) -> None:
+    """
+    Accept identity / disabled scaling configs without implementing real
+    YARN / linear / dynamic scaling. Any explicit scaling type raises so
+    callers fail loudly rather than silently producing wrong RoPE tables.
+    """
+    if rope_scaling is None:
+        return
+    rope_type = rope_scaling.get("type") or rope_scaling.get("rope_type")
+    if rope_type not in (None, "", "default", "none", "identity"):
+        raise NotImplementedError(
+            f"RoPE scaling type {rope_type!r} is not implemented in nano-ktrans."
+        )
+
+
 @lru_cache(1)
+def _build_rope(
+    head_size: int,
+    rotary_dim: int,
+    max_position: int,
+    base: float,
+) -> RotaryEmbedding:
+    return RotaryEmbedding(head_size, rotary_dim, max_position, base)
+
+
 def get_rope(
     head_size: int,
     rotary_dim: int,
     max_position: int,
     base: float,
     rope_scaling: dict | None = None,
-):
-    assert rope_scaling is None
-    rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base)
-    return rotary_emb
+) -> RotaryEmbedding:
+    # Validate (and reject unimplemented) scaling BEFORE touching the cache so
+    # unhashable dicts never reach lru_cache.
+    _validate_rope_scaling(rope_scaling)
+    return _build_rope(head_size, rotary_dim, max_position, base)

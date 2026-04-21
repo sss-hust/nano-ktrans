@@ -1,8 +1,12 @@
+import logging
 import os
 from glob import glob
 import torch
 from torch import nn
 from safetensors import safe_open
+
+logger = logging.getLogger("nano_ktrans.loader")
+
 
 def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
     param.data.copy_(loaded_weight)
@@ -15,8 +19,12 @@ def load_model(model: nn.Module, path: str):
     """
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
     weight_name_substitutions = getattr(model, "weight_name_substitutions", [])
-    
-    for file in glob(os.path.join(path, "*.safetensors")):
+
+    files = glob(os.path.join(path, "*.safetensors"))
+    loaded = 0
+    skipped = 0
+
+    for file in files:
         with safe_open(file, "pt", "cpu") as f:
             for weight_name in f.keys():
                 target_param_name = weight_name
@@ -36,12 +44,11 @@ def load_model(model: nn.Module, path: str):
                     param = model.get_parameter(target_param_name)
                 except AttributeError:
                     # Module doesn't exist, this happens for offloaded CPU experts
-                    continue
-                except KeyError:
-                    # Parameter doesn't exist in the dict
+                    skipped += 1
                     continue
 
                 if param is None:
+                    skipped += 1
                     continue
 
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -49,3 +56,9 @@ def load_model(model: nn.Module, path: str):
                     weight_loader(param, f.get_tensor(weight_name), shard_id)
                 else:
                     weight_loader(param, f.get_tensor(weight_name))
+                loaded += 1
+
+    logger.info(
+        "load_model(%s): loaded %d tensors, skipped %d (files=%d)",
+        path, loaded, skipped, len(files),
+    )

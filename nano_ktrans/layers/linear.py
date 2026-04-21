@@ -34,9 +34,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         super().__init__(input_size, sum(output_sizes), bias)
         
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: int):
+        if not 0 <= loaded_shard_id < len(self.output_sizes):
+            raise ValueError(
+                f"MergedColumnParallelLinear shard id out of range: got {loaded_shard_id}, "
+                f"expected in [0, {len(self.output_sizes)})."
+            )
         param_data = param.data
         shard_offset = sum(self.output_sizes[:loaded_shard_id])
         shard_size = self.output_sizes[loaded_shard_id]
+        assert shard_offset + shard_size <= param_data.shape[0], (
+            f"MergedColumnParallelLinear shard [{shard_offset}:{shard_offset + shard_size}] "
+            f"overflows parameter of size {param_data.shape[0]}."
+        )
         param_data = param_data.narrow(0, shard_offset, shard_size)
         param_data.copy_(loaded_weight)
 
@@ -64,9 +73,14 @@ class QKVParallelLinear(ColumnParallelLinear):
         elif loaded_shard_id == "k":
             shard_size = self.num_kv_heads * self.head_size
             shard_offset = self.num_heads * self.head_size
-        else:
+        elif loaded_shard_id == "v":
             shard_size = self.num_kv_heads * self.head_size
             shard_offset = self.num_heads * self.head_size + self.num_kv_heads * self.head_size
+        else:
+            raise ValueError(
+                f"QKVParallelLinear.weight_loader got unknown shard id {loaded_shard_id!r}; "
+                f"expected one of 'q', 'k', 'v'."
+            )
         param_data = param_data.narrow(0, shard_offset, shard_size)
         param_data.copy_(loaded_weight)
 

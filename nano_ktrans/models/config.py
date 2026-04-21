@@ -150,6 +150,12 @@ class GenericMoeConfig:
         if num_key_value_heads is None:
             num_key_value_heads = getattr(hf_config, "num_attention_heads")
 
+        num_experts_per_tok_raw = getattr(hf_config, "num_experts_per_tok", None)
+        if num_experts_per_tok_raw is None:
+            num_experts_per_tok_value = 2
+        else:
+            num_experts_per_tok_value = int(num_experts_per_tok_raw)
+
         return cls(
             arch=arch,
             vocab_size=hf_config.vocab_size,
@@ -161,7 +167,7 @@ class GenericMoeConfig:
             num_attention_heads=hf_config.num_attention_heads,
             num_key_value_heads=num_key_value_heads,
             num_local_experts=num_local_experts,
-            num_experts_per_tok=getattr(hf_config, "num_experts_per_tok", 2) or 0,
+            num_experts_per_tok=num_experts_per_tok_value,
             rms_norm_eps=getattr(hf_config, "rms_norm_eps", 1e-5),
             max_position_embeddings=getattr(hf_config, "max_position_embeddings", 32768),
             rope_theta=rope_theta,
