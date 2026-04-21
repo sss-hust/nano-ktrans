@@ -139,6 +139,8 @@ def scheduler_profile_summary(profile: str, config: SchedulerConfig) -> dict[str
         "migration_cooldown_steps": int(config.migration_cooldown_steps),
         "decode_require_prefetch_ready": bool(config.decode_require_prefetch_ready),
         "prefetch_candidate_budget_per_layer": int(config.prefetch_candidate_budget_per_layer),
+        "hotness_mrs_alpha": config.hotness_mrs_alpha,
+        "hotness_top_p": config.hotness_top_p,
         "prepared_cache_budget_heuristic": int(prepared_cache_budget),
         "prepared_controller_aggressiveness_heuristic": float(
             resolve_prepared_controller_aggressiveness(profile)

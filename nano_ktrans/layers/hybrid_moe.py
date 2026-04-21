@@ -29,6 +29,7 @@ from nano_ktrans.kernels.pim_moe import PIMMoEBackend
 from nano_ktrans.layers.expert_mlp import build_expert_module, load_expert_weights
 from nano_ktrans.scheduler import DynamicExpertScheduler
 from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
+from nano_ktrans.utils.expert_map_store import ExpertMap, ExpertMapStore
 from nano_ktrans.utils.context import get_context
 
 
@@ -79,6 +80,8 @@ class HybridMoE(nn.Module):
         expert_warm_cache_size: int = 4,
         expert_prepared_cache_size: Optional[int] = None,
         prepared_controller_aggressiveness: float = 0.0,
+        expert_map_store: "ExpertMapStore | None" = None,
+        expert_map_prefetch_top_k: int = 2,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -141,6 +144,18 @@ class HybridMoE(nn.Module):
             None if expert_prepared_cache_size is None else max(0, int(expert_prepared_cache_size))
         )
         self.prepared_controller_aggressiveness = max(0.0, float(prepared_controller_aggressiveness))
+        # ── fMoE Expert Map Store integration (optional) ─────────────
+        # `expert_map_store` is shared across all HybridMoE layers inside a
+        # MixtralModel. The in-flight iteration is owned by MixtralModel.forward
+        # and updated via :meth:`record_router_probs`; this layer only
+        # contributes its own probability distribution and consumes the
+        # store's semantic / trajectory prefetch suggestions.
+        self.expert_map_store = expert_map_store
+        self.expert_map_prefetch_top_k = max(0, int(expert_map_prefetch_top_k))
+        self._current_expert_map: "ExpertMap | None" = None
+        self.expert_map_prefetch_submitted = 0
+        self.expert_map_semantic_prefetch = 0
+        self.expert_map_trajectory_prefetch = 0
         self._pipeline_lock = RLock()
         self.warm_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
         self.activated_expert_cache: "OrderedDict[str, nn.Module]" = OrderedDict()
@@ -2718,6 +2733,88 @@ class HybridMoE(nn.Module):
                 if submitted >= candidate_budget:
                     break
 
+    # ── fMoE Expert Map Store hooks ─────────────────────────────────────
+    def attach_expert_map(self, expert_map: "ExpertMap | None") -> None:
+        """
+        Bind the in-flight :class:`ExpertMap` owned by ``MixtralModel.forward``
+        for this iteration. Called once per forward pass before the first
+        layer runs. Passing ``None`` clears the binding (after commit).
+        """
+        self._current_expert_map = expert_map
+
+    def _record_router_probs(self, router_logits: torch.Tensor) -> None:
+        """
+        Persist this layer's gate probability distribution onto the in-flight
+        expert map, and ask the store for semantic / trajectory prefetch
+        candidates. Only active when an ExpertMapStore is attached.
+
+        The recorded distribution is averaged across tokens — this matches
+        fMoE's P_l ∈ R^J semantics (one per-layer distribution per iteration,
+        not per token).
+        """
+        if self.expert_map_store is None or self._current_expert_map is None:
+            return
+        if router_logits.numel() == 0:
+            return
+        # Average gate probabilities over the (flattened) token dim so we
+        # keep a single R^J vector per layer regardless of prefill length.
+        probs = torch.softmax(router_logits.detach().to(torch.float32), dim=-1)
+        mean_probs = probs.mean(dim=0).cpu().contiguous()
+        self._current_expert_map.record_layer(self.layer_idx, mean_probs)
+
+    def _request_map_store_prefetch(self) -> None:
+        """
+        Ask the ExpertMapStore for extra prefetch candidates for this layer.
+
+        * When ``layer_idx < prefetch_distance`` we fall back to the
+          **semantic** search (prompt-only), since the trajectory has no
+          overlapping layers yet.
+        * Otherwise we use the **trajectory** search against the in-flight
+          map's already-recorded distributions.
+
+        Suggestions are merged with the dynamic scheduler's prefetch path:
+        they simply become additional `_request_prefetch(expert_idx)` calls
+        that hit the same `ExpertMaterializationManager`, so cache locality,
+        lifecycle tracking and budgeting remain consistent.
+        """
+        store = self.expert_map_store
+        inflight = self._current_expert_map
+        if store is None or inflight is None:
+            return
+        top_k = self.expert_map_prefetch_top_k
+        if top_k <= 0:
+            return
+
+        distance = store.prefetch_distance
+        if self.layer_idx < distance:
+            picks = store.semantic_search(
+                inflight.prompt_embedding,
+                layer_idx=self.layer_idx,
+                top_k=top_k,
+            )
+            source_counter = "semantic"
+        else:
+            picks = store.trajectory_search(
+                observed=inflight.layer_distributions_raw,
+                target_layer_idx=self.layer_idx,
+                top_k=top_k,
+            )
+            source_counter = "trajectory"
+        if not picks:
+            return
+
+        for expert_idx in picks:
+            if self.materialization_manager.has_cached(self.layer_idx, int(expert_idx)):
+                continue
+            before = self.prefetch_enqueued
+            self._request_prefetch(int(expert_idx))
+            if self.prefetch_enqueued > before:
+                self.expert_map_prefetch_submitted += 1
+                if source_counter == "semantic":
+                    self.expert_map_semantic_prefetch += 1
+                else:
+                    self.expert_map_trajectory_prefetch += 1
+
     def _set_residency(self, expert_idx: int, residency: ExpertResidency) -> None:
         if self.residency_plan is None:
             return
@@ -3233,11 +3330,20 @@ class HybridMoE(nn.Module):
         context = get_context()
         phase = "prefill" if context.is_prefill else "decode"
         active_experts = {int(expert_idx) for expert_idx in torch.unique(topk_ids).tolist()}
+        # Record this layer's gate distribution into the in-flight expert map
+        # BEFORE scheduler observation, so trajectory-based prefetch search in
+        # subsequent layers (within the same forward) can see it.
+        self._record_router_probs(router_logits)
         with self._pipeline_lock:
             self._apply_queued_migrations(hidden_states, active_experts, phase=phase)
 
             if self.dynamic_expert_scheduler is not None and self.dynamic_expert_scheduler.enabled:
-                self.dynamic_expert_scheduler.observe(self.layer_idx, topk_ids, phase=phase)
+                self.dynamic_expert_scheduler.observe(
+                    self.layer_idx,
+                    topk_ids,
+                    phase=phase,
+                    topk_weights=topk_weights,
+                )
                 self._request_prefetch_candidates(phase=phase)
                 planned_ops = self.dynamic_expert_scheduler.plan_layer(self.layer_idx, phase=phase)
                 if planned_ops and self.offload_backend is not None:
@@ -3250,6 +3356,14 @@ class HybridMoE(nn.Module):
                     # 当前系统只有迁移控制面，没有真实 GPU/PIM 权重迁移数据面。
                     # 这里先排队；decode 阶段会消费队列并执行最小 GPU materialize/demote。
                     self.offload_backend.queue_migration_plan(planned_ops, phase=phase)
+
+            # Expert Map Store prefetch works independently of the dynamic
+            # scheduler — it uses semantic / trajectory matching of past
+            # iterations rather than current-step hotness. Feeding its picks
+            # through the same `_request_prefetch` funnel keeps cache /
+            # budget bookkeeping single-sourced.
+            self._request_map_store_prefetch()
+
             gpu_experts_mask_snapshot = self.gpu_experts_mask.detach().clone()
             gpu_experts_snapshot = dict(self.gpu_experts.items())
 
@@ -3344,6 +3458,9 @@ class HybridMoE(nn.Module):
                 "runtime_deferred_for_prefetch": self.runtime_deferred_for_prefetch,
                 "decode_prefetch_hits": self.decode_prefetch_hits,
                 "decode_prefetch_misses": self.decode_prefetch_misses,
+                "expert_map_prefetch_submitted": self.expert_map_prefetch_submitted,
+                "expert_map_semantic_prefetch": self.expert_map_semantic_prefetch,
+                "expert_map_trajectory_prefetch": self.expert_map_trajectory_prefetch,
                 "pipeline_ticks": self.pipeline_ticks,
                 "pipeline_ready_applied": self.pipeline_ready_applied,
                 "pipeline_ready_deferred": self.pipeline_ready_deferred,

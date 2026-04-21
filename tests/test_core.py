@@ -120,6 +120,29 @@ class TestLinearLayers:
         assert torch.all(linear.weight[128:192] == 2.0), "K shard incorrect"
         assert torch.all(linear.weight[192:256] == 3.0), "V shard incorrect"
 
+    def test_qkv_weight_loader_rejects_unknown_shard(self):
+        """QKVParallelLinear 对未知 shard id 应抛 ValueError"""
+        from nano_ktrans.layers.linear import QKVParallelLinear
+
+        linear = QKVParallelLinear(
+            hidden_size=64,
+            head_size=16,
+            total_num_heads=2,
+            total_num_kv_heads=2,
+        )
+        bogus = torch.zeros(32, 64)
+        with pytest.raises(ValueError):
+            linear.weight_loader(linear.weight, bogus, "x")
+
+    def test_merged_column_parallel_rejects_out_of_range_shard(self):
+        """MergedColumnParallelLinear 对越界 shard id 应抛 ValueError"""
+        from nano_ktrans.layers.linear import MergedColumnParallelLinear
+
+        linear = MergedColumnParallelLinear(input_size=32, output_sizes=[16, 16])
+        shard = torch.zeros(16, 32)
+        with pytest.raises(ValueError):
+            linear.weight_loader(linear.weight, shard, 5)
+
 
 # ============================================================
 # Test 3: Rotary Embedding
@@ -157,6 +180,24 @@ class TestRotaryEmbedding:
         q_out, k_out = rope(positions, q, k)
         assert torch.allclose(q_out[0], q_out[1], atol=1e-5), \
             "Same position should produce same rotary embedding"
+
+    def test_get_rope_accepts_identity_scaling(self):
+        """get_rope 对 identity/None rope_scaling 都应可用"""
+        from nano_ktrans.layers.rotary_embedding import get_rope, RotaryEmbedding
+
+        rope = get_rope(64, 64, 128, 10000.0, rope_scaling=None)
+        assert isinstance(rope, RotaryEmbedding)
+
+        rope2 = get_rope(64, 64, 128, 10000.0, rope_scaling={"type": "default"})
+        assert isinstance(rope2, RotaryEmbedding)
+
+    def test_get_rope_rejects_unimplemented_scaling(self):
+        """get_rope 对真实 scaling 类型应显式报错而非静默错误结果"""
+        from nano_ktrans.layers.rotary_embedding import get_rope
+
+        # lru_cache 以参数做 key，这里传入新的 base 避免命中之前的缓存项
+        with pytest.raises(NotImplementedError):
+            get_rope(64, 64, 128, 12345.0, rope_scaling={"type": "yarn", "factor": 2.0})
 
 
 # ============================================================
@@ -6827,3 +6868,223 @@ class TestDynamicScheduler:
         assert llm.engine.decode_calls == 1
         assert result["generated_tokens"] == 2
         assert result["output_text"] == "decoded"
+
+
+# ============================================================
+# Test N+1: MRS Score-Aware Hotness (HybriMoE, ADR-001 P1)
+# ============================================================
+class TestHotnessMRS:
+    def test_bincount_mode_matches_legacy_behaviour(self):
+        """未提供 mrs_alpha 时，update_hotness 保持与旧实现一致"""
+        from nano_ktrans.utils.expert_runtime_state import update_hotness
+
+        hotness = torch.zeros(4, dtype=torch.float32)
+        ids = torch.tensor([[0, 1], [0, 2]])
+        updated = update_hotness(hotness, ids, decay=0.5)
+        # 两个 token，expert 0 被选两次，expert 1/2 各一次
+        assert torch.allclose(updated, torch.tensor([2.0, 1.0, 1.0, 0.0]))
+
+    def test_mrs_mode_uses_router_scores(self):
+        """MRS 模式按 router score 加权 EMA，高分 expert 影响更大"""
+        from nano_ktrans.utils.expert_runtime_state import update_hotness
+
+        hotness = torch.zeros(4, dtype=torch.float32)
+        ids = torch.tensor([[0, 1]])
+        scores = torch.tensor([[0.9, 0.1]])
+        updated = update_hotness(
+            hotness, ids, router_scores=scores, mrs_alpha=0.5, top_p=2
+        )
+        # alpha=0.5 → S = 0.5 * (score / tokens=1) + 0 = 0.5 * [0.9, 0.1, 0, 0]
+        assert updated[0].item() == pytest.approx(0.45)
+        assert updated[1].item() == pytest.approx(0.05)
+        assert updated[2].item() == 0.0
+
+    def test_mrs_top_p_truncates_low_score_experts(self):
+        """top_p 截断：只有前 p 个 expert 进入 EMA"""
+        from nano_ktrans.utils.expert_runtime_state import update_hotness
+
+        hotness = torch.zeros(4, dtype=torch.float32)
+        ids = torch.tensor([[0, 1, 2]])
+        scores = torch.tensor([[0.5, 0.4, 0.1]])
+        updated = update_hotness(
+            hotness, ids, router_scores=scores, mrs_alpha=1.0, top_p=2
+        )
+        # alpha=1.0 + top_p=2 ⇒ 只 expert 0/1 计入，expert 2 被裁
+        assert updated[0].item() == pytest.approx(0.5)
+        assert updated[1].item() == pytest.approx(0.4)
+        assert updated[2].item() == 0.0
+
+    def test_mrs_alpha_decay_without_new_observation(self):
+        """router_scores 全零/无 token 时，hotness 仍按 (1-alpha) 衰减"""
+        from nano_ktrans.utils.expert_runtime_state import update_hotness
+
+        hotness = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        ids = torch.empty((0, 2), dtype=torch.long)
+        scores = torch.empty((0, 2))
+        updated = update_hotness(
+            hotness, ids, router_scores=scores, mrs_alpha=0.25, top_p=2
+        )
+        # 空观察 ⇒ hotness 乘以 (1 - alpha) = 0.75
+        assert torch.allclose(updated, hotness * 0.75)
+
+    def test_scheduler_observe_routes_scores_when_mrs_enabled(self):
+        """DynamicExpertScheduler.observe 在开启 MRS 时使用 router scores"""
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import (
+            ExpertResidency,
+            ExpertResidencyPlan,
+        )
+
+        plan = ExpertResidencyPlan.from_gpu_masks(
+            [torch.zeros(4, dtype=torch.bool)],
+            default_offload_tier=ExpertResidency.CPU,
+        )
+        config = SchedulerConfig(
+            enabled=True,
+            gpu_budget_per_layer=1,
+            hotness_decay=0.5,
+            hotness_mrs_alpha=0.5,
+            hotness_top_p=2,
+        )
+        scheduler = DynamicExpertScheduler(residency_plan=plan, config=config)
+
+        topk_ids = torch.tensor([[0, 1]])
+        topk_weights = torch.tensor([[0.8, 0.2]])
+        scheduler.observe(0, topk_ids, phase="decode", topk_weights=topk_weights)
+        assert scheduler.hotness_mrs_observations == 1
+        assert scheduler.hotness_bincount_observations == 0
+        # expert 0 (score=0.8) 的 hotness 应该严格大于 expert 1 (score=0.2)
+        hotness = plan.layer_state(0).hotness
+        assert hotness[0].item() > hotness[1].item()
+
+    def test_scheduler_observe_falls_back_to_bincount_without_weights(self):
+        """未传 topk_weights 时，MRS 配置仍会走 bincount 分支并记入计数"""
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.expert_runtime_state import (
+            ExpertResidency,
+            ExpertResidencyPlan,
+        )
+
+        plan = ExpertResidencyPlan.from_gpu_masks(
+            [torch.zeros(4, dtype=torch.bool)],
+            default_offload_tier=ExpertResidency.CPU,
+        )
+        scheduler = DynamicExpertScheduler(
+            residency_plan=plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                hotness_mrs_alpha=0.5,
+            ),
+        )
+        scheduler.observe(0, torch.tensor([[0, 1]]), phase="decode")
+        assert scheduler.hotness_mrs_observations == 0
+        assert scheduler.hotness_bincount_observations == 1
+
+
+# ============================================================
+# Test N+2: Expert Map Store (fMoE, ADR-001 P2)
+# ============================================================
+class TestExpertMapStore:
+    def test_commit_enforces_capacity_lru(self):
+        """容量上限触发 LRU 驱逐，最旧的 iteration 先出"""
+        from nano_ktrans.utils.expert_map_store import ExpertMapStore
+
+        store = ExpertMapStore(capacity=2, prefetch_distance=1)
+        for i in range(3):
+            emap = store.begin_iteration(torch.tensor([float(i), 0.0, 0.0]))
+            emap.record_layer(0, torch.tensor([1.0, 0.0, 0.0, 0.0]))
+            store.commit_iteration(emap)
+        assert len(store) == 2
+        assert store.eviction_count == 1
+
+    def test_semantic_search_matches_closest_prompt(self):
+        """语义搜索返回与当前 prompt 最相似的历史 iteration 的高概率 expert"""
+        from nano_ktrans.utils.expert_map_store import ExpertMapStore
+
+        store = ExpertMapStore(capacity=8, prefetch_distance=2)
+        # Map A: prompt=[1,0,0]，layer 0 的高概率 expert 是 0
+        map_a = store.begin_iteration(torch.tensor([1.0, 0.0, 0.0]))
+        map_a.record_layer(0, torch.tensor([0.9, 0.05, 0.03, 0.02]))
+        store.commit_iteration(map_a)
+        # Map B: prompt=[0,1,0]，layer 0 的高概率 expert 是 3
+        map_b = store.begin_iteration(torch.tensor([0.0, 1.0, 0.0]))
+        map_b.record_layer(0, torch.tensor([0.05, 0.05, 0.1, 0.8]))
+        store.commit_iteration(map_b)
+
+        # 查询 prompt 接近 A
+        picks = store.semantic_search(
+            torch.tensor([0.95, 0.1, 0.0]),
+            layer_idx=0,
+            top_k=1,
+        )
+        assert picks == [0]
+        # 查询 prompt 接近 B
+        picks = store.semantic_search(
+            torch.tensor([0.1, 0.9, 0.0]),
+            layer_idx=0,
+            top_k=1,
+        )
+        assert picks == [3]
+
+    def test_trajectory_search_uses_observed_layers(self):
+        """轨迹搜索使用已观测到的 gate 分布匹配历史"""
+        from nano_ktrans.utils.expert_map_store import ExpertMapStore
+
+        store = ExpertMapStore(capacity=8, prefetch_distance=1)
+        map_a = store.begin_iteration(torch.zeros(3))
+        map_a.record_layer(0, torch.tensor([0.9, 0.05, 0.03, 0.02]))
+        map_a.record_layer(1, torch.tensor([0.1, 0.8, 0.05, 0.05]))
+        map_a.record_layer(2, torch.tensor([0.05, 0.05, 0.85, 0.05]))
+        store.commit_iteration(map_a)
+
+        map_b = store.begin_iteration(torch.zeros(3))
+        map_b.record_layer(0, torch.tensor([0.05, 0.05, 0.1, 0.8]))
+        map_b.record_layer(1, torch.tensor([0.8, 0.1, 0.05, 0.05]))
+        map_b.record_layer(2, torch.tensor([0.7, 0.1, 0.1, 0.1]))
+        store.commit_iteration(map_b)
+
+        # 当前 iteration 的 layer 0 分布酷似 A，因此 layer 2 应选 expert 2
+        observed = {0: torch.tensor([0.88, 0.04, 0.04, 0.04])}
+        picks = store.trajectory_search(
+            observed=observed,
+            target_layer_idx=2,
+            top_k=1,
+        )
+        assert picks == [2]
+
+    def test_trajectory_search_empty_when_no_overlap(self):
+        """无重叠层时返回空列表而不是崩溃"""
+        from nano_ktrans.utils.expert_map_store import ExpertMapStore
+
+        store = ExpertMapStore(capacity=4, prefetch_distance=1)
+        emap = store.begin_iteration(torch.zeros(2))
+        emap.record_layer(0, torch.tensor([0.5, 0.5]))
+        store.commit_iteration(emap)
+
+        picks = store.trajectory_search(
+            observed={5: torch.tensor([0.5, 0.5])},
+            target_layer_idx=5,
+            top_k=1,
+        )
+        assert picks == []
+
+    def test_diagnostics_shape(self):
+        """diagnostics 包含关键字段"""
+        from nano_ktrans.utils.expert_map_store import ExpertMapStore
+
+        store = ExpertMapStore(capacity=4, prefetch_distance=2)
+        diag = store.diagnostics()
+        for key in (
+            "capacity",
+            "prefetch_distance",
+            "size",
+            "commit_count",
+            "eviction_count",
+            "semantic_queries",
+            "semantic_hits",
+            "trajectory_queries",
+            "trajectory_hits",
+        ):
+            assert key in diag
+
