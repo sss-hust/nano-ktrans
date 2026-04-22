@@ -68,6 +68,8 @@ class PIMMoEBackend(CPUMoEBackend):
         pim_prefill_token_threshold: int = 8,
         cost_model: Optional[object] = None,
         enable_cost_model_routing: bool = True,
+        pim_layer_group_size: int = 3,
+        enable_speculative_preload_gptq: bool = False,
     ):
         self.pim_rank_count = pim_rank_count
         self.pim_bytes_per_dpu = pim_bytes_per_dpu
@@ -78,6 +80,14 @@ class PIMMoEBackend(CPUMoEBackend):
         self.pim_kernel_variant = pim_kernel_variant
         self.pim_prefill_policy = pim_prefill_policy
         self.pim_prefill_token_threshold = pim_prefill_token_threshold
+        # ADR-002 M-7: layer-group scoping of PIMQuantizedRuntime slot
+        # tables.  With group_size=3 on Qwen3 (48 layers), 16 disjoint
+        # (gate_up, down) runtime pairs exist — each holds its own
+        # 8-slot LRU and so sees a 3×8 = 24 unique-expert working set,
+        # giving a best-case hit ratio of 8/24 = 33%.  Setting
+        # group_size=48 collapses back to M-6 (singleton).
+        self.pim_layer_group_size = int(pim_layer_group_size)
+        self.enable_speculative_preload_gptq = bool(enable_speculative_preload_gptq)
         # ADR-002 M-3: cost model.  If the caller didn't pass one and
         # cost-model routing is enabled, load the M-2 baseline.  A
         # failure to load (missing file, parse error) is soft: we fall
@@ -221,16 +231,36 @@ class PIMMoEBackend(CPUMoEBackend):
         host->DPU weight transfer — the biggest single cost the
         cost-model routing couldn't see.
 
-        Falls back to the single-runtime path if either allocation
-        fails (e.g. not enough physical DPU ranks).  In the fallback,
-        both names point at the same runtime and M-5 degrades to
-        M-4 behaviour (preload miss on every call).
+        ADR-002 M-7: the profile key now also embeds a
+        ``layer_group_id`` so neighbouring layer groups each get their
+        own 8-slot MRAM LRU instead of 48 layers beating on a single
+        shared 8-slot cache.  The group size is controlled by
+        :attr:`pim_layer_group_size` (default 3, giving 16 groups over
+        48 layers — 16*2 runtimes = 32 DPU ranks, well under the 39
+        visible on this machine).  If allocation fails for any group
+        we gracefully fall back to the single-runtime path.
         """
         if not self.has_cpu_experts or self.visible_pim_ranks <= 0 or not self.is_gptq:
             return None, None
+
+        # M-7: per-layer-group scoping of the slot table.
+        group_size = max(1, int(self.pim_layer_group_size))
+        group_id = self.layer_idx // group_size
+        profile_suffix = f"g{group_id}" if group_size > 1 else ""
+        gate_up_profile = (
+            f"{self.pim_profile}|gate_up|{profile_suffix}"
+            if profile_suffix
+            else f"{self.pim_profile}|gate_up"
+        )
+        down_profile = (
+            f"{self.pim_profile}|down|{profile_suffix}"
+            if profile_suffix
+            else f"{self.pim_profile}|down"
+        )
+
         try:
             gate_up_rt = PIMQuantizedRuntime.get_shared(
-                profile=f"{self.pim_profile}|gate_up",
+                profile=gate_up_profile,
                 rank_count=max(1, self.pim_rank_count),
             )
         except Exception:
@@ -239,7 +269,7 @@ class PIMMoEBackend(CPUMoEBackend):
 
         try:
             down_rt = PIMQuantizedRuntime.get_shared(
-                profile=f"{self.pim_profile}|down",
+                profile=down_profile,
                 rank_count=max(1, self.pim_rank_count),
             )
         except Exception:
@@ -411,6 +441,117 @@ class PIMMoEBackend(CPUMoEBackend):
             )
         except Exception:
             self._record_fallback("speculative_preload_failed")
+
+    def _speculative_preload_gptq(self, topk_ids: torch.Tensor) -> None:
+        """
+        ADR-002 M-7: GPTQ-aware speculative preload.
+
+        At prefill end, take the top-N hottest CPU-side experts (by
+        route frequency in this prefill's topk_ids) and upload their
+        fused gate+up bundle AND down bundle into the 8-slot MRAM
+        LRU of the matching layer-group runtime pair.  This warms
+        the slot cache so the first few decode steps can hit instead
+        of cold-missing every expert.
+
+        Hit-ratio arithmetic (see ADR-002 §15):
+        * Each runtime pair holds 8 slots × ``pim_layer_group_size``
+          layers worth of working set per step.  Preloading top-N
+          where N = min(NUM_SLOTS, top_k * group_size) gives us the
+          densest warm-up without immediately thrashing.
+        * Per-layer we preload only this layer's top experts — the
+          runtime pair's slot table is shared across the group, so
+          every layer in the group contributes.
+        """
+        if not self.is_gptq or self.quantized_runtime is None:
+            return
+        if not self.enable_speculative_preload_gptq:
+            return
+
+        rt_gate_up = self.quantized_runtime
+        rt_down = self.quantized_runtime_down or self.quantized_runtime
+
+        cpu_mask = ~self.gpu_experts_mask.bool()
+        flat_ids = topk_ids.view(-1).cpu().long()
+        counts = torch.bincount(flat_ids, minlength=self.num_experts)
+        counts[~cpu_mask] = 0
+
+        if int(counts.max()) == 0:
+            return
+
+        # Pick at most NUM_SLOTS hot experts — we don't want this layer
+        # alone to fill all slots, because neighbouring layers in the
+        # group will also want room.
+        per_layer_cap = max(1, rt_gate_up.NUM_SLOTS // max(1, self.pim_layer_group_size))
+        # Clamp to the number of non-zero-count experts available.
+        nonzero = int((counts > 0).sum().item())
+        top_n = min(per_layer_cap, nonzero)
+        if top_n <= 0:
+            return
+
+        hot_experts = counts.topk(top_n).indices.tolist()
+
+        kernel_mode = 4
+        preloaded = 0
+        for expert_idx in hot_experts:
+            cpu_slot = self.cpu_expert_lookup.get(int(expert_idx))
+            if cpu_slot is None or cpu_slot not in self._gptq_experts:
+                continue
+            gptq = self._gptq_experts[cpu_slot]
+            base_eid = self._expert_id(cpu_slot)
+            gate_up_eid = base_eid ^ 0x1212121212121212
+            down_eid = base_eid ^ 0x3333333333333333
+            try:
+                # gate+up concat bundle: we pre-prepare the padded
+                # tensors *and* allocate the MRAM slot; actual DPU DMA
+                # happens here.  Cost ≈ 0.96 ms/bundle (M-5 micro-bench).
+                slot, was_resident = rt_gate_up._allocate_slot(gate_up_eid)
+                if not was_resident:
+                    # Use preload_and_infer_concat's cache-prepare +
+                    # DMA path without the infer tail.  We call into
+                    # the lower-level _prepare_concat helper + direct
+                    # ctypes load so no spurious DPU launch happens.
+                    if gate_up_eid not in rt_gate_up._weight_cache or \
+                            rt_gate_up._weight_cache[gate_up_eid][6] <= 0:
+                        concat_qw, concat_sc, padded_in, concat_rows, lhs_o, rhs_o = \
+                            rt_gate_up._prepare_concat_quantized_weights(
+                                gptq["gate"], gptq["up"], kernel_mode
+                            )
+                        rt_gate_up._weight_cache[gate_up_eid] = (
+                            concat_qw, concat_sc, padded_in, concat_rows,
+                            gptq["gate"].group_size, kernel_mode, rhs_o,
+                        )
+                    concat_qw, concat_sc, padded_in, concat_rows, gsize, km, _ = \
+                        rt_gate_up._weight_cache[gate_up_eid]
+                    import ctypes as _c
+                    err = _c.create_string_buffer(rt_gate_up.ERROR_BUFFER_SIZE)
+                    rc = rt_gate_up._lib.pim_quantized_load_weights(
+                        _c.c_uint32(padded_in),
+                        _c.c_uint32(concat_rows),
+                        _c.c_uint32(gsize),
+                        _c.c_uint32(km),
+                        _c.c_void_p(concat_qw.data_ptr()),
+                        _c.c_void_p(concat_sc.data_ptr()),
+                        _c.c_uint32(slot),
+                        err,
+                        len(err),
+                    )
+                    if rc != 0:
+                        raise RuntimeError(err.value.decode("utf-8", errors="replace"))
+                    rt_gate_up.preload_misses += 1
+                    rt_gate_up._resident_expert_id = gate_up_eid
+
+                # down bundle — use the standard preload() which is
+                # already slot-aware.
+                rt_down.preload(down_eid, gptq["down"], kernel_mode)
+                preloaded += 1
+            except Exception:
+                self._record_fallback("speculative_preload_gptq_failed")
+                # Keep going — partial warm-up is still useful.
+
+        if preloaded > 0:
+            self._speculative_preload_gptq_count = (
+                getattr(self, "_speculative_preload_gptq_count", 0) + preloaded
+            )
 
     # ── Real forward with expert ordering optimization ─────────────────
 
@@ -616,8 +757,14 @@ class PIMMoEBackend(CPUMoEBackend):
                 return
 
         # Prefill path: after CPU fallback, speculatively preload hottest expert
-        if context.is_prefill and self.pim_execution_mode == "real" and self.expert_runtime is not None:
-            self._speculative_preload(topk_ids)
+        if context.is_prefill and self.pim_execution_mode == "real":
+            if self.expert_runtime is not None:
+                self._speculative_preload(topk_ids)
+            # ADR-002 M-7: GPTQ-aware warm-up of the layer-group slot
+            # cache.  Without this, decode step 1 starts cold on every
+            # layer and pays the full miss cost.
+            if self.is_gptq and self.quantized_runtime is not None:
+                self._speculative_preload_gptq(topk_ids)
 
         super().submit_forward(hidden_states, topk_ids, topk_weights, cuda_stream)
 
@@ -738,6 +885,13 @@ class PIMMoEBackend(CPUMoEBackend):
                 ),
                 "quantized_preload_hits_local": self.quantized_preload_hits_local,
                 "quantized_preload_misses_local": self.quantized_preload_misses_local,
+                # ADR-002 M-7: layer-group scoping + GPTQ speculative preload.
+                "pim_layer_group_size": self.pim_layer_group_size,
+                "pim_layer_group_id": self.layer_idx // max(1, self.pim_layer_group_size),
+                "enable_speculative_preload_gptq": self.enable_speculative_preload_gptq,
+                "speculative_preload_gptq_count": getattr(
+                    self, "_speculative_preload_gptq_count", 0
+                ),
             }
         )
         return diagnostics

@@ -1,0 +1,119 @@
+milestone_id = "M-7"
+title = "Per-layer-group runtime scoping: diagnosed that host_quantized_bridge.c's static globals silently unify M-5/M-6/M-7 runtime pools into one"
+
+prerequisites = ["M-6"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M7_per_layer_scope.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M7_per_layer_scope.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 2 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M7_per_layer_scope.json",
+]
+
+next_tasks = [
+    "M-8 (BLOCKER for all previous isolation work): refactor host_quantized_bridge.c + pim_quantized_kernel.c to be handle-based. Today the .so has one set of ``static`` globals (g_set, g_slot_loaded_mask, g_input_dim, g_nr_dpus, g_lut_i16_shards, etc.) which means every PIMQuantizedRuntime in the Python process silently shares them. M-5 dual runtime / M-6 multi-slot / M-7 per-layer scoping are all dependent on this refactor to produce any e2e win.",
+    "M-8: after the refactor, re-enable enable_speculative_preload_gptq (the code is shipped but default-off because it was the trigger that made the shared-state bug fatal via munmap_chunk).",
+]
+
+# ---------------------------------------------------------------------
+# Acceptance rationale — 4th null e2e milestone, diagnostic value only.
+#
+# M-7 attempted to break the 48-layer working-set lock diagnosed in
+# M-6 by scoping PIMQuantizedRuntime.get_shared() keys with a
+# layer_group_id (default group_size=3 → 16 disjoint runtime pairs
+# over 48 layers, 32 DPU ranks used vs 39 visible).
+#
+# The Python-side code landed correctly: diagnostics report
+# ``pim_layer_group_size=3`` on every layer and ``dual_down=47/48``.
+# But hit_ratio is still 0% on the real-hardware run.
+#
+# Root cause (**new discovery in this milestone**): the shared library
+# ``libpim_quantized_bridge.so`` has one set of ``static`` C globals
+# (g_set, g_nr_dpus, g_input_dim, ..., g_slot_loaded_mask,
+# g_lut_i16_shards).  Every Python-side PIMQuantizedRuntime instance
+# dlopen's the same .so and therefore shares those globals.  When
+# dpu_alloc_ranks() is called a second time, pim_quantized_init()
+# early-returns on g_initialized==true — so the "second" runtime
+# silently takes over the first runtime's DPU ranks instead of
+# getting its own.  All 32 M-7 runtime pairs in fact live on the
+# SAME one DPU rank pool, and all 32 slot-table LRUs fight for the
+# SAME physical 8 slots.
+#
+# The first attempt to ship speculative preload for GPTQ in this
+# milestone hit the above bug in its most violent form: a
+# munmap_chunk() heap corruption abort because
+# _speculative_preload_gptq() interleaved load_weights() calls on
+# two "different" runtimes, clobbering global g_input_dim /
+# g_output_dim between a preload and its matching run.
+# ``enable_speculative_preload_gptq`` therefore ships default-False
+# in this milestone; the implementation is kept so M-8 can enable
+# it after the handle-based refactor.
+#
+# M-7 is closed in the same shape as M-5 and M-6: Python-layer
+# code is correct and ready, tests pass, no regression; the real
+# gain is unlocked by M-8.  This is the 4th null-performance
+# milestone but each has narrowed the attack surface.  M-8 is
+# the final structural fix and should unlock M-5 + M-6 + M-7
+# collectively.
+#
+# ---------------------------------------------------------------------
+
+# KPI-1: the e2e run must complete on real hardware (no heap corruption!).
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-7 must not regress to the munmap_chunk() crash we first saw when enable_speculative_preload_gptq=True."
+
+[[acceptance_checks]]
+path     = "results[0].error"
+op       = "not_exists"
+reason   = "no top-level error field on the per-layer-scope run."
+
+# KPI-2: full decode budget delivered.
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "per-layer-scope run must produce the full 32-token budget."
+
+# KPI-3: no decode TPS regression vs M-4's 0.317 (the last real win).
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.26
+reason   = "M-7 must not regress below the cumulative M-4/M-5/M-6 decode_tps floor (~0.3)."
+
+# KPI-4: all Qwen3 layers in the run expose the new
+# pim_layer_group_size diagnostic, proving the infra actually landed.
+[[acceptance_checks]]
+path     = "results[0].offload_diagnostics.layers[0].backend.pim_layer_group_size"
+op       = "=="
+value    = 3
+reason   = "diagnostics must report the configured group size — this is what future M-8 runs will compare against."
+
+# KPI-5: speculative preload GPTQ is OFF by default, but the
+# diagnostic field must still exist so M-8 can flip it on and
+# compare.
+[[acceptance_checks]]
+path     = "results[0].offload_diagnostics.layers[0].backend.enable_speculative_preload_gptq"
+op       = "=="
+value    = false
+reason   = "speculative_preload_gptq default-off until M-8's handle-based refactor (the code path triggered a heap-corruption munmap_chunk abort when enabled against the shared static-global backend)."
+
+# KPI-6: DPU call count must stay at the M-4 fused level — M-7's
+# Python layer changes should not accidentally have disabled fused
+# gate+up or multi-slot plumbing.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = "<="
+value    = 28000
+reason   = "M-4 fused gate+up must still be active (DPU calls ~23k, not 35k)."
+
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = ">="
+value    = 10000
+reason   = "PIM must still actually run real DPU work."
