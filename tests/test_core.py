@@ -1452,12 +1452,17 @@ class TestDynamicScheduler:
         assert layer_diag["total_ready_drains"] == 1
 
     def test_backend_notify_expert_evicted_called_on_demotion(self, tmp_path):
-        """Test that notify_expert_evicted is called when experts are demoted from GPU to PIM"""
+        """notify_expert_evicted must fire when an expert is demoted from GPU to PIM."""
         from safetensors.torch import save_file
         from nano_ktrans.layers.hybrid_moe import HybridMoE
-        from nano_ktrans.utils.context import reset_context, set_context, InferenceContext
-        from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
-        
+        from nano_ktrans.scheduler import DynamicExpertScheduler, SchedulerConfig
+        from nano_ktrans.utils.context import reset_context, set_context
+        from nano_ktrans.utils.expert_runtime_state import (
+            ExpertMigrationOp,
+            ExpertResidency,
+            ExpertResidencyPlan,
+        )
+
         weight_path = tmp_path / "weights"
         weight_path.mkdir()
         save_file(
@@ -1471,55 +1476,86 @@ class TestDynamicScheduler:
             },
             str(weight_path / "model.safetensors"),
         )
-        
-        # Start with both experts on GPU
-        gpu_mask = torch.tensor([True, True], dtype=torch.bool)
-        residency_plan = ExpertResidencyPlan.from_gpu_masks([gpu_mask])
-        
-        moe = HybridMoE(
-            layer_idx=0,
-            num_experts=2,
-            expert_hidden_size=8,
-            expert_intermediate_size=4,
-            top_k=2,
-            expert_key_template="model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}",
-            expert_proj_names={"gate": "w1", "up": "w3", "down": "w2"},
-            weight_path=str(weight_path),
-            offload_backend_name="cpu",
-            residency_plan=residency_plan,
+
+        # Start with expert 1 resident on GPU, expert 0 on the offload tier.
+        gpu_mask = torch.tensor([False, True], dtype=torch.bool)
+        residency_plan = ExpertResidencyPlan.from_gpu_masks(
+            [gpu_mask],
+            default_offload_tier=ExpertResidency.PIM,
         )
-        
-        # Track calls to notify_expert_evicted
+        scheduler = DynamicExpertScheduler(
+            residency_plan=residency_plan,
+            config=SchedulerConfig(
+                enabled=True,
+                gpu_budget_per_layer=1,
+                offload_tier=ExpertResidency.PIM,
+                decode_promote_k=2,
+            ),
+        )
+
+        hybrid = HybridMoE(
+            num_experts=2,
+            top_k=1,
+            hidden_size=4,
+            moe_intermediate_size=8,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
+            weight_path=str(weight_path),
+            offload_backend="cpu",
+            residency_plan=residency_plan,
+            dynamic_expert_scheduler=scheduler,
+            hidden_act="silu",
+        ).to(dtype=torch.float32)
+
+        # Avoid spinning up background materialization/activation in this
+        # sync unit test (mirrors the approach used by the sibling migration
+        # test to keep behaviour deterministic).
+        hybrid._prebuild_ready_experts = lambda **kwargs: 0
+        hybrid._activate_warmed_experts = lambda **kwargs: 0
+
+        # Track invocations of notify_expert_evicted on the backend.
         notify_calls = []
-        original_notify = moe.offload_backend.notify_expert_evicted
-        
+        original_notify = hybrid.offload_backend.notify_expert_evicted
+
         def tracked_notify(expert_idx, residency_before):
             notify_calls.append((expert_idx, residency_before))
             return original_notify(expert_idx, residency_before)
-        
-        moe.offload_backend.notify_expert_evicted = tracked_notify
-        
-        # Update GPU mask to demote expert 1 to PIM
-        new_gpu_mask = torch.tensor([True, False], dtype=torch.bool)
-        moe.update_residency_plan(
-            ExpertResidencyPlan.from_gpu_masks([new_gpu_mask])
+
+        hybrid.offload_backend.notify_expert_evicted = tracked_notify
+
+        # Queue a demotion op: expert 1 GPU -> PIM. It will be applied during
+        # the next forward() call via the migration pipeline.
+        hybrid.offload_backend.queue_migration_plan(
+            [
+                ExpertMigrationOp(
+                    layer_idx=0,
+                    expert_idx=1,
+                    src=ExpertResidency.GPU,
+                    dst=ExpertResidency.PIM,
+                    reason="test_demote",
+                )
+            ],
+            phase="decode",
         )
-        
-        # Trigger the migration by calling forward
-        set_context(InferenceContext(
-            token_idx=0,
-            batch_size=1,
-            sequence_length=4,
-            is_prefill=True,
-        ))
-        
-        hidden = torch.randn(4, 8)
-        moe.forward(hidden)
-        
-        # Verify that notify_expert_evicted was called for expert 1
-        reset_context()
+
+        hidden_states = torch.randn(1, 4)
+        router_logits = torch.tensor([[1.0, 0.0]], dtype=torch.float32)
+        set_context(is_prefill=False)
+        try:
+            hybrid(hidden_states, router_logits)
+        finally:
+            reset_context()
+
         evicted_experts = [idx for idx, src in notify_calls if idx == 1]
-        assert len(evicted_experts) > 0, f"Expected notify_expert_evicted to be called for expert 1, got calls: {notify_calls}"
+        assert len(evicted_experts) > 0, (
+            f"Expected notify_expert_evicted to be called for expert 1, "
+            f"got calls: {notify_calls}"
+        )
+        # The demotion path always reports 'gpu' as the prior residency.
+        assert all(src == "gpu" for _, src in notify_calls)
+        assert bool(hybrid.gpu_experts_mask[1].item()) is False
+
 
     def test_hybrid_moe_applies_decode_migration_plan(self, tmp_path):
         from safetensors.torch import save_file

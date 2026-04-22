@@ -31,9 +31,25 @@ updated: 2026-04-19 02:10
 updated: 2026-04-19 12:40
 updated: 2026-04-21 19:45
 updated: 2026-04-21 20:05
+updated: 2026-04-22 10:50
 ---
 
 # 🔥 当前工作焦点
+
+## 本轮新增（2026-04-22）
+
+- [x] **v0.3.0-rc1 测试回归修复**（`fix/v0.3.0-rc1-test-regressions` 分支，3 文件 +126/−47）
+      - `LLM.get_offload_diagnostics()` 的 `expert_map_store` 访问改 `getattr` 容错 — `c816a9c`（P2）引入的回归
+      - `ExpertWeightLoader.__init__` 在 `weight_path == ""` 时进入"空加载器"状态 —
+        让 `test_cpu_only_smoke_generation_path` 这种纯 GPU + 随机权重的合法用例可以构造模型
+      - 重写 `test_backend_notify_expert_evicted_called_on_demotion` —
+        原测试（`04dfbda` 引入）用了一堆不存在的 API（`InferenceContext`、
+        `HybridMoE(expert_hidden_size=...)`、`moe.update_residency_plan(...)`），AI
+        生成但从未实跑。改为参照相邻真实测试的模式用 `queue_migration_plan` 触发 demotion
+- [x] 测试套件从 `153 passed / 3 failed` 恢复到 `156 passed`
+- [x] 4 条新 gotchas 写入 `.knowledge/context/gotchas.md`：`LLM.__new__` 绕过
+      `__init__` 的字段容错模式、`ExpertWeightLoader` 不应在构造期校验 weight 文件、
+      AI 生成测试必须实跑、smoke test 要进 CI 必跑集
 
 ## 本轮新增（2026-04-21）
 

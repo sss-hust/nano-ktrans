@@ -1,9 +1,44 @@
 ---
-updated: 2026-04-21
+updated: 2026-04-22
 tags: [changelog]
 ---
 
 # 📝 变更日志
+
+## 2026-04-22
+
+### 2026-04-22 10:50 - 修复 v0.3.0-rc1 测试回归
+
+`fix/v0.3.0-rc1-test-regressions` 分支，3 文件改动：
+
+- `nano_ktrans/llm.py`: `get_offload_diagnostics()` 访问 `self.expert_map_store`
+  改用 `getattr(self, "expert_map_store", None)`，兼容 `LLM.__new__(LLM)` 手工
+  构造的单测路径。根因是 `c816a9c`（P2 Expert Map Store）加的新字段，在
+  `__init__` 里才 set，而 `test_llm_get_offload_diagnostics_reports_prepared_budget_heuristic`
+  直接绕过 `__init__`。
+- `nano_ktrans/kernels/weight_loader.py`: `ExpertWeightLoader.__init__` 在
+  `weight_path == ""` 时进入"空加载器"状态（`_files=[]`、`_key_to_file={}`），
+  不再抛 `FileNotFoundError`。`load_*` 被调用时原有的 `KeyError` 依然会显式抛出。
+  根因是 `HybridMoE` 无条件实例化 `ExpertMaterializationManager`，破坏了
+  `test_cpu_only_smoke_generation_path` 这种纯 GPU 专家 + 随机权重的合法用例。
+- `tests/test_core.py`: 重写 `test_backend_notify_expert_evicted_called_on_demotion`。
+  原测试（`04dfbda` 引入）用了一堆根本不存在的 API：`InferenceContext`、
+  `HybridMoE(expert_hidden_size=, expert_key_template=, offload_backend_name=)`、
+  `moe.update_residency_plan(...)`。改为参照 `test_hybrid_moe_applies_decode_migration_plan`
+  的模式，用 `offload_backend.queue_migration_plan([ExpertMigrationOp(GPU→PIM)])`
+  触发 demotion 并验证 `notify_expert_evicted(expert_idx, 'gpu')` 被调用。
+
+测试结果：`156 passed, 1 warning` （之前 `153 passed, 3 failed`）。
+
+### 2026-04-22 10:50 - 知识库同步
+
+- `.knowledge/journal/2026-04-22.md`（新）: 今日修复日志
+- `.knowledge/context/gotchas.md`: 新增 4 条 gotchas（`LLM.__new__` 绕过 `__init__`
+  的容错模式、AI 生成测试必须实跑、loader 不应在构造期校验 weight 文件、smoke
+  test 要进 CI）
+- `.knowledge/development/current-focus.md`: "本轮新增" 补上 v0.3.0-rc1 回归修复
+- `.knowledge/development/_INDEX.md`、`.knowledge/journal/_INDEX.md`、
+  `.knowledge/INDEX.md`: 日期更新
 
 ## 2026-04-21
 

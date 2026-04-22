@@ -1,5 +1,5 @@
 ---
-updated: 2026-04-21
+updated: 2026-04-22
 tags: [pitfalls, debugging]
 ---
 
@@ -168,3 +168,45 @@ tags: [pitfalls, debugging]
 - 现象：Expert Map Store 第一版在 `HybridMoE.forward` 的 `with self._pipeline_lock:` 块内部调用 `_record_router_probs`；`_pipeline_lock` 本意是保护 migration lifecycle / resident set / prepared tier 等共享状态，会被 background worker 持锁。放 record 进去等于无辜阻塞 background worker。
 - 修复：`_record_router_probs` 只写 per-iteration 的 in-flight `ExpertMap`（由 `attach_expert_map` 挂到 `self._current_expert_map`，单线程），完全不触及共享状态，挪到 lock 外。
 - 经验：**任何只改 per-request / per-iteration 私有对象的操作都不应持 shared pipeline lock**；否则锁粒度越来越粗、background worker 越来越难真正并行。
+
+<!-- updated: 2026-04-22 10:50 -->
+
+## 诊断方法里访问 `__init__` 才 set 的新字段必须用 `getattr` 容错
+
+- 现象：`c816a9c`（P2 Expert Map Store）在 `LLM.__init__` 里新增 `self.expert_map_store` 字段。`tests/test_core.py::test_llm_get_offload_diagnostics_reports_prepared_budget_heuristic` 用 `LLM.__new__(LLM)` 绕过 `__init__` 以避免走完整的 `AutoConfig → safetensors` 加载，只手工 set 了部分字段，调用 `llm.get_offload_diagnostics()` 时抛 `AttributeError: 'LLM' object has no attribute 'expert_map_store'`。
+- 根因：`get_offload_diagnostics()` 原来直接写 `self.expert_map_store.diagnostics()`，没给绕过 `__init__` 的测试路径留后路。
+- 修复：改为 `getattr(self, "expert_map_store", None)`，与同文件 `reset_offload_diagnostics` 里其它字段的访问风格一致。
+- 经验：凡是在 `LLM.__init__` 里才 set、且出现在对外 `get_*` / `reset_*` 诊断方法里的字段，**都要当作"可能不存在"来访问**（`getattr(self, "field", default)`），才能兼容：
+  - `LLM.__new__(LLM)` 构造的单测
+  - 继承/mixin 扩展类
+  - 将来 feature flag 关闭时 `__init__` 里 set 成 None 的场景
+
+<!-- updated: 2026-04-22 10:50 -->
+
+## `ExpertWeightLoader` 在构造期扫描 safetensor 会破坏纯 GPU smoke test
+
+- 现象：`tests/test_smoke_cpu.py::test_cpu_only_smoke_generation_path` 用默认 `MixtralForCausalLM(config, layer_gpu_expert_masks)` 构造（`weight_path=""`），失败在 `FileNotFoundError: No .safetensors files found in`。这个 smoke test 自 `047af5c` 加入后从未更新，但之后某次重构让 `HybridMoE` 无条件实例化 `ExpertMaterializationManager`，而 `ExpertWeightLoader.__init__` 又强制要求目录里至少有一个 `.safetensors`。
+- 根因：smoke test 的合法用例是"纯 GPU 专家 + 随机初始化，根本不需要加载任何权重"，但构造期硬校验把这条路径直接堵死。本地单元测试逐组件构造时都手工传了合法 `weight_path`，所以没人发现。
+- 修复：让 `ExpertWeightLoader.__init__` 在 `weight_path == ""` 时进入"空加载器"状态（`_files=[]`、`_key_to_file={}`、`_quantize_config={}`），不抛错；`load_*` 真的被调用时原有的 `KeyError("Weight key '...' not found")` 会自动抛出，诊断信息更具体。非空路径但缺 safetensor 时**仍然**抛 `FileNotFoundError`（避免掩盖 typo）。
+- 经验：
+  1. "既支持真实权重加载、又要支持随机初始化跑 forward"的类，其子组件在构造期**不应该**对 weight 文件存在性做强校验。
+  2. 延迟到真正 load 调用时失败，错误信息（具体到缺失 key）反而比构造期的 `FileNotFoundError` 更有用。
+  3. smoke test 要进 CI 必跑集，单元测试 + 逐组件测试无法暴露"整条类链路能否默认参数构造"的回归。
+
+<!-- updated: 2026-04-22 10:50 -->
+
+## AI 生成的测试必须本地实跑一次才能合入
+
+- 现象：`04dfbda`（"Fix expert migration eviction"）引入的 `test_backend_notify_expert_evicted_called_on_demotion`，从一开始就**根本跑不起来**：
+  - `from nano_ktrans.utils.context import InferenceContext` — `context.py` 里类名叫 `Context`，没有 `InferenceContext`
+  - `HybridMoE(expert_hidden_size=..., expert_intermediate_size=..., expert_key_template=..., expert_proj_names=..., offload_backend_name=...)` — 真实 `__init__` 签名是 `hidden_size / moe_intermediate_size / offload_backend`，测试用的参数名完全对不上
+  - `moe.update_residency_plan(...)` — `HybridMoE` 上根本没有这个方法
+- 根因：PR 描述里写了 `Co-Authored-By: Claude Opus`，测试是 AI 生成但**没在本地跑过**。review 只看 diff，没跑 pytest。
+- 修复：参照相邻真实测试 `test_hybrid_moe_applies_decode_migration_plan` 的模式重写：
+  - 用真实存在的构造参数 `HybridMoE(num_experts=, top_k=, hidden_size=, moe_intermediate_size=, gpu_experts=ModuleDict(), gpu_experts_mask=, ...)`
+  - 通过 `hybrid.offload_backend.queue_migration_plan([ExpertMigrationOp(GPU→PIM)])` 下发 demotion op
+  - forward 时迁移管线会调用 `_demote_expert_from_gpu` → `notify_expert_evicted(expert_idx, 'gpu')`
+- 经验：
+  1. 任何 AI 生成的测试必须至少在本地 `pytest -k <new_test>` 跑通一次再提交
+  2. 同 PR 里如果新加了 production code（如 `notify_expert_evicted`），应该**同时**跑全量 pytest 确认新测试和旧测试都绿
+  3. `Co-Authored-By: Claude Opus` 不等于免责声明，PR 作者仍需对可运行性负责

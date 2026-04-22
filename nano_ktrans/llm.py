@@ -296,7 +296,9 @@ class LLM:
             "background_offload_worker_enabled": self.enable_background_offload_worker,
             "background_offload_poll_interval_seconds": self.background_offload_poll_interval_seconds,
             "expert_map_store": (
-                self.expert_map_store.diagnostics() if self.expert_map_store is not None else None
+                getattr(self, "expert_map_store", None).diagnostics()
+                if getattr(self, "expert_map_store", None) is not None
+                else None
             ),
             "offload_refresh": self.model.model.offload_refresh_diagnostics(),
             "dynamic_scheduler": self.dynamic_expert_scheduler.diagnostics(),
