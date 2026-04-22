@@ -104,6 +104,16 @@ class PIMMoEBackend(CPUMoEBackend):
         self.runtime = None
         self.expert_runtime = None
         self.quantized_runtime: Optional[PIMQuantizedRuntime] = None
+        # ADR-002 M-5: second quantized runtime pinned to the down
+        # projection so that an expert's gate+up bundle and down
+        # bundle can coexist in separate DPU MRAM pools.  Defaults
+        # to the same object as ``quantized_runtime`` if dual
+        # allocation is unavailable.
+        self.quantized_runtime_down: Optional[PIMQuantizedRuntime] = None
+        # Counters the backend maintains itself so diagnostics don't
+        # depend on the aggregate of two singleton runtimes.
+        self.quantized_preload_hits_local: int = 0
+        self.quantized_preload_misses_local: int = 0
         super().__init__(
             layer_idx=layer_idx,
             num_experts=num_experts,
@@ -124,7 +134,16 @@ class PIMMoEBackend(CPUMoEBackend):
             self.runtime = self._try_init_runtime()
             self.expert_runtime = self._try_init_expert_runtime()
             if self.is_gptq:
-                self.quantized_runtime = self._try_init_quantized_runtime()
+                # Dual-runtime path (M-5): separate rank pools for
+                # gate_up bundle vs down.  Falls back gracefully to the
+                # single-runtime path if allocation fails.
+                gate_up_rt, down_rt = self._try_init_quantized_runtimes_dual()
+                if gate_up_rt is not None:
+                    self.quantized_runtime = gate_up_rt
+                    self.quantized_runtime_down = down_rt
+                else:
+                    self.quantized_runtime = self._try_init_quantized_runtime()
+                    self.quantized_runtime_down = self.quantized_runtime
         else:
             self.backend_name = "pim_shadow"
 
@@ -161,6 +180,15 @@ class PIMMoEBackend(CPUMoEBackend):
             return None
 
     def _try_init_quantized_runtime(self) -> Optional[PIMQuantizedRuntime]:
+        """Legacy single-slot quantized runtime.
+
+        Retained for backwards-compatibility paths that don't want the
+        dual-runtime split introduced in M-5.  New code should prefer
+        :meth:`_try_init_quantized_runtimes` below, which returns two
+        independent runtimes that let each expert's gate+up bundle and
+        down projection stay resident on separate DPU rank pools at
+        the same time.
+        """
         if not self.has_cpu_experts:
             return None
         if self.visible_pim_ranks <= 0:
@@ -175,6 +203,59 @@ class PIMMoEBackend(CPUMoEBackend):
         except Exception:
             self._record_fallback("quantized_runtime_init_failed")
             return None
+
+    def _try_init_quantized_runtimes_dual(
+        self,
+    ) -> tuple[Optional[PIMQuantizedRuntime], Optional[PIMQuantizedRuntime]]:
+        """
+        ADR-002 M-5: allocate two independent PIMQuantizedRuntime
+        instances — one for the fused gate+up bundle, one for the
+        down projection.  The two runtimes back onto *different* DPU
+        rank pools (keyed by ``profile`` in ``get_shared``), so a
+        single expert's gate_up preload no longer evicts its own
+        down preload (and vice versa).
+
+        This removes one preload miss per expert per decode step.
+        M-4 diagnostics show preload_hit_ratio = 0% which burns
+        ~1.45 ms/call × 14.68 calls/layer = ~21 ms/layer/step in
+        host->DPU weight transfer — the biggest single cost the
+        cost-model routing couldn't see.
+
+        Falls back to the single-runtime path if either allocation
+        fails (e.g. not enough physical DPU ranks).  In the fallback,
+        both names point at the same runtime and M-5 degrades to
+        M-4 behaviour (preload miss on every call).
+        """
+        if not self.has_cpu_experts or self.visible_pim_ranks <= 0 or not self.is_gptq:
+            return None, None
+        try:
+            gate_up_rt = PIMQuantizedRuntime.get_shared(
+                profile=f"{self.pim_profile}|gate_up",
+                rank_count=max(1, self.pim_rank_count),
+            )
+        except Exception:
+            self._record_fallback("quantized_runtime_gate_up_init_failed")
+            gate_up_rt = None
+
+        try:
+            down_rt = PIMQuantizedRuntime.get_shared(
+                profile=f"{self.pim_profile}|down",
+                rank_count=max(1, self.pim_rank_count),
+            )
+        except Exception:
+            self._record_fallback("quantized_runtime_down_init_failed")
+            down_rt = None
+
+        # Fallback behaviour: if the dual allocation partially fails,
+        # collapse to whichever runtime did come up so the code path
+        # still works (at the cost of losing the M-5 win).
+        if gate_up_rt is None and down_rt is None:
+            return None, None
+        if gate_up_rt is None:
+            gate_up_rt = down_rt
+        if down_rt is None:
+            down_rt = gate_up_rt
+        return gate_up_rt, down_rt
 
     # ── Expert ID for weight residency tracking ────────────────────────
 
@@ -240,8 +321,21 @@ class PIMMoEBackend(CPUMoEBackend):
         ``preload_and_infer_concat``.  Three DPU launches per expert
         become two, and host->DPU weight transfer per expert drops by
         one third.
+
+        ADR-002 M-5:  gate_up bundle and down bundle live on separate
+        PIMQuantizedRuntime instances (backed by distinct DPU rank
+        pools) so the gate_up preload no longer evicts this expert's
+        own down preload.  This alone does not change miss count
+        *within* a step (every new expert still misses on both bundles
+        since MoE routing changes each step), but it prevents the
+        pathological "same expert re-misses its own bundles twice per
+        forward" pattern that dominated M-4's 1.1 M preload misses.
+        It also makes speculative preload of the next expert's down
+        bundle possible in future milestones.
         """
-        if self.quantized_runtime is None:
+        rt_gate_up = self.quantized_runtime
+        rt_down = self.quantized_runtime_down or self.quantized_runtime
+        if rt_gate_up is None:
             raise RuntimeError("PIM quantized runtime is not available.")
 
         gptq = self._gptq_experts.get(cpu_slot)
@@ -250,33 +344,38 @@ class PIMMoEBackend(CPUMoEBackend):
 
         kernel_mode = 4  # int8 fixed-point (best for batch=1 decode)
 
-        # Each fused call gets its own expert_id namespace so the
-        # single-slot residency tracker in PIMQuantizedRuntime can
-        # distinguish it from the down projection's bundle.
         base_eid = self._expert_id(cpu_slot)
         gate_up_eid = base_eid ^ 0x1212121212121212
 
-        # Fused gate+up: one DPU launch instead of two.
-        gate, up = self.quantized_runtime.preload_and_infer_concat(
+        # Remember hit/miss counts before the call so we can derive a
+        # per-backend-instance delta.  preload_hits/misses are runtime-
+        # global, so aggregating at the backend needs a local delta.
+        pre_hits = rt_gate_up.preload_hits
+        pre_miss = rt_gate_up.preload_misses
+
+        gate, up = rt_gate_up.preload_and_infer_concat(
             gate_up_eid,
             gptq["gate"],
             gptq["up"],
             states,
             kernel_mode=kernel_mode,
         )
+        self.quantized_preload_hits_local += (rt_gate_up.preload_hits - pre_hits)
+        self.quantized_preload_misses_local += (rt_gate_up.preload_misses - pre_miss)
 
-        # SiLU activation on host.
         hidden = F.silu(gate) * up
 
-        # Down projection — still its own DPU call.
         down_eid = base_eid ^ 0x3333333333333333
-        self.quantized_runtime.preload(down_eid, gptq["down"], kernel_mode)
-        output = self.quantized_runtime.infer(hidden)
+        pre_hits_d = rt_down.preload_hits
+        pre_miss_d = rt_down.preload_misses
+        rt_down.preload(down_eid, gptq["down"], kernel_mode)
+        output = rt_down.infer(hidden)
+        self.quantized_preload_hits_local += (rt_down.preload_hits - pre_hits_d)
+        self.quantized_preload_misses_local += (rt_down.preload_misses - pre_miss_d)
 
-        # Counters — 2 quantized calls per expert now (fused gate/up + down).
         self.real_dpu_quantized_calls += 2
         self.real_dpu_expert_calls += 1
-        self.last_kernel_cycles = self.quantized_runtime.last_cycles()
+        self.last_kernel_cycles = rt_down.last_cycles()
         return output
 
     # ── Speculative preload at end of prefill ──────────────────────────
@@ -544,9 +643,13 @@ class PIMMoEBackend(CPUMoEBackend):
             except Exception:
                 pass
 
-        # Clean up quantized runtime (all projection bundle IDs:
-        # legacy gate/up/down + ADR-002 M-4.1 fused gate+up).
-        if self.quantized_runtime is not None:
+        # Clean up quantized runtimes.  In M-5 the gate_up bundle and
+        # down projection live on two independent runtimes; clear both.
+        for rt in {
+            id(r): r
+            for r in (self.quantized_runtime, self.quantized_runtime_down)
+            if r is not None
+        }.values():
             try:
                 for xor_mask in (
                     0x1111111111111111,
@@ -555,7 +658,7 @@ class PIMMoEBackend(CPUMoEBackend):
                     0x1212121212121212,  # M-4.1 fused gate+up bundle
                 ):
                     proj_eid = eid ^ xor_mask
-                    self.quantized_runtime.evict_cached_weights(proj_eid)
+                    rt.evict_cached_weights(proj_eid)
             except Exception:
                 pass
 
@@ -613,6 +716,28 @@ class PIMMoEBackend(CPUMoEBackend):
                 "quantized_runtime_preload_misses": 0 if self.quantized_runtime is None else self.quantized_runtime.preload_misses,
                 "quantized_runtime_resident_expert_id": 0 if self.quantized_runtime is None else self.quantized_runtime.resident_expert_id,
                 "quantized_runtime_weight_cache_size": 0 if self.quantized_runtime is None else len(self.quantized_runtime._weight_cache),
+                # ADR-002 M-5: dual-runtime diagnostics.
+                #
+                # ``quantized_runtime_down_distinct`` is True iff M-5's
+                # split allocation succeeded (two separate DPU rank
+                # pools).  Backend-local preload counters are the
+                # ground truth for this backend's behaviour; the
+                # runtime-global counters above are shared across 48
+                # layers and therefore only useful in aggregate.
+                "quantized_runtime_down_distinct": (
+                    self.quantized_runtime_down is not None
+                    and self.quantized_runtime_down is not self.quantized_runtime
+                ),
+                "quantized_runtime_down_preload_hits": (
+                    0 if self.quantized_runtime_down is None
+                    else self.quantized_runtime_down.preload_hits
+                ),
+                "quantized_runtime_down_preload_misses": (
+                    0 if self.quantized_runtime_down is None
+                    else self.quantized_runtime_down.preload_misses
+                ),
+                "quantized_preload_hits_local": self.quantized_preload_hits_local,
+                "quantized_preload_misses_local": self.quantized_preload_misses_local,
             }
         )
         return diagnostics

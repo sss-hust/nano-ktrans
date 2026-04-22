@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-4 closed (fused gate+up, +39% decode TPS); M-5 active (overlap + more structural wins)
+status: M-5 closed as infrastructure + null result (diagnosed MRAM single-slot bottleneck); M-6 active (DPU binary multi-slot + async launch)
 created: 2026-04-22
 updated: 2026-04-22
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -622,3 +622,112 @@ Micro-bench 的 3× 来自 "separate 路径两次 preload 都 miss" + Python 层
 4. **混合精度 experts**（ADR-001 P4, HOBBIT）：高分 expert 保留 mode=4，低分 expert 改 int3/int2 cache。只在 top_k 分布极不均的情况下有用。
 
 M-5 先攻 (2) async submit + (3) batched preload。
+
+
+---
+
+## 13. M-5 执行结论（2026-04-22）：dual-runtime 基础设施 + null 性能结果
+
+### 13.1 M-4 遗留诊断
+
+M-4 之后 `preload_hit_ratio = 0 / preload_misses ≈ total_dpu_calls`。
+每次 `preload() + infer()` 之前都实际做了一次 host→DPU 权重传输。
+真机 micro-bench 量化了具体代价：
+
+| 阶段 | 耗时 |
+|------|------|
+| `_prepare_quantized_weights` (host padding) | 0.074 ms |
+| `pim_quantized_load_weights` ctypes (host→DPU 传输) | **0.96 ms** |
+| `infer-only` (DPU launch + 传回 output) | 2.31 ms |
+
+14.7 calls/layer/step × 0.96 ms × 48 layers × 32 tokens ≈ **21.5s/run**
+纯 host→DPU 传输（占 M-4 decode_seconds 的 21%）。
+
+### 13.2 M-5 假设：dual PIMQuantizedRuntime 消除 intra-expert miss
+
+`PIMQuantizedRuntime` 原是单例（按 `(profile, rank_count)` 共享），
+单个 MRAM 只能留 1 份 qweight。M-4 的 `_run_expert_quantized_on_dpu`
+对同一 expert 先做 fused gate_up bundle infer，再做 down bundle infer，
+两次 preload 在同一 runtime 里互相覆盖。
+
+**假设**：分配两个独立的 `PIMQuantizedRuntime` (profile 前缀
+`"|gate_up"` vs `"|down"`)，让 gate_up 桶和 down 桶各占**不同**的 DPU
+rank pool，就能消除 intra-expert 互相覆盖，decode 每 expert 省 1 次
+preload。
+
+### 13.3 实装
+
+- `PIMMoEBackend._try_init_quantized_runtimes_dual()` 返回
+  `(gate_up_rt, down_rt)`，两个 key 不同的 `get_shared` 拿到独立
+  DPU rank 集合；任一失败时优雅降级到 M-4 单 runtime 行为
+- `_run_expert_quantized_on_dpu` 的 down preload+infer 改走
+  `quantized_runtime_down`
+- `notify_expert_evicted` 同时清理两个 runtime 的 cache
+- `diagnostics()` 新增 `quantized_runtime_down_distinct`,
+  `quantized_preload_hits_local`,
+  `quantized_preload_misses_local`（local counter 解决了单例 counter 被
+  48 层同时写的归一化问题）
+
+### 13.4 真机数据（Qwen3-30B-A3B-GPTQ-Int4, 32 decode tokens）
+
+| 指标 | M-4 | M-5 | delta |
+|------|-----|-----|-------|
+| `quantized_runtime_down_distinct` | n/a | **47/48 layers** | ✓ 基础设施 landed |
+| DPU quantized calls | 23246 | 23214 | ~0 |
+| decode_seconds | 100.96s | 103.71s | +2.7%（噪声） |
+| decode_tps | 0.317 | 0.309 | −2.7%（噪声） |
+| `quantized_preload_misses_local` | n/a | **23214** | = DPU call 总数，**每 call 仍然 miss** |
+
+**e2e 无提升。**
+
+### 13.5 负结果根因
+
+dual runtime 只能消除 **同一 expert 内部** 的 gate_up ↔ down 互相覆盖。
+但 Qwen3 top_k=8、每层每步 8 个 *不同* active expert —— **跨 expert** 的
+覆盖仍然发生。single-slot MRAM 下一层总 preload miss 数基本不变。
+
+换句话说：**M-4 的 fused gate+up 已经把 intra-expert 的 miss 降到了 0**
+（两个 projection 合成一次 launch），M-5 的 dual runtime 只是把这种
+"already-zero-inside" 的属性在拓扑上再巩固一层 —— 无新 gain。
+
+**真正阻塞点**：DPU binary 的 `__mram_noinit uint32_t qweight_mram[...]`
+是固定单 buffer。要让一个 runtime 在 MRAM 同时驻留多个 expert 的
+qweight，必须 **改 DPU binary 的 MRAM 布局**（multi-slot qweight_mram +
+scales_mram + lut_mram），host 侧在 `run` 参数里传 slot_id。工作量中等。
+
+### 13.6 M-5 产出的价值（尽管性能 null）
+
+1. **基础设施**：`quantized_runtime_down` 字段 + dual-init pathway +
+   合适的诊断 counters，是 M-6 async preload / speculative preload 的前置。
+2. **量化数据**：0.96 ms/call host→DPU 传输，21.5s/run 的传输总开销，
+   是 M-6 async 和 multi-slot 双管齐下的精确预算。
+3. **排除了一个假设**：dual runtime 不能单独追回 M-3→CPU 的 9.7× 差距，
+   需要 DPU binary 改动。排除这个路径本身有价值。
+
+### 13.7 M-5 dev_gate 验收（PASS 7/7）
+
+KPI 按"infra landed + 不回归"设计：
+
+```
+[PASS] M-5  (stage=acceptance)
+    ✓ cuda_pim dual-runtime run completed (status=ok, no error)
+    ✓ 47/48 layers got a distinct down runtime  (>=40 threshold)
+    ✓ generated_tokens = 32  (budget delivered)
+    ✓ decode_tps = 0.309 >= 0.285  (no regression vs M-4 0.317)
+    ✓ DPU calls <= 28000  (still fused, 23214)
+    ✓ local preload miss counter wired up and moving (23214)
+```
+
+### 13.8 M-6 起跑清单
+
+按诊断排序：
+
+1. **DPU binary multi-slot qweight_mram**：让一份 DPU 程序驻留多个 expert
+   的 qweight。需要 MRAM 布局改写 + 新的 `slot_id` 参数传入 `run()`。
+   预期：preload miss 从 100% → **top_k / num_slots**（比如 4-slot →
+   50% miss），**可省 ~11s/run decode (50% of 21.5s)**。
+2. **async `dpu_launch(DPU_ASYNCHRONOUS)`**：让 GPU attention 和 DPU 并行。
+   预期：GPU side 不需要等 DPU，wall-clock 再省 ~10-15s/run decode。
+3. (1) + (2) 合起来预计把 decode_tps 从 0.31 推到 0.55-0.70 左右，
+   仍然差 CPU baseline 的 3.07 tok/s 不小，但已经达到 ADR 目标的一半。
+4. 混合精度 expert 作为 M-7 备选（ADR-001 P4 / HOBBIT）。

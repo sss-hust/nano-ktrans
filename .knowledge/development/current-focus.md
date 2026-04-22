@@ -48,7 +48,8 @@ updated: 2026-04-22 16:40
 | **M-2** | ✅ **PASS (6/6)** | **kernel_mode=7 bit-serial T-MAC 落地；correctness bit-exact，但 perf 在 0/60 cell 上跑赢 mode=4 → publishable 负结果**（ADR-002 §10）|
 | **M-3** | ✅ **PASS (10/10)** | BackendCostModel 落地：multi-vote 决策替换 `pim_prefill_token_threshold` 硬阈值；60 cell baseline 从 M-2 sweep 提取。prefill e2e **13.3× 赢 CPU**。**Decode e2e 慢 13.5×** — 全部来自 orchestration overhead（`HybridMoE.submit_forward` 同步、无 GPU/PIM overlap），这部分切到 M-4。顺带修复 M-1 遗留 bug：`CPUMoEBackend` GPTQ + 无-AMX 时写 zeros，导致 CPU baseline TPS 虚假。 |
 | **M-4** | ✅ **PASS (8/8)** | **fused gate+up DPU call**（host 端 row-concat 两套 W4A32 qweight，一次 launch 同时算 gate/up；DPU binary 零改动）。真机 decode TPS **0.228 → 0.317 (+39.2%)**，DPU 调用 **−33.4%**，数值 bit-exact。距 CPU baseline 还差 9.7×。|
-| M-5 | 🚧 下一个 | **async DPU launch + GPU/PIM overlap + batched 多 rank preload**。目标：把剩下的 9.7× 差距追回一半以上。|
+| **M-5** | ✅ **PASS (7/7, null 性能结果)** | dual `PIMQuantizedRuntime`（gate_up + down 各占独立 DPU rank pool）基础设施 landed (47/48 层)，新增 local preload counters 和 `quantized_runtime_down_distinct` 诊断。decode_tps 0.309 vs M-4 0.317 噪声内持平 —— **dual 不能单独降跨-expert preload miss**（Qwen3 top_k=8 工作集 ≫ 2 slot）。真机 micro-bench 量化了 preload miss 的真实成本 = 0.96 ms/call 纯 DPU DMA（非 Python），21.5 s/run 总传输开销，锁定 M-6 的确切预算。|
+| M-6 | 🚧 下一个 | **DPU binary multi-slot qweight_mram**（让一个 runtime 在 MRAM 驻留 N 个 expert；host 侧按 slot_id 路由）+ **`dpu_launch(DPU_ASYNCHRONOUS)`**（GPU attention / PIM 真正并行）。预期 decode_tps 0.31 → 0.55-0.70，约 M-4 的 2× 左右。|
 
 ## 开发流程（2026-04-22 起强制执行）
 

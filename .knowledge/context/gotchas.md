@@ -297,3 +297,45 @@ tags: [pitfalls, debugging]
 - 经验：
   1. 任何 kernel/runtime 级 micro-bench 收益**至少打对折** 才对应 e2e 观测值。做 roadmap 估算时先算 "fused 那段在 e2e 里的 wall-clock 占比"，再把 micro-bench 数字乘这个占比。
   2. **观测端 to-token 延迟才是诚实的 KPI**。`decode_tokens_per_second` 是唯一不会骗人的数字；per-layer / per-call 的任何 timing 都要先用 e2e 数据验证它的占比。
+
+
+<!-- updated: 2026-04-22 19:00 -->
+
+## PIMQuantizedRuntime 的 0.96 ms/call preload overhead **是 DPU DMA，不是 Python**
+
+- 背景：M-4 之后 preload hit ratio 仍然 0%。最直观的假设是 Python 层
+  开销大（ctypes / torch padding / signature check 等），改成 C 侧批量
+  就能赢。实测否决了这个假设。
+- Micro-bench：
+  - `_prepare_quantized_weights` (pure Python + torch copy) = **0.074 ms/call**
+  - `pim_quantized_load_weights` ctypes (host→DPU weight DMA) = **0.96 ms/call**
+  - `infer-only` (resident) = 2.31 ms/call
+- 结论：preload miss 的成本 **95% 花在 DPU DMA 本身**，不是 Python。
+  所以任何纯 Python 端的优化（批量 ctypes、padding cache、signature fast
+  path）最多省 ~5% 左右。真正要省就得让权重**不再每 call 重传**，即 MRAM
+  多 slot residency。
+- 经验：优化前先测准具体热点在 Python 层还是 C/硬件层。M-5 dual
+  runtime 就是在没测准这个分布前提下做的假设（以为 Python 开销大）；
+  真机数据 6 行就排除了这个假设，避免再做类似的无用功。
+
+<!-- updated: 2026-04-22 19:00 -->
+
+## dual PIMQuantizedRuntime **单独不能降 MoE 跨-expert preload miss**
+
+- 现象：M-5 把 `PIMQuantizedRuntime` 由单例拆成 gate_up + down 两个独立
+  实例后，47/48 层成功分到不同 DPU rank pool，diagnostics 显示 dual
+  landed，但 e2e decode_tps 0.309 vs M-4 的 0.317 —— 在 run-to-run 噪声
+  范围内持平。`quantized_preload_misses_local = 23214 = total_dpu_calls`，
+  **miss ratio 仍然 100%**。
+- 根因：dual runtime 只避免**同一 expert 内** gate_up 桶和 down 桶的
+  互相覆盖。但 MoE decode 的工作集是**每层 top_k 个不同 expert**
+  (Qwen3 = 8)，每步对 runtime 来说都是 "new expert's bundle"，不管是
+  1 个还是 2 个 runtime，MRAM 只能存 1 份权重 → 每 call 必 miss。
+- 经验：
+  1. "把单资源拆成两份" 的优化**只在工作集 ≤ 2** 时有效。MoE
+     top_k ≥ 4 都需要 **N-slot** 而不是 **2-slot**。
+  2. 任何 "更细粒度的 cache / residency" 设计要先估**工作集大小 vs
+     slot 容量**的比例。≥ 10× 的时候考虑换策略而不是加 slot。
+  3. 这次 M-5 的价值不在 perf，而在**排除**了 "dual runtime 就够了"
+     这个假设，为 M-6 去改 DPU binary MRAM 布局提供了明确依据。
+     publish 负结果也是结果。

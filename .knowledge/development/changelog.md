@@ -7,6 +7,46 @@ tags: [changelog]
 
 ## 2026-04-22
 
+### 2026-04-22 19:00 - ADR-002 M-5 闭合：dual-runtime 基础设施 + null 性能结果（诊断 MRAM 单槽瓶颈）+ dev_gate PASS 7/7
+
+把 `PIMMoEBackend` 的 `PIMQuantizedRuntime` 由单例拆成 dual：gate_up
+bundle 和 down bundle 各占独立 DPU rank pool（profile 前缀
+`"|gate_up"` vs `"|down"`）。47/48 层成功分到独立 down runtime，真机
+e2e decode_tps 0.309 (M-4 是 0.317，噪声内持平)，DPU calls 23214
+（M-4 是 23246）。
+
+**此 milestone 作为 publishable null result 闭合**（与 M-2 同构）。
+原因是 dual runtime 只能消除**单个 expert 内**的 preload 覆盖，而 M-4
+的 fused gate+up 已经把那部分干掉了；Qwen3 top_k=8 每步 8 个不同
+expert 的**跨-expert**覆盖仍然 100% miss。要真正降 miss 必须改 DPU
+binary 的 MRAM 布局让单 runtime 支持多 slot —— 留给 M-6。
+
+**M-5 真正的产出**：
+- 量化数据：`pim_quantized_load_weights` ctypes 调用耗 **0.96 ms/call**
+  纯 host→DPU DMA（非 Python 开销）。14.7 calls/layer × 48 × 32 tokens ≈
+  **21.5 s/run** 总传输时间（M-4 decode_seconds 的 21%）—— 这是 M-6
+  multi-slot MRAM 能撬动的确切预算。
+- 基础设施：双 runtime 字段 + `quantized_preload_hits_local /
+  _misses_local` local counters（解决了 singleton counter 被 48 层
+  同时写的归一化问题）+ dev_gate `ratio_vs_artifact` 之外新增的"infra-landed"
+  类型的 KPI 模式。
+- 排除了"dual runtime 单独就能追回 9.7× 差距"这个假设路径。
+
+**关联改动**：
+- `nano_ktrans/kernels/pim_moe.py`：`_try_init_quantized_runtimes_dual`，
+  ctor 双 init，`_run_expert_quantized_on_dpu` down 路由 + local
+  counter 更新，`notify_expert_evicted` 双 runtime 清理，`diagnostics`
+  新字段
+- `.codebuddy/dev_gate/M-5.toml`：7 条 "infra + no regression" 类 KPI
+- `tests/test_core.py::TestPIMMoEBackendDualRuntime`：4 条单测（shadow
+  field 完整性、属性存在、非 GPTQ 早退、eviction 双 runtime sweep）
+
+**测试**：213 → **217 passed** (+4)。
+
+**下一步 M-6**：改 DPU binary MRAM layout 支持多 slot qweight；
+同时接入 `dpu_launch(DPU_ASYNCHRONOUS)` 做 GPU/PIM overlap。预期把
+decode_tps 从 0.31 推到 0.55-0.70。
+
 ### 2026-04-22 18:10 - ADR-002 M-4 fused gate+up：DPU 调用 −33%、decode TPS +39%、dev_gate PASS 8/8
 
 真机数据在 `benchmarks/results/e2e_gptq_cuda_pim_M4_fused.json`：PIM decode

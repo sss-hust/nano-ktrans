@@ -7651,3 +7651,149 @@ class TestPIMQuantizedRuntimeConcatPreparation:
         # so no extra tail row is needed.
         assert concat_rows % 2 == 0
         assert lhs_orig == 63 and rhs_orig == 64
+
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-5 — Dual PIMQuantizedRuntime allocation (gate_up vs down)
+# ----------------------------------------------------------------------
+
+
+class TestPIMMoEBackendDualRuntime:
+    """PIMMoEBackend M-5 must expose a second quantized runtime + local
+    preload counters.  Shadow mode never actually talks to DPUs, so
+    the dual allocation returns (None, None) and the existing fields
+    must still be present and coherent."""
+
+    def _make_dummy(self, tmp_path, hidden_size=64, intermediate_size=32, num_experts=2):
+        from safetensors.torch import save_file
+        tensors = {}
+        for e in range(num_experts):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w1.weight"] = (
+                torch.randn(intermediate_size, hidden_size)
+            )
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w3.weight"] = (
+                torch.randn(intermediate_size, hidden_size)
+            )
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w2.weight"] = (
+                torch.randn(hidden_size, intermediate_size)
+            )
+        save_file(tensors, str(tmp_path / "model.safetensors"))
+        return hidden_size, intermediate_size, num_experts
+
+    def test_shadow_backend_exposes_dual_runtime_fields(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0,
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path),
+            pim_execution_mode="shadow",
+        )
+        # In shadow mode the runtimes are None -> "distinct" must read
+        # false (two Nones are not distinct runtimes).
+        diag = backend.diagnostics()
+        assert "quantized_runtime_down_distinct" in diag
+        assert diag["quantized_runtime_down_distinct"] is False
+        assert "quantized_preload_hits_local" in diag
+        assert "quantized_preload_misses_local" in diag
+        assert diag["quantized_preload_hits_local"] == 0
+        assert diag["quantized_preload_misses_local"] == 0
+        # And the down-runtime globals must be wired (zero, not missing).
+        assert "quantized_runtime_down_preload_hits" in diag
+        assert "quantized_runtime_down_preload_misses" in diag
+
+    def test_backend_attribute_points_at_down_runtime(self, tmp_path):
+        """``self.quantized_runtime_down`` must exist as an attribute
+        from ctor, independent of which execution mode we're in."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0,
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path),
+            pim_execution_mode="shadow",
+        )
+        # Shadow mode does not actually allocate runtimes, so both must
+        # be None (no crash on attribute access).
+        assert backend.quantized_runtime is None
+        assert backend.quantized_runtime_down is None
+
+    def test_try_init_quantized_runtimes_dual_returns_none_without_gptq(self, tmp_path):
+        """Without GPTQ weights, dual-runtime init returns (None, None)
+        instead of crashing — matches the existing fp16 weight path."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0,
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path),
+            pim_execution_mode="shadow",
+        )
+        # Shadow + non-GPTQ: dual init must be a no-op.
+        assert backend.is_gptq is False
+        gu, dn = backend._try_init_quantized_runtimes_dual()
+        assert gu is None and dn is None
+
+    def test_notify_expert_evicted_clears_both_runtimes(self, tmp_path):
+        """eviction handler must sweep the xor masks on both runtimes
+        when they are distinct.  We construct a lightweight stub
+        runtime and verify the eviction call reaches both."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0,
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path),
+            pim_execution_mode="shadow",
+        )
+
+        class _StubRuntime:
+            def __init__(self):
+                self.evicted: list[int] = []
+                self.resident_expert_id = 0
+                self.preload_hits = 0
+                self.preload_misses = 0
+
+            def evict_cached_weights(self, eid):
+                self.evicted.append(eid)
+
+        gu = _StubRuntime()
+        dn = _StubRuntime()
+        backend.quantized_runtime = gu
+        backend.quantized_runtime_down = dn
+        # One of the experts must be registered in cpu_expert_lookup for
+        # notify_expert_evicted to act.  PIMMoEBackend with zero GPU
+        # experts registers all experts as CPU slots.
+        assert 0 in backend.cpu_expert_lookup
+
+        backend.notify_expert_evicted(expert_idx=0, residency_before="gpu")
+        # Four xor-masks applied on each distinct runtime = 4 evictions each.
+        assert len(gu.evicted) == 4
+        assert len(dn.evicted) == 4
+        # Masks must match the ones PIMMoEBackend uses.
+        expected_masks = {
+            0x1111111111111111,
+            0x2222222222222222,
+            0x3333333333333333,
+            0x1212121212121212,
+        }
+        base_eid = backend._expert_id(0)
+        assert set(gu.evicted) == {base_eid ^ m for m in expected_masks}
+        assert set(dn.evicted) == {base_eid ^ m for m in expected_masks}
