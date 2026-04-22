@@ -43,6 +43,7 @@ CPUMoEBackend: CPU 端 MoE 专家计算的核心后端。
 - kernels.weight_loader.ExpertWeightLoader
 """
 
+import logging
 import os
 from typing import Dict, List, Optional
 
@@ -53,6 +54,8 @@ from nano_ktrans.utils.context import get_context
 from .cpu_infer import CPUInferEngine
 from .offload_backend import ExpertOffloadBackend
 from .weight_loader import ExpertWeightLoader, GPTQLinearWeight
+
+logger = logging.getLogger("nano_ktrans.cpu_moe")
 
 try:
     from kt_kernel import kt_kernel_ext  # noqa: F401
@@ -199,7 +202,8 @@ class CPUMoEBackend(ExpertOffloadBackend):
             with open("/proc/cpuinfo", "r") as f:
                 content = f.read().lower()
                 has_amx = "amx" in content
-        except: pass
+        except OSError as exc:
+            logger.debug("Failed to read /proc/cpuinfo for AMX detection: %s", exc)
 
         # GPU 专家掩码 (pinned, 供 C++ 读取)
         self.gpu_experts_mask = torch.empty(
@@ -265,13 +269,19 @@ class CPUMoEBackend(ExpertOffloadBackend):
                 self._identity_map = torch.arange(num_experts, dtype=torch.long)
                 self.cpu_infer.submit(self.moe.load_weights_task(self._identity_map.data_ptr()))
                 self.cpu_infer.sync()
-                print(f"  [CPUMoEBackend] Layer {layer_idx}: Accelerated by {method}")
+                logger.info("Layer %s: Accelerated by %s", layer_idx, method)
                 self.use_fallback = False
                 return # 初始化成功
             except Exception as e:
-                print(f"  [CPUMoEBackend] Layer {layer_idx}: Failed to init {method} ({e}). Falling back to PyTorch.")
+                logger.warning(
+                    "Layer %s: Failed to init %s (%s). Falling back to PyTorch.",
+                    layer_idx, method, e,
+                )
         else:
-            print(f"  [CPUMoEBackend] Layer {layer_idx}: kt-kernel/AMX unavailable. Using PyTorch fallback.")
+            logger.info(
+                "Layer %s: kt-kernel/AMX unavailable. Using PyTorch fallback.",
+                layer_idx,
+            )
 
         # ===== Fallback 模式：仅保留 CPU 专家权重，直接用 F.linear 计算，避免复制一整套 nn.Linear =====
         cpu_expert_indices = torch.where(~gpu_experts_mask.bool())[0].to(torch.long).cpu()
@@ -342,8 +352,10 @@ class CPUMoEBackend(ExpertOffloadBackend):
             self._gptq_experts[slot] = expert_gptq
 
         if self.is_gptq:
-            print(f"  [CPUMoEBackend] Layer {layer_idx}: GPTQ-Int{bits} weights detected "
-                  f"({len(self._gptq_experts)} CPU experts)")
+            logger.info(
+                "Layer %s: GPTQ-Int%s weights detected (%s CPU experts)",
+                layer_idx, bits, len(self._gptq_experts),
+            )
 
     def update_gpu_expert_mask(self, gpu_experts_mask: torch.Tensor) -> None:
         self.gpu_experts_mask = gpu_experts_mask.to(dtype=torch.uint8, device="cpu")

@@ -81,12 +81,23 @@ class ExpertWeightLoader:
 
     def __init__(self, weight_path: str):
         self.weight_path = weight_path
+        # Allow construction with an empty weight_path (e.g. smoke tests that
+        # build a randomly-initialized model with all experts pinned on GPU
+        # and never trigger offload materialization). In this empty-loader
+        # state we skip the file scan; any later load_* call will surface a
+        # KeyError because _key_to_file is empty, which is descriptive enough
+        # and matches the behavior of genuinely missing weight keys.
+        if not weight_path:
+            self._files: List[str] = []
+            self._key_to_file: Dict[str, str] = {}
+            self._quantize_config: Dict[str, object] = {}
+            return
         self._files = sorted(glob(os.path.join(weight_path, "*.safetensors")))
         if not self._files:
             raise FileNotFoundError(f"No .safetensors files found in {weight_path}")
 
         # 建立 key → file 的索引, 避免每次加载都扫描所有文件
-        self._key_to_file: Dict[str, str] = {}
+        self._key_to_file = {}
         for f in self._files:
             with safe_open(f, "pt", "cpu") as sf:
                 for key in sf.keys():
@@ -94,16 +105,16 @@ class ExpertWeightLoader:
         self._quantize_config = self._load_quantize_config()
 
     def _load_quantize_config(self) -> Dict[str, object]:
+        import json
+
         for filename in ("quantize_config.json", "config.json"):
             path = os.path.join(self.weight_path, filename)
             if not os.path.exists(path):
                 continue
             try:
-                import json
-
                 with open(path, "r", encoding="utf-8") as handle:
                     payload = json.load(handle)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 continue
             if filename == "quantize_config.json":
                 return payload

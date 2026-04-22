@@ -331,7 +331,7 @@ class PIMMoEBackend(CPUMoEBackend):
         if self.quantized_runtime is not None:
             resident_eid = self.quantized_runtime.resident_expert_id
         elif self.expert_runtime is not None:
-            resident_eid = self.expert_runtime._resident_expert_id
+            resident_eid = self.expert_runtime.resident_expert_id
         activated_cpu_experts.sort(
             key=lambda x: (1 if self._expert_id(x[1]) == resident_eid else 0,)
         )

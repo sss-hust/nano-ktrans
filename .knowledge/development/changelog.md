@@ -1,9 +1,96 @@
 ---
-updated: 2026-04-14
+updated: 2026-04-22
 tags: [changelog]
 ---
 
 # 📝 变更日志
+
+## 2026-04-22
+
+### 2026-04-22 10:50 - 修复 v0.3.0-rc1 测试回归
+
+`fix/v0.3.0-rc1-test-regressions` 分支，3 文件改动：
+
+- `nano_ktrans/llm.py`: `get_offload_diagnostics()` 访问 `self.expert_map_store`
+  改用 `getattr(self, "expert_map_store", None)`，兼容 `LLM.__new__(LLM)` 手工
+  构造的单测路径。根因是 `c816a9c`（P2 Expert Map Store）加的新字段，在
+  `__init__` 里才 set，而 `test_llm_get_offload_diagnostics_reports_prepared_budget_heuristic`
+  直接绕过 `__init__`。
+- `nano_ktrans/kernels/weight_loader.py`: `ExpertWeightLoader.__init__` 在
+  `weight_path == ""` 时进入"空加载器"状态（`_files=[]`、`_key_to_file={}`），
+  不再抛 `FileNotFoundError`。`load_*` 被调用时原有的 `KeyError` 依然会显式抛出。
+  根因是 `HybridMoE` 无条件实例化 `ExpertMaterializationManager`，破坏了
+  `test_cpu_only_smoke_generation_path` 这种纯 GPU 专家 + 随机权重的合法用例。
+- `tests/test_core.py`: 重写 `test_backend_notify_expert_evicted_called_on_demotion`。
+  原测试（`04dfbda` 引入）用了一堆根本不存在的 API：`InferenceContext`、
+  `HybridMoE(expert_hidden_size=, expert_key_template=, offload_backend_name=)`、
+  `moe.update_residency_plan(...)`。改为参照 `test_hybrid_moe_applies_decode_migration_plan`
+  的模式，用 `offload_backend.queue_migration_plan([ExpertMigrationOp(GPU→PIM)])`
+  触发 demotion 并验证 `notify_expert_evicted(expert_idx, 'gpu')` 被调用。
+
+测试结果：`156 passed, 1 warning` （之前 `153 passed, 3 failed`）。
+
+### 2026-04-22 10:50 - 知识库同步
+
+- `.knowledge/journal/2026-04-22.md`（新）: 今日修复日志
+- `.knowledge/context/gotchas.md`: 新增 4 条 gotchas（`LLM.__new__` 绕过 `__init__`
+  的容错模式、AI 生成测试必须实跑、loader 不应在构造期校验 weight 文件、smoke
+  test 要进 CI）
+- `.knowledge/development/current-focus.md`: "本轮新增" 补上 v0.3.0-rc1 回归修复
+- `.knowledge/development/_INDEX.md`、`.knowledge/journal/_INDEX.md`、
+  `.knowledge/INDEX.md`: 日期更新
+
+## 2026-04-21
+
+### 2026-04-21 20:00 - P2: Expert Map Store + prompt 语义预取（fMoE）
+
+- 新增 `nano_ktrans/utils/expert_map_store.py`：
+  - `ExpertMap` / `ExpertMapStore`（LRU 容量管理、两阶段搜索、线程安全）
+  - 语义搜索（`layer_idx < prefetch_distance`）+ 轨迹搜索（之后）
+  - 诊断：`{semantic,trajectory}_{queries,hits} / commit_count / eviction_count`
+- `HybridMoE` 新增 `expert_map_store` + `expert_map_prefetch_top_k` 构造参数；
+  `attach_expert_map / _record_router_probs / _request_map_store_prefetch` 三个方法
+- `MixtralModel.forward` 用 token embedding 均值作 prompt 锚点，begin/commit iteration
+- `LLM` 新增 4 个 kwargs：`enable_expert_map_store` / `expert_map_store_capacity` /
+  `expert_map_store_prefetch_distance` / `expert_map_prefetch_top_k`
+- 与 scheduler 完全解耦：即使 `enable_dynamic_expert_scheduler=False`，Store 独立可用
+- 新增 5 个单测覆盖 LRU、语义匹配、轨迹匹配、空兜底、诊断字段
+
+### 2026-04-21 19:50 - P1: MRS Score-Aware Hotness（HybriMoE）
+
+- `utils/expert_runtime_state.py::update_hotness` 新增 3 个 kwargs：
+  `router_scores` / `mrs_alpha` / `top_p`（默认 None 保持旧 bincount 行为）
+- 实现 `S = α · TopP(router_scores) + (1 − α) · S`，按 token 数归一化
+- `SchedulerConfig.hotness_mrs_alpha` / `hotness_top_p` 配置字段
+- `DynamicExpertScheduler.observe(..., topk_weights=...)` 可选传 router scores；
+  MRS 开启但 weights=None 时 fallback 到 bincount 并记入 `hotness_bincount_observations`
+- `HybridMoE.forward` 把 router softmax 后的 topk_weights 传给 scheduler
+- `LLM.__init__` 新增 `scheduler_hotness_mrs_alpha` / `scheduler_hotness_top_p` 入口
+- 新增 6 个单测覆盖 bincount 兼容、MRS 加权、top_p 截断、空观察衰减、两条 scheduler 路径
+- 关键踩坑：必须按 token 数归一化，否则长 prefill 会把 EMA 推到极值
+
+### 2026-04-21 19:30 - 代码质量第一批修复（`fix/code-quality-batch1`）
+
+12 文件、+230/−69：
+- `cpu_moe.py`: 裸 `except: pass` → `except OSError`；`print` → `logging`
+- `weight_loader.py`: 宽 `except Exception` → `(OSError, json.JSONDecodeError)`
+- `pim_moe.py`: 访问私有 `_resident_expert_id` → 公开 property
+- `linear.py`: `QKVParallelLinear / MergedColumnParallelLinear` 对未知 shard id 抛 `ValueError`
+- `rotary_embedding.py`: 去掉 `assert rope_scaling is None`；顺便修掉 `lru_cache` 对
+  dict 参数 TypeError 的潜在 bug（拆成 `_validate_rope_scaling` + `_build_rope(@lru_cache)`）
+- `llm.py`: 加 logger，删 DEBUG 残留
+- `models/config.py`: `num_experts_per_tok` 的 `or 0` bug 修正为 None→2、显式 0 保留
+- `utils/expert_selection.py`: profile hook `.item()` 循环 → `torch.bincount`；跳过无 gate 层
+- `utils/loader.py`: 加载器补 logging 统计；删除永不抛的 `except KeyError`
+- `agent.md` 完全重写与当前代码对齐
+- `pyproject.toml` description 去掉 Mixtral 特化
+- `tests/test_core.py` 新增 3 单测（shard id + RoPE scaling gating）
+
+### 2026-04-21 19:15 - PIM + MoE 研究综述
+
+- 新增 ADR-001：9 篇论文、6 个可借鉴创新点 P1–P6
+- 新增 `context/related-work.md` 速查表
+- 新增 `context/glossary.md` 领域术语（后续逐步填充）
 
 ## 2026-04-19
 

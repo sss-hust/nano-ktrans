@@ -1,12 +1,12 @@
 ---
 project: nano-ktrans
 created: 2026-04-07
-updated: 2026-04-15
+updated: 2026-04-22
 ---
 
 # nano-ktrans
 
-> 一个面向学习和实验的 Hybrid MoE 推理框架。当前已打通 CPU、`cuda_cpu_offload` 和实验性真实 DPU `pim` backend；新的主目标是让非专家层常驻 GPU，而专家在 GPU/PIM 间动态迁移与调度。
+> 一个面向学习和实验的 Hybrid MoE 推理框架。当前已打通 CPU、`cuda_cpu_offload` 和实验性真实 DPU `pim` backend；新的主目标是让非专家层常驻 GPU，而专家在 GPU/PIM 间动态迁移与调度。已在 `2026-04-21` 落地 P1 (MRS score-aware hotness) 与 P2 (Expert Map Store + prompt 语义预取) 的最小可用版本，两者默认关闭，需显式启用。`2026-04-22` 修复了 v0.3.0-rc1 测试套件的 3 个历史回归（`LLM.get_offload_diagnostics` 字段容错、`ExpertWeightLoader` 允许空 `weight_path`、重写 broken test），`pytest tests` 现为 `156 passed`。
 
 ## 技术栈
 
@@ -17,7 +17,7 @@ updated: 2026-04-15
 
 ## 当前状态
 
-- **阶段**: 🟡 最小真实 PIM 数值链路已跑通，正在从“静态专家放置”转向“GPU/PIM 动态专家调度”
+- **阶段**: 🟡 最小真实 PIM 数值链路已跑通，正在从"静态专家放置"转向"GPU/PIM 动态专家调度"
 - **当前焦点**: → [current-focus.md](development/current-focus.md)
 
 ## 知识库导航
@@ -35,3 +35,5 @@ updated: 2026-04-15
 - 🔥 [当前工作焦点](development/current-focus.md)
 - 📋 [开发路线图](development/roadmap.md)
 - ⚠️ [已知陷阱](context/gotchas.md)
+- 📚 [相关研究工作（PIM+MoE）](context/related-work.md)
+- 🧭 [ADR-001：PIM+MoE 研究综述与可借鉴创新点](architecture/decisions/001-pim-moe-offloading-literature.md)

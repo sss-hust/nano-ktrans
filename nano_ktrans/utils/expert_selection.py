@@ -112,14 +112,20 @@ def profile_expert_activation(
 
         hooks = []
         for layer_idx, layer in enumerate(model.model.layers):
+            gate_module = getattr(layer, "gate", None)
+            if gate_module is None:
+                # Dense / non-MoE layer, no gate to profile
+                continue
+
             def make_hook(lidx):
                 def hook_fn(module, input, output):
                     # gate output: [batch*seq_len, num_experts] logits
                     topk_ids = torch.topk(output, top_k, dim=-1).indices
-                    for eid in topk_ids.flatten():
-                        activation_counts[lidx, eid.item()] += 1
+                    flat_ids = topk_ids.flatten().to(dtype=torch.long).cpu()
+                    counts = torch.bincount(flat_ids, minlength=num_experts)
+                    activation_counts[lidx] += counts.to(dtype=activation_counts.dtype)
                 return hook_fn
-            h = layer.gate.register_forward_hook(make_hook(layer_idx))
+            h = gate_module.register_forward_hook(make_hook(layer_idx))
             hooks.append(h)
 
         with torch.no_grad():

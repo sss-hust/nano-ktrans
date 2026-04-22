@@ -31,6 +31,15 @@ class SchedulerConfig:
     step_stride_decode: int = 1
     decode_require_prefetch_ready: bool = False
     prefetch_candidate_budget_per_layer: int = 0
+    # ── MRS score-aware hotness (HybriMoE, arXiv:2504.05897) ──────────
+    # When `hotness_mrs_alpha` is not None, `observe()` accepts router
+    # softmax scores and updates hotness as
+    #   S = alpha * TopP(scores) + (1 - alpha) * S
+    # instead of the classical bincount EMA. Enabling this gives victim
+    # selection and prefetch candidate ranking a continuous [0, 1] signal
+    # that reflects router confidence, not just activation count.
+    hotness_mrs_alpha: float | None = None
+    hotness_top_p: int | None = None
 
 
 class DynamicExpertScheduler:
@@ -45,19 +54,42 @@ class DynamicExpertScheduler:
         self.step = 0
         self.last_plan: List[ExpertMigrationOp] = []
         self.last_phase = "decode"
+        # Diagnostics: count MRS-mode vs bincount-mode observe calls so that
+        # benchmarks can verify the score-aware path is actually engaged.
+        self.hotness_mrs_observations = 0
+        self.hotness_bincount_observations = 0
 
     @property
     def enabled(self) -> bool:
         return bool(self.config.enabled)
 
-    def observe(self, layer_idx: int, topk_ids: torch.Tensor, *, phase: str = "decode") -> None:
+    def observe(
+        self,
+        layer_idx: int,
+        topk_ids: torch.Tensor,
+        *,
+        phase: str = "decode",
+        topk_weights: torch.Tensor | None = None,
+    ) -> None:
         if not self.enabled:
             return
         state = self.residency_plan.layer_state(layer_idx)
         stride = self.config.step_stride_prefill if phase == "prefill" else self.config.step_stride_decode
         stride = max(1, int(stride))
         state.logical_step += stride
-        state.hotness = update_hotness(state.hotness, topk_ids, decay=self.config.hotness_decay)
+        use_mrs = self.config.hotness_mrs_alpha is not None and topk_weights is not None
+        state.hotness = update_hotness(
+            state.hotness,
+            topk_ids,
+            decay=self.config.hotness_decay,
+            router_scores=topk_weights if use_mrs else None,
+            mrs_alpha=self.config.hotness_mrs_alpha if use_mrs else None,
+            top_p=self.config.hotness_top_p if use_mrs else None,
+        )
+        if use_mrs:
+            self.hotness_mrs_observations += 1
+        else:
+            self.hotness_bincount_observations += 1
         state.mark_access(topk_ids, state.logical_step)
         self.last_phase = phase
 
@@ -121,6 +153,10 @@ class DynamicExpertScheduler:
             "prefetch_candidate_budget_per_layer": self.config.prefetch_candidate_budget_per_layer,
             "offload_tier": self.config.offload_tier.value,
             "last_plan_size": len(self.last_plan),
+            "hotness_mrs_alpha": self.config.hotness_mrs_alpha,
+            "hotness_top_p": self.config.hotness_top_p,
+            "hotness_mrs_observations": self.hotness_mrs_observations,
+            "hotness_bincount_observations": self.hotness_bincount_observations,
             "residency_plan": self.residency_plan.summary(),
         }
 

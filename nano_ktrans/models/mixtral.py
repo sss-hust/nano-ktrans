@@ -19,6 +19,7 @@ from nano_ktrans.kernels.offload_worker import BackgroundOffloadWorker
 from nano_ktrans.models.config import GenericMoeConfig
 from nano_ktrans.scheduler import DynamicExpertScheduler
 from nano_ktrans.utils.expert_runtime_state import ExpertResidencyPlan
+from nano_ktrans.utils.expert_map_store import ExpertMapStore
 
 MixtralConfig = GenericMoeConfig
 
@@ -110,6 +111,8 @@ class MixtralDecoderLayer(nn.Module):
         dynamic_expert_scheduler: Optional[DynamicExpertScheduler] = None,
         expert_prepared_cache_size: int | None = None,
         prepared_controller_aggressiveness: float = 0.0,
+        expert_map_store: "ExpertMapStore | None" = None,
+        expert_map_prefetch_top_k: int = 2,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -160,6 +163,8 @@ class MixtralDecoderLayer(nn.Module):
                 hidden_act=config.hidden_act,
                 expert_prepared_cache_size=expert_prepared_cache_size,
                 prepared_controller_aggressiveness=prepared_controller_aggressiveness,
+                expert_map_store=expert_map_store,
+                expert_map_prefetch_top_k=expert_map_prefetch_top_k,
             )
 
             if config.arch.has_shared_expert and config.shared_expert_intermediate_size:
@@ -235,6 +240,8 @@ class MixtralModel(nn.Module):
         prepared_controller_aggressiveness: float = 0.0,
         enable_background_offload_worker: bool = False,
         background_offload_poll_interval_seconds: float = 0.005,
+        expert_map_store: "ExpertMapStore | None" = None,
+        expert_map_prefetch_top_k: int = 2,
     ):
         super().__init__()
         self.config = config
@@ -243,6 +250,8 @@ class MixtralModel(nn.Module):
         self.enable_background_offload_worker = bool(enable_background_offload_worker)
         self.background_offload_poll_interval_seconds = float(background_offload_poll_interval_seconds)
         self.offload_worker: BackgroundOffloadWorker | None = None
+        self.expert_map_store = expert_map_store
+        self.expert_map_prefetch_top_k = max(0, int(expert_map_prefetch_top_k))
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         
@@ -258,6 +267,8 @@ class MixtralModel(nn.Module):
                 dynamic_expert_scheduler=dynamic_expert_scheduler,
                 expert_prepared_cache_size=expert_prepared_cache_size,
                 prepared_controller_aggressiveness=prepared_controller_aggressiveness,
+                expert_map_store=expert_map_store,
+                expert_map_prefetch_top_k=expert_map_prefetch_top_k,
             ) for layer_idx in range(config.num_hidden_layers)
         ])
         
@@ -319,6 +330,22 @@ class MixtralModel(nn.Module):
     ):
         hidden_states = self.embed_tokens(input_ids)           # [batch, seq_len, hidden]
         batch_size, seq_len, _ = hidden_states.shape
+
+        # ── fMoE Expert Map Store: start a per-iteration fingerprint ──
+        # We use the mean token embedding as the prompt semantic anchor; this
+        # follows fMoE's observation (§5.1) that the model's own embedding
+        # layer already produces expressive representations for expert-
+        # routing prediction, so no auxiliary encoder is needed.
+        inflight_expert_map = None
+        if self.expert_map_store is not None:
+            with torch.no_grad():
+                prompt_anchor = hidden_states.detach().to(torch.float32).mean(dim=(0, 1))
+            inflight_expert_map = self.expert_map_store.begin_iteration(prompt_anchor)
+            for decoder_layer in self.layers:
+                hybrid_moe = getattr(decoder_layer, "hybrid_moe", None)
+                if hybrid_moe is not None:
+                    hybrid_moe.attach_expert_map(inflight_expert_map)
+
         hidden_states = hidden_states.view(-1, self.config.hidden_size)  # flatten to 2D
 
         for decoder_layer in self.layers:
@@ -326,6 +353,14 @@ class MixtralModel(nn.Module):
 
         hidden_states = self.norm(hidden_states)
         hidden_states = hidden_states.view(batch_size, seq_len, -1)     # restore to 3D
+
+        if inflight_expert_map is not None and self.expert_map_store is not None:
+            self.expert_map_store.commit_iteration(inflight_expert_map)
+            for decoder_layer in self.layers:
+                hybrid_moe = getattr(decoder_layer, "hybrid_moe", None)
+                if hybrid_moe is not None:
+                    hybrid_moe.attach_expert_map(None)
+
         return hidden_states
 
 
@@ -346,6 +381,8 @@ class MixtralForCausalLM(nn.Module):
         prepared_controller_aggressiveness: float = 0.0,
         enable_background_offload_worker: bool = False,
         background_offload_poll_interval_seconds: float = 0.005,
+        expert_map_store: "ExpertMapStore | None" = None,
+        expert_map_prefetch_top_k: int = 2,
     ):
         super().__init__()
         self.model = MixtralModel(
@@ -360,6 +397,8 @@ class MixtralForCausalLM(nn.Module):
             prepared_controller_aggressiveness=prepared_controller_aggressiveness,
             enable_background_offload_worker=enable_background_offload_worker,
             background_offload_poll_interval_seconds=background_offload_poll_interval_seconds,
+            expert_map_store=expert_map_store,
+            expert_map_prefetch_top_k=expert_map_prefetch_top_k,
         )
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.packed_modules_mapping = {

@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Optional
 
@@ -23,6 +24,8 @@ from nano_ktrans.utils.expert_selection import (
 )
 from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
 from nano_ktrans.engine.simple_engine import SimpleEngine
+
+logger = logging.getLogger("nano_ktrans.llm")
 
 class LLM:
     """
@@ -58,8 +61,14 @@ class LLM:
         scheduler_prefetch_candidate_budget_per_layer: Optional[int] = None,
         scheduler_prepared_cache_budget_per_layer: Optional[int] = None,
         scheduler_profile: str = SCHEDULER_PROFILE_BASELINE,
+        scheduler_hotness_mrs_alpha: Optional[float] = None,
+        scheduler_hotness_top_p: Optional[int] = None,
         enable_background_offload_worker: bool = False,
         background_offload_poll_interval_seconds: float = 0.005,
+        enable_expert_map_store: bool = False,
+        expert_map_store_capacity: int = 1024,
+        expert_map_store_prefetch_distance: int = 3,
+        expert_map_prefetch_top_k: int = 2,
     ):
         if device is None or device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -87,11 +96,11 @@ class LLM:
         self.max_seq_len = max_seq_len
         self.offload_backend = offload_backend
         self.offload_backend_kwargs = offload_backend_kwargs or {}
-        
-        # print(f"Loading tokenizer from {model_path}...")
+
+        logger.debug("Loading tokenizer from %s", model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        
-        # print(f"Loading config from {model_path}...")
+
+        logger.debug("Loading config from %s", model_path)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=False)
         
         config = GenericMoeConfig.from_hf_config(hf_config)
@@ -168,6 +177,8 @@ class LLM:
             migration_cooldown_steps=scheduler_migration_cooldown_steps,
             decode_require_prefetch_ready=scheduler_decode_require_prefetch_ready,
             prefetch_candidate_budget_per_layer=scheduler_prefetch_candidate_budget_per_layer,
+            hotness_mrs_alpha=scheduler_hotness_mrs_alpha,
+            hotness_top_p=scheduler_hotness_top_p,
         )
         self.scheduler_profile = normalized_scheduler_profile
         self.dynamic_expert_scheduler = DynamicExpertScheduler(
@@ -189,9 +200,19 @@ class LLM:
         self.enable_background_offload_worker = bool(enable_background_offload_worker)
         self.background_offload_poll_interval_seconds = float(background_offload_poll_interval_seconds)
 
-        # DEBUG: 仅测试一层以排查崩溃原因
-        # config.num_hidden_layers = 1
-        
+        # ── fMoE Expert Map Store (optional) ──────────────────────────
+        self.enable_expert_map_store = bool(enable_expert_map_store)
+        self.expert_map_prefetch_top_k = max(0, int(expert_map_prefetch_top_k))
+        if self.enable_expert_map_store:
+            from nano_ktrans.utils.expert_map_store import ExpertMapStore
+
+            self.expert_map_store: Optional[object] = ExpertMapStore(
+                capacity=int(expert_map_store_capacity),
+                prefetch_distance=int(expert_map_store_prefetch_distance),
+            )
+        else:
+            self.expert_map_store = None
+
         # print(f"Instantiating Hybrid MoE model on {device}...")
         model_dtype = torch.bfloat16 if device == "cpu" or device.startswith("cuda") else torch.float32
         self.model = MixtralForCausalLM(
@@ -206,15 +227,17 @@ class LLM:
             prepared_controller_aggressiveness=self.prepared_controller_aggressiveness,
             enable_background_offload_worker=self.enable_background_offload_worker,
             background_offload_poll_interval_seconds=self.background_offload_poll_interval_seconds,
+            expert_map_store=self.expert_map_store,
+            expert_map_prefetch_top_k=self.expert_map_prefetch_top_k,
         )
         self.model = self.model.to(device=device, dtype=model_dtype)
             
-        # print(f"Loading weights from {model_path} into Python model...")
+        logger.debug("Loading weights from %s into Python model", model_path)
         load_model(self.model, model_path)
-        
-        # print("Initializing SimpleEngine...")
+
+        logger.debug("Initializing SimpleEngine")
         self.engine = SimpleEngine(self.model, max_seq_len=max_seq_len, chunk_size=chunk_size)
-        # print("Model loaded successfully.")
+        logger.debug("Model loaded successfully")
 
     def generate(self, prompt: str, max_new_tokens: int = 50) -> str:
         # 1. Tokenize prompt
@@ -222,7 +245,7 @@ class LLM:
         input_ids = inputs.input_ids.to(self.device)
 
         seq_len = input_ids.shape[1]
-        print(f"Prompt tokens: {seq_len}. Starts generation...")
+        logger.info("Prompt tokens: %s. Starts generation...", seq_len)
 
         try:
             self.engine.start_background_offload_worker()
@@ -272,6 +295,11 @@ class LLM:
             "prepared_controller_aggressiveness": self.prepared_controller_aggressiveness,
             "background_offload_worker_enabled": self.enable_background_offload_worker,
             "background_offload_poll_interval_seconds": self.background_offload_poll_interval_seconds,
+            "expert_map_store": (
+                getattr(self, "expert_map_store", None).diagnostics()
+                if getattr(self, "expert_map_store", None) is not None
+                else None
+            ),
             "offload_refresh": self.model.model.offload_refresh_diagnostics(),
             "dynamic_scheduler": self.dynamic_expert_scheduler.diagnostics(),
             "layer_count": len(layers),

@@ -29,9 +29,51 @@ updated: 2026-04-17 05:58
 updated: 2026-04-19 00:50
 updated: 2026-04-19 02:10
 updated: 2026-04-19 12:40
+updated: 2026-04-21 19:45
+updated: 2026-04-21 20:05
+updated: 2026-04-22 10:50
 ---
 
 # 🔥 当前工作焦点
+
+## 本轮新增（2026-04-22）
+
+- [x] **v0.3.0-rc1 测试回归修复**（`fix/v0.3.0-rc1-test-regressions` 分支，3 文件 +126/−47）
+      - `LLM.get_offload_diagnostics()` 的 `expert_map_store` 访问改 `getattr` 容错 — `c816a9c`（P2）引入的回归
+      - `ExpertWeightLoader.__init__` 在 `weight_path == ""` 时进入"空加载器"状态 —
+        让 `test_cpu_only_smoke_generation_path` 这种纯 GPU + 随机权重的合法用例可以构造模型
+      - 重写 `test_backend_notify_expert_evicted_called_on_demotion` —
+        原测试（`04dfbda` 引入）用了一堆不存在的 API（`InferenceContext`、
+        `HybridMoE(expert_hidden_size=...)`、`moe.update_residency_plan(...)`），AI
+        生成但从未实跑。改为参照相邻真实测试的模式用 `queue_migration_plan` 触发 demotion
+- [x] 测试套件从 `153 passed / 3 failed` 恢复到 `156 passed`
+- [x] 4 条新 gotchas 写入 `.knowledge/context/gotchas.md`：`LLM.__new__` 绕过
+      `__init__` 的字段容错模式、`ExpertWeightLoader` 不应在构造期校验 weight 文件、
+      AI 生成测试必须实跑、smoke test 要进 CI 必跑集
+
+## 本轮新增（2026-04-21）
+
+- [x] 代码质量第一批修复（`fix/code-quality-batch1` 分支，12 文件 +230/−69）
+- [x] PIM + MoE 文献综述（9 篇论文 → ADR-001 + 6 个可借鉴创新点 P1–P6）
+- [x] **P1 落地**：MRS score-aware hotness（HybriMoE）
+      - `update_hotness(..., router_scores=, mrs_alpha=, top_p=)` 新 API
+      - `SchedulerConfig.hotness_mrs_alpha / hotness_top_p`
+      - `HybridMoE.forward` 把 topk_weights 传给 scheduler.observe
+      - 默认关闭，完全向后兼容
+- [x] **P2 落地（最小可用）**：Expert Map Store + prompt 语义预取（fMoE）
+      - 新建 `utils/expert_map_store.py`（~250 行，线程安全 LRU + 两阶段搜索）
+      - `MixtralModel.forward` 用 mean token embedding 做 prompt 锚点
+      - 与 dynamic scheduler 解耦，所有预取走同一 `_request_prefetch` 漏斗
+- [x] 新增 11 个单测（P1×6 + P2×5）；现有 `.knowledge` 已同步更新
+
+下一步（未完成）：
+- [ ] 宿主机跑 `cuda_cpu_offload + MRS on/off` profile sweep，验证 `cold_promotion_penalty` 是否下降
+- [ ] 宿主机跑 `enable_expert_map_store on/off`，验证 `decode_prefetch_hits` 命中率
+- [ ] P3 Fiddler cost model（升级 `pim_prefill_token_threshold` 成 `BackendCostModel`）
+
+---
+
+## 历史焦点（保留）
 
 ## 正在进行
 

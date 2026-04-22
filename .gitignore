@@ -205,3 +205,6 @@ benchmarks/pim_microbench/build/
 scripts/__pycache__/
 nano_ktrans.egg-info/
 nano_ktrans/kernels/pim_native/build/
+
+# IDE / internal metadata
+.xac/

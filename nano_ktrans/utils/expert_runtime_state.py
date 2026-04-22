@@ -192,11 +192,90 @@ def update_hotness(
     routed_expert_ids: torch.Tensor,
     *,
     decay: float = 0.95,
+    router_scores: torch.Tensor | None = None,
+    mrs_alpha: float | None = None,
+    top_p: int | None = None,
 ) -> torch.Tensor:
+    """
+    Update per-expert hotness EMA.
+
+    Two modes:
+
+    1. **Bincount mode** (``mrs_alpha is None`` or ``router_scores is None``):
+       Classical behaviour — ``hotness = hotness * decay + bincount(routed_ids)``.
+       Each activation counts as "+1" regardless of router confidence.
+
+    2. **MRS mode** (HybriMoE, arXiv:2504.05897, §IV.C):
+       ``S = alpha * TopP(router_scores) + (1 - alpha) * S``
+
+       Router probability mass is folded directly into the hotness EMA, so a
+       confidently routed expert contributes more than a top-k tie-breaker.
+       Only the ``top_p`` experts per token are accumulated — low-probability
+       experts have indistinguishable reuse signal and are clipped.
+
+    The MRS mode is the recommended default whenever Hybrid MoE has a
+    score-aware cache layer (warm / activated), because it lets cache victim
+    selection fall back to a signal that is continuous in ``[0, 1]`` rather
+    than a sparse integer count.
+
+    Args:
+        hotness: ``[num_experts]`` running estimate (modified out-of-place).
+        routed_expert_ids: ``[N, top_k]`` (or flat) expert ids selected by gate.
+        decay: Multiplicative decay for bincount mode. Ignored in MRS mode.
+        router_scores: ``[N, top_k]`` probabilities paired with ``routed_expert_ids``.
+            If provided together with ``mrs_alpha``, enables MRS mode.
+        mrs_alpha: Smoothing coefficient in ``(0, 1]``. Typical value ``0.3``.
+        top_p: Per-token truncation cap. Defaults to ``routed_expert_ids.shape[-1]``
+            (i.e. no extra truncation beyond top-k). Setting ``top_p`` to
+            ``2 * top_k`` matches HybriMoE's default.
+
+    Returns:
+        Updated hotness tensor (same shape/dtype as input).
+    """
+    num_experts = updated_numel = hotness.numel()
+    if mrs_alpha is not None and router_scores is not None:
+        alpha = float(mrs_alpha)
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError(f"mrs_alpha must be in (0, 1], got {alpha}")
+
+        flat_ids = routed_expert_ids.reshape(-1, routed_expert_ids.shape[-1]).to(
+            dtype=torch.long, device="cpu"
+        )
+        flat_scores = router_scores.reshape(-1, router_scores.shape[-1]).to(
+            dtype=hotness.dtype, device="cpu"
+        )
+        if flat_ids.shape != flat_scores.shape:
+            raise ValueError(
+                f"routed_expert_ids and router_scores shape mismatch: "
+                f"{tuple(flat_ids.shape)} vs {tuple(flat_scores.shape)}"
+            )
+        if flat_ids.numel() == 0 or num_experts == 0:
+            return hotness * (1.0 - alpha)
+
+        effective_p = int(top_p) if top_p is not None else flat_ids.shape[-1]
+        effective_p = max(1, min(effective_p, flat_ids.shape[-1]))
+        if effective_p < flat_ids.shape[-1]:
+            top_values, top_positions = torch.topk(flat_scores, k=effective_p, dim=-1)
+            top_ids = torch.gather(flat_ids, 1, top_positions)
+        else:
+            top_values = flat_scores
+            top_ids = flat_ids
+
+        # Aggregate per-expert score mass for this observation window.
+        score_mass = torch.zeros(num_experts, dtype=hotness.dtype)
+        score_mass.scatter_add_(0, top_ids.reshape(-1), top_values.reshape(-1))
+
+        # Normalize by number of tokens so a long sequence doesn't overwhelm
+        # EMA history — matches HybriMoE's "per-iteration TopP(s)" semantics.
+        token_count = max(1, int(top_ids.shape[0]))
+        score_mass = score_mass / float(token_count)
+        return hotness * (1.0 - alpha) + score_mass * alpha
+
+    # ── Classical bincount mode ────────────────────────────────────────
     updated = hotness * decay
     flat_ids = routed_expert_ids.reshape(-1).to(dtype=torch.long, device="cpu")
     if flat_ids.numel() > 0:
-        bincount = torch.bincount(flat_ids, minlength=updated.numel()).to(dtype=updated.dtype)
+        bincount = torch.bincount(flat_ids, minlength=updated_numel).to(dtype=updated.dtype)
         updated = updated + bincount
     return updated
 
