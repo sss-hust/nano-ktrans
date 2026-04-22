@@ -201,6 +201,70 @@ class PIMQuantizedRuntime:
 
         return qweight_i32, scales_f32, padded_input_dim, padded_output_dim, output_dim
 
+    # ADR-002 M-4.1: host-side concat of two shape-compatible GPTQ
+    # projections (same input_dim, same group_size) into one fat
+    # projection.  Used by PIMMoEBackend to merge gate + up into a
+    # single DPU call per expert — the DPU kernel is agnostic to
+    # output_dim, so this is purely a host-side weight stacking.
+    #
+    # Returns the same tuple as _prepare_quantized_weights so the
+    # existing preload path can consume it unchanged.
+    def _prepare_concat_quantized_weights(
+        self,
+        lhs: GPTQLinearWeight,
+        rhs: GPTQLinearWeight,
+        kernel_mode: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, int, int, int, int]:
+        if lhs.input_dim != rhs.input_dim:
+            raise ValueError(
+                f"concat weights must share input_dim; "
+                f"got lhs={lhs.input_dim}, rhs={rhs.input_dim}"
+            )
+        if lhs.group_size != rhs.group_size:
+            raise ValueError(
+                f"concat weights must share group_size; "
+                f"got lhs={lhs.group_size}, rhs={rhs.group_size}"
+            )
+        if lhs.bits != rhs.bits:
+            raise ValueError(
+                f"concat weights must share bit-width; "
+                f"got lhs={lhs.bits}, rhs={rhs.bits}"
+            )
+
+        # Prepare each side individually (padding applied) then stack
+        # along the output-dim axis.  This avoids duplicating the
+        # padding logic while keeping the memory-layout invariants
+        # the DPU kernel expects.
+        lhs_qw, lhs_sc, padded_in, lhs_padded_out, lhs_orig_out = \
+            self._prepare_quantized_weights(lhs, kernel_mode)
+        rhs_qw, rhs_sc, _padded_in_r, rhs_padded_out, rhs_orig_out = \
+            self._prepare_quantized_weights(rhs, kernel_mode)
+
+        # Both sides share padded_input_dim by construction (same
+        # input_dim).  Stack rows.
+        concat_qw = torch.cat([lhs_qw, rhs_qw], dim=0).contiguous()
+        concat_sc = torch.cat([lhs_sc, rhs_sc], dim=0).contiguous()
+        # Re-pad output_dim to even (DPU kernel writes row pairs).
+        concat_rows = concat_qw.shape[0]
+        if concat_rows % 2 == 1:
+            concat_qw = torch.cat(
+                [concat_qw, torch.zeros(1, concat_qw.shape[1], dtype=torch.int32)], dim=0
+            ).contiguous()
+            concat_sc = torch.cat(
+                [concat_sc, torch.zeros(1, concat_sc.shape[1], dtype=torch.float32)], dim=0
+            ).contiguous()
+            concat_rows += 1
+        # original_lhs_out and original_rhs_out are returned so the
+        # caller can split the DPU output back into two tensors.
+        return (
+            concat_qw,
+            concat_sc,
+            padded_in,
+            concat_rows,
+            lhs_orig_out,
+            rhs_orig_out,
+        )
+
     # ── NEW: preload — load quantized weights to DPU MRAM ──────────────
 
     def preload(
@@ -301,6 +365,107 @@ class PIMQuantizedRuntime:
         self._weight_cache.pop(expert_id, None)
         if self._resident_expert_id == expert_id:
             self.evict()
+
+    # ── NEW (ADR-002 M-4.1): fused preload+infer for two concatenated
+    #    projections sharing the same input.  One DPU launch instead
+    #    of two, one host->DPU weight transfer instead of two.
+    def preload_and_infer_concat(
+        self,
+        expert_id: int,
+        lhs: GPTQLinearWeight,
+        rhs: GPTQLinearWeight,
+        inputs: torch.Tensor,
+        *,
+        kernel_mode: int = 4,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Run a single DPU matvec on the row-concatenation of two
+        quantized projections and split the result.
+
+        Used by PIMMoEBackend to fuse gate + up into one DPU launch
+        per expert.  The DPU kernel is agnostic to output_dim so this
+        is purely a host-side weight stacking trick — it halves the
+        per-expert DPU launch count and halves the host->DPU weight
+        transfers without touching the DPU binary.
+
+        Returns ``(lhs_output, rhs_output)`` in the original shapes.
+        """
+        if inputs.ndim != 2:
+            raise ValueError("preload_and_infer_concat expects 2D input.")
+
+        batch_size, input_dim = inputs.shape
+        if input_dim != lhs.input_dim or input_dim != rhs.input_dim:
+            raise ValueError(
+                f"input_dim mismatch: inputs.shape={tuple(inputs.shape)}, "
+                f"lhs.input_dim={lhs.input_dim}, rhs.input_dim={rhs.input_dim}"
+            )
+
+        # Cache lookup: each expert_id may hold a pre-prepared concat bundle.
+        if expert_id not in self._weight_cache or len(self._weight_cache[expert_id]) != 7 \
+                or self._weight_cache[expert_id][6] <= 0:
+            concat_qw, concat_sc, padded_in, concat_rows, lhs_orig, rhs_orig = \
+                self._prepare_concat_quantized_weights(lhs, rhs, kernel_mode)
+            # Store with a 7th slot = rhs_orig_out (encoded as positive int).
+            # The single-projection cache entry uses this slot to hold
+            # ``original_output_dim`` (same semantic), so we overload the
+            # tuple shape here for concat bundles: when slot[6] > 0 and
+            # slot[5] == kernel_mode we know it's a concat bundle; downstream
+            # readers care only about tensor+shape.
+            self._weight_cache[expert_id] = (
+                concat_qw, concat_sc, padded_in, concat_rows,
+                lhs.group_size, kernel_mode, rhs_orig,
+            )
+            concat_lhs_orig = lhs_orig
+            concat_rhs_orig = rhs_orig
+        else:
+            concat_qw, concat_sc, padded_in, concat_rows, group_size, km, concat_rhs_orig = \
+                self._weight_cache[expert_id]
+            concat_lhs_orig = lhs.output_dim
+
+        # Preload into MRAM if this concat bundle isn't already resident.
+        if self._resident_expert_id != expert_id:
+            error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
+            rc = self._lib.pim_quantized_load_weights(
+                ctypes.c_uint32(padded_in),
+                ctypes.c_uint32(concat_rows),
+                ctypes.c_uint32(lhs.group_size),
+                ctypes.c_uint32(kernel_mode),
+                ctypes.c_void_p(concat_qw.data_ptr()),
+                ctypes.c_void_p(concat_sc.data_ptr()),
+                error_buffer,
+                len(error_buffer),
+            )
+            if rc != 0:
+                raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+            self._resident_expert_id = expert_id
+            self._loaded_signature = (padded_in, concat_rows, lhs.group_size, kernel_mode, expert_id)
+            self.preload_misses += 1
+        else:
+            self.preload_hits += 1
+
+        # Pad inputs if needed.
+        inputs_f32 = inputs.detach().to(device="cpu", dtype=torch.float32, copy=True).contiguous()
+        if padded_in != input_dim:
+            padded_inputs = torch.zeros(batch_size, padded_in, dtype=torch.float32)
+            padded_inputs[:, :input_dim] = inputs_f32
+            inputs_f32 = padded_inputs
+
+        outputs = torch.empty(batch_size, concat_rows, dtype=torch.float32)
+        error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
+        rc = self._lib.pim_quantized_run(
+            ctypes.c_uint32(batch_size),
+            ctypes.c_void_p(inputs_f32.data_ptr()),
+            ctypes.c_void_p(outputs.data_ptr()),
+            error_buffer,
+            len(error_buffer),
+        )
+        if rc != 0:
+            raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+
+        # Split: first concat_lhs_orig rows go to lhs, next concat_rhs_orig to rhs.
+        lhs_out = outputs[:, :concat_lhs_orig].contiguous()
+        rhs_out = outputs[:, concat_lhs_orig : concat_lhs_orig + concat_rhs_orig].contiguous()
+        return lhs_out, rhs_out
 
     # ── Existing API (backward compatible) ──────────────────────────────
 

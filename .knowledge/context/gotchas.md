@@ -274,3 +274,26 @@ tags: [pitfalls, debugging]
   1. **永远不要让 "fallback output = zeros" 看起来像正常执行路径**。至少 log 一个 warning 或标记 `computed=False` diagnostic。
   2. **任何 KPI 对比 baseline 要先单独验证 "baseline 真的在算"**：检查 output_text 合理性 + 检查 decode_seconds 是否与 model size 数量级一致（30B 模型 decode 不可能 < 1s/token）。
   3. dev_gate 现在有一条显式反回归规则：`decode_seconds >= 5.0`（32 token），防止 zeros-output 类 bug 混过 CI。
+
+
+<!-- updated: 2026-04-22 18:10 -->
+
+## PIMQuantizedRuntime 单 resident slot — 同 expert 的 3 个 projection 用不同 eid 会**互相覆盖**
+
+- 现象：M-3 e2e diagnostics 聚合 `preload_hits=0, preload_misses=1,675,440`（128 万次不命中）。micro-bench 显示 `preload_hit+infer=2.20ms` vs `preload_miss+infer=3.63ms`，每次 miss 付 ~1.45ms host->DPU 权重传输。48 层 × 每层 8 expert × 每 expert 3 projection = 1152 次 miss/token，单 token 浪费 ~1.7s。
+- 根因：`PIMQuantizedRuntime._resident_expert_id` 只追踪单个 expert_id。`PIMMoEBackend._run_expert_quantized_on_dpu` 为 gate / up / down 用 `base_eid ^ 0x1111.. / 0x2222.. / 0x3333..` 三个不同 eid，每次 preload 都把前一次挤出去 → 每个 infer 前都真实传输一次权重到 DPU。
+- 修复（M-4.1）：DPU 内核对 output_dim 不敏感，host 端把 gate 和 up 的 W4A32 权重沿 row 轴 concat 成 `(2*output_dim, input_dim)` 一次性装入 MRAM，一次 DPU launch 同时算 gate + up，host 再 split。3 次 call → 2 次 call，DPU 调用 −33%，decode TPS +39%，数值 bit-exact。
+- 经验：
+  1. **"单 slot 常驻缓存" 在 MoE decode 下零命中率** — 因为 gate/up/down 三份权重在每个 expert 内都切一遍。任何 "最近一个 expert 常驻" 方案都毫无用处。
+  2. **DPU 内核对 shape 的容忍度经常被 host 层低估**。具体到 UPMEM：`pim_quantized_kernel` 的 row loop 只要 output_dim 是偶数，对多大都不关心；把矩阵沿 output 轴 concat 是免费的性能优化。
+  3. **proj level fuse 的下一步是 2-slot MRAM**（把 down 也常驻）— 需要改 DPU binary 的 MRAM 布局，留给 M-5。
+
+<!-- updated: 2026-04-22 18:10 -->
+
+## micro-bench 和 e2e 的 speedup **不能等价外推**
+
+- 现象：M-4.1 的 fused gate+up micro-bench 显示 **2.98× 加速**（`7.57ms → 2.54ms/expert-pair`），但 e2e decode TPS 只拿到 **1.39× (+39%)**。
+- 根因：e2e decode per-token = GPU attention + gate MLP + 48 × (MoE layer) + logit head。MoE layer 内部除了 gate+up fuse 省下的部分，还有 down projection call、Python glue、CPU-offloaded expert 的 CPU W4A32 forward、GPU expert forward、CUDA host sync 等非 fused 成本。fused 只砍掉其中一段。
+- 经验：
+  1. 任何 kernel/runtime 级 micro-bench 收益**至少打对折** 才对应 e2e 观测值。做 roadmap 估算时先算 "fused 那段在 e2e 里的 wall-clock 占比"，再把 micro-bench 数字乘这个占比。
+  2. **观测端 to-token 延迟才是诚实的 KPI**。`decode_tokens_per_second` 是唯一不会骗人的数字；per-layer / per-call 的任何 timing 都要先用 e2e 数据验证它的占比。

@@ -7,6 +7,37 @@ tags: [changelog]
 
 ## 2026-04-22
 
+### 2026-04-22 18:10 - ADR-002 M-4 fused gate+up：DPU 调用 −33%、decode TPS +39%、dev_gate PASS 8/8
+
+真机数据在 `benchmarks/results/e2e_gptq_cuda_pim_M4_fused.json`：PIM decode
+从 0.228 -> **0.317 tok/s** (+39.2%)，DPU quantized call 从 34905 → 23246
+(-33.4%)。
+
+**核心改动**：host 端把一个 expert 的 gate 和 up 两套 GPTQ 权重沿 row
+axis concat 成 `(2*output_dim, input_dim)` 的 fat projection，一次
+preload + 一次 `dpu_launch` 同时算出 gate 和 up，host 再 split。DPU
+binary 零改动。每 expert 的 "3 launch + 2 preload miss" 降到
+"2 launch + 1 preload miss"，省掉一次 ~3.6 ms 开销。
+
+**数值正确性**：`max_abs_err = 0.000e+00` bit-exact。
+
+**关联改动**：
+- `pim_quantized_runtime.py`：`_prepare_concat_quantized_weights` +
+  `preload_and_infer_concat` (~100 行)
+- `pim_moe.py::_run_expert_quantized_on_dpu`：从 3 次 preload+infer
+  简化为 fused_gate_up + down 两段
+- `pim_moe.py::notify_expert_evicted`：新增 fused bundle 的 xor mask
+- `.codebuddy/dev_gate/M-4.toml`：8 条 acceptance（含反 3-call-regression
+  guard + decode_tps ≥ 0.285 的数据驱动阈值）
+- `test_core.py::TestPIMQuantizedRuntimeConcatPreparation`：5 条单元
+  测试（shape 合并、input_dim/group_size/bits mismatch、偶数 padding）
+
+**仍未解决**：headline ratio `decode_tps(pim) / decode_tps(cpu)` 从
+0.074× -> 0.103×，距 1.0× 还差 ~9.7×。剩下的差距需要 M-5 的 async DPU
+launch + overlap + batched preload + 可能的混合精度 experts（ADR-001 P4）。
+
+**测试**: 208 -> **213 passed** (+5 concat prep 单测)。
+
 ### 2026-04-22 17:30 - ADR-002 M-3 完成：cost-model 落地 + dev_gate PASS 10/10
 
 实装 `BackendCostModel`，把 `PIMMoEBackend` 里的 `pim_prefill_token_threshold`

@@ -7558,3 +7558,96 @@ class TestPIMMoEBackendCostModelIntegration:
         diag = backend.diagnostics()
         assert diag["cost_model_enabled"] is False
         assert diag["cost_model_routing_flag"] is False
+
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-4 — Fused gate+up DPU call (host-side weight concat)
+# ----------------------------------------------------------------------
+
+
+class TestPIMQuantizedRuntimeConcatPreparation:
+    """Pure unit test of ``_prepare_concat_quantized_weights``.
+
+    This path is host-only and does not talk to any DPU; it simply
+    stacks two GPTQLinearWeight objects along the output-dim axis.
+    """
+
+    def _make_weight(self, output_dim, input_dim=128, group_size=128, bits=4):
+        from nano_ktrans.kernels.weight_loader import GPTQLinearWeight
+        words_per_row = input_dim * bits // 32
+        num_groups = input_dim // group_size
+        qweight = torch.zeros(output_dim, words_per_row, dtype=torch.int32)
+        scales = torch.ones(output_dim, num_groups, dtype=torch.float32)
+        return GPTQLinearWeight(
+            qweight=qweight,
+            scales=scales,
+            zero_points=None,
+            group_size=group_size,
+            bits=bits,
+            sym=True,
+            linear_prefix="test",
+        )
+
+    def test_concat_stacks_rows(self):
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+        # Build a minimal instance that only exposes the preparation
+        # helper — we bypass __init__ (which would launch a DPU).
+        rt = PIMQuantizedRuntime.__new__(PIMQuantizedRuntime)
+        lhs = self._make_weight(output_dim=64)
+        rhs = self._make_weight(output_dim=64)
+        (qw, sc, padded_in, concat_rows, lhs_orig, rhs_orig) = \
+            rt._prepare_concat_quantized_weights(lhs, rhs, kernel_mode=4)
+        assert qw.shape[0] == concat_rows
+        assert sc.shape[0] == concat_rows
+        # lhs_orig + rhs_orig sum to at most concat_rows (with possible
+        # +1 even-padding row at the tail).
+        assert lhs_orig + rhs_orig <= concat_rows
+        assert lhs_orig == 64 and rhs_orig == 64
+        # padded_in must be a multiple of BLOCK_FLOATS.
+        assert padded_in % PIMQuantizedRuntime.BLOCK_FLOATS == 0
+
+    def test_concat_rejects_input_dim_mismatch(self):
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+        rt = PIMQuantizedRuntime.__new__(PIMQuantizedRuntime)
+        lhs = self._make_weight(output_dim=64, input_dim=128)
+        rhs = self._make_weight(output_dim=64, input_dim=256)
+        with pytest.raises(ValueError, match="share input_dim"):
+            rt._prepare_concat_quantized_weights(lhs, rhs, kernel_mode=4)
+
+    def test_concat_rejects_group_size_mismatch(self):
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+        rt = PIMQuantizedRuntime.__new__(PIMQuantizedRuntime)
+        lhs = self._make_weight(output_dim=64, group_size=64)
+        rhs = self._make_weight(output_dim=64, group_size=128)
+        with pytest.raises(ValueError, match="share group_size"):
+            rt._prepare_concat_quantized_weights(lhs, rhs, kernel_mode=4)
+
+    def test_concat_rejects_bitwidth_mismatch(self):
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+        from nano_ktrans.kernels.weight_loader import GPTQLinearWeight
+        rt = PIMQuantizedRuntime.__new__(PIMQuantizedRuntime)
+        lhs = self._make_weight(output_dim=64)
+        # Build an 8-bit RHS manually.
+        rhs = GPTQLinearWeight(
+            qweight=torch.zeros(64, 128 // 4, dtype=torch.int32),
+            scales=torch.ones(64, 1, dtype=torch.float32),
+            zero_points=None, group_size=128, bits=8, sym=True, linear_prefix="t",
+        )
+        with pytest.raises(ValueError, match="share bit-width"):
+            rt._prepare_concat_quantized_weights(lhs, rhs, kernel_mode=4)
+
+    def test_concat_pads_output_dim_to_even(self):
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+        rt = PIMQuantizedRuntime.__new__(PIMQuantizedRuntime)
+        # 63 + 63 = 126 is already even, but say 63 + 64 = 127 (odd) ->
+        # must pad to 128 so the DPU kernel's row-pair writes are valid.
+        lhs = self._make_weight(output_dim=63)
+        rhs = self._make_weight(output_dim=64)
+        (qw, sc, _padded_in, concat_rows, lhs_orig, rhs_orig) = \
+            rt._prepare_concat_quantized_weights(lhs, rhs, kernel_mode=4)
+        # Each side is already pre-padded to even first (_prepare_quantized_weights
+        # pads lhs 63 -> 64).  Concat is then 64 + 64 = 128, already even,
+        # so no extra tail row is needed.
+        assert concat_rows % 2 == 0
+        assert lhs_orig == 63 and rhs_orig == 64

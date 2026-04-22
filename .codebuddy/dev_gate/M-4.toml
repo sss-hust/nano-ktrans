@@ -1,0 +1,107 @@
+milestone_id = "M-4"
+title = "Fused gate+up DPU call: 33% fewer DPU launches, +39% e2e decode TPS"
+
+# M-4 depends on M-3 — the cost model must be landed so that we can
+# observe which cells fused reduction actually benefits.
+prerequisites = ["M-3"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M4_fused.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M4_fused.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 2 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M4_fused.json",
+]
+
+next_tasks = [
+    "M-5: true async PIM submit + GPU/PIM overlap (let GPU attention run concurrently with DPU launch).",
+    "M-5: batch activation bit-packing on host to amortise per-call host overhead across multiple tokens.",
+    "M-5: explore 2-slot MRAM residency so down projection can reuse its weights across consecutive decode steps (currently evicted by every gate/up fused bundle).",
+]
+
+# ---------------------------------------------------------------------
+# Acceptance rationale
+#
+# M-4 landed one focused optimization: merge each expert's gate and up
+# GPTQ projections into a single concatenated-output DPU matvec call.
+# The DPU binary is untouched — this is a pure host-side weight
+# stacking + output split.  Observed wins on real hardware:
+#
+#   * DPU quantized calls: 34905 -> 23246 (-33.4%), exactly matching
+#     the 3->2 calls-per-expert reduction.
+#   * Decode seconds: 140.58 -> 100.96 (-28.2%) for 32 new tokens.
+#   * Decode TPS:      0.228 -> 0.317   (+39.2%).
+#   * Numerical parity with the 3-call path: max_abs_error = 0 over
+#     the fused micro-benchmark (see tests below).
+#
+# The headline ADR-002 KPI ("decode TPS cuda_pim >= cuda_cpu_offload
+# × 1.0") is still not met — the ratio moved from 0.074x to 0.103x.
+# The remaining gap is DPU launch serialisation + Python-side
+# orchestration, which are structural issues addressed by M-5.  M-4
+# is scoped narrowly so we ship a provable delta.
+#
+# The CPU baseline artifact from M-3 is reused as the comparison
+# target; regenerating it would only test the same CPU grouped
+# W4A32 path again.
+# ---------------------------------------------------------------------
+
+# KPI-1: the e2e cuda_pim run must complete on real hardware.
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "cuda_pim with fused gate+up must complete without aborting."
+
+[[acceptance_checks]]
+path     = "results[0].error"
+op       = "not_exists"
+reason   = "no top-level error field on the fused run."
+
+# KPI-2: cost-model routing must still be enabled and firing.
+[[acceptance_checks]]
+path     = "results[0].offload_diagnostics.layers[0].backend.cost_model_enabled"
+op       = "=="
+value    = true
+reason   = "cost-model routing (M-3) must remain active with fused calls."
+
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.cost_model_decisions_pim)"
+op       = ">="
+value    = 1
+reason   = "cost-model must have voted PIM at least once."
+
+# KPI-3: the DPU call reduction that proves M-4.1 really landed.
+# 34905 in M-3 -> 23246 in M-4 on the same 32-token workload.
+# Require the M-4 artifact to show at most 28000 calls (20%
+# headroom against noise) so a regression back to 3 calls/expert
+# fails the gate.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = "<="
+value    = 28000
+reason   = "fused gate+up cuts DPU quantized calls from 34905 (M-3) to ~23246 (M-4); guard against regressing to the 3-call path."
+
+# KPI-4: but still actually doing DPU work, not just dropping calls.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = ">="
+value    = 10000
+reason   = "PIM must still run real DPU work — if the call count collapsed below ~10k for 32 tokens, cost-model routing is misrouting everything to CPU."
+
+# KPI-5: generated real tokens (sanity).
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "the fused run must have produced the full requested token budget."
+
+# KPI-6: decode TPS improvement over M-3.  M-3 recorded 0.2276; we
+# demand a measurable improvement (>=25% to leave headroom for
+# run-to-run variance) because that's the whole point of the fused
+# path.
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.285
+reason   = "M-4 fused gate+up must improve decode TPS by >=25% over the M-3 baseline (0.2276); demand tps >= 0.285."
