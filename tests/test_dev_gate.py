@@ -319,3 +319,122 @@ class TestShippedSpecs:
         # sweep has been recorded and passed (PASS).  Both are acceptable;
         # crashes are not.
         assert v.verdict in {"WAIT", "PASS", "PARTIAL", "BLOCKED"}
+
+
+
+class TestDevGateExtensionsM3:
+    """sum() aggregate + ratio_vs_artifact op added in M-3."""
+
+    def test_sum_aggregate_adds_numeric_values(self):
+        import scripts.dev_gate as dg
+        data = {"rows": [{"x": 3}, {"x": 4}, {"x": 5}]}
+        assert dg._resolve_path(data, "sum(rows[*].x)") == 12
+
+    def test_sum_aggregate_is_zero_on_empty_list(self):
+        import scripts.dev_gate as dg
+        data = {"rows": []}
+        assert dg._resolve_path(data, "sum(rows[*].x)") == 0
+
+    def test_sum_aggregate_skips_missing_keys(self):
+        import scripts.dev_gate as dg
+        data = {"rows": [{"x": 1}, {}, {"x": 2}]}
+        assert dg._resolve_path(data, "sum(rows[*].x)") == 3
+
+    def test_ratio_vs_artifact_passes_when_ratio_meets_threshold(self):
+        import scripts.dev_gate as dg
+        pim = {"runs": [{"tps": 10.0}]}
+        cpu = {"runs": [{"tps": 5.0}]}
+        rule = dg.AcceptanceRule(
+            path="runs[0].tps",
+            op=">=",
+            value=1.0,
+            artifact="pim.json",
+            ratio_vs_artifact="cpu.json",
+            reason="test",
+        )
+        outcome = dg.evaluate_rule(
+            rule,
+            artifacts_data={"pim.json": pim, "cpu.json": cpu},
+            default_artifact="pim.json",
+        )
+        assert outcome.passed is True
+        assert outcome.observed == 2.0  # 10 / 5
+
+    def test_ratio_vs_artifact_fails_below_threshold(self):
+        import scripts.dev_gate as dg
+        pim = {"runs": [{"tps": 2.0}]}
+        cpu = {"runs": [{"tps": 4.0}]}
+        rule = dg.AcceptanceRule(
+            path="runs[0].tps",
+            op=">=",
+            value=1.0,
+            artifact="pim.json",
+            ratio_vs_artifact="cpu.json",
+            reason="test",
+        )
+        outcome = dg.evaluate_rule(
+            rule,
+            artifacts_data={"pim.json": pim, "cpu.json": cpu},
+            default_artifact="pim.json",
+        )
+        assert outcome.passed is False
+        assert outcome.observed == 0.5
+
+    def test_ratio_vs_artifact_zero_denominator_fails_gracefully(self):
+        import scripts.dev_gate as dg
+        pim = {"runs": [{"tps": 2.0}]}
+        cpu = {"runs": [{"tps": 0.0}]}
+        rule = dg.AcceptanceRule(
+            path="runs[0].tps",
+            op=">=",
+            value=1.0,
+            artifact="pim.json",
+            ratio_vs_artifact="cpu.json",
+            reason="test",
+        )
+        outcome = dg.evaluate_rule(
+            rule,
+            artifacts_data={"pim.json": pim, "cpu.json": cpu},
+            default_artifact="pim.json",
+        )
+        assert outcome.passed is False
+        assert "denominator is zero" in (outcome.error or "")
+
+    def test_ratio_vs_artifact_missing_file_fails_with_reason(self):
+        import scripts.dev_gate as dg
+        pim = {"runs": [{"tps": 2.0}]}
+        rule = dg.AcceptanceRule(
+            path="runs[0].tps",
+            op=">=",
+            value=1.0,
+            artifact="pim.json",
+            ratio_vs_artifact="cpu.json",
+            reason="test",
+        )
+        outcome = dg.evaluate_rule(
+            rule,
+            artifacts_data={"pim.json": pim},
+            default_artifact="pim.json",
+        )
+        assert outcome.passed is False
+        assert "not loaded" in (outcome.error or "")
+
+    def test_m3_spec_loads_and_requires_m2(self):
+        from scripts.dev_gate import load_spec
+        spec = load_spec("M-3")
+        assert spec.milestone_id == "M-3"
+        assert spec.prerequisites == ["M-2"]
+        assert "e2e_gptq_cuda_pim_M3_cost_model.json" in \
+            spec.primary_artifact
+        # M-3 requires *both* an e2e PIM run and an e2e CPU baseline.
+        assert any(
+            "e2e_gptq_cuda_cpu_offload_M3_baseline.json" in a
+            for a in spec.required_artifacts
+        ), "M-3 spec must declare the CPU baseline as a required artifact"
+        # M-3 ships at least one sum() aggregate acceptance rule (the
+        # cost-model decision counters).  ratio_vs_artifact is wired up
+        # but intentionally not used in M-3 — see ADR-002 §11.3 for why
+        # the 'decode TPS >= cuda_cpu_offload × 1.0' KPI moved to M-4.
+        assert any(
+            r.path.startswith("sum(") for r in spec.acceptance_checks
+        ), "M-3 spec should use the sum() aggregate to check decision counters"

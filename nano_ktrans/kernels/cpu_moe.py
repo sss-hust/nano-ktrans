@@ -416,6 +416,39 @@ class CPUMoEBackend(ExpertOffloadBackend):
         hidden = F.silu(gate) * up
         return F.linear(hidden, self._down_proj[cpu_slot])
 
+    def _compute_expert_output_cpu_gptq(
+        self, states: torch.Tensor, cpu_slot: int
+    ) -> torch.Tensor:
+        """
+        CPU-only grouped W4A32 forward for a single GPTQ expert slot.
+
+        Added for ADR-002 M-3: ``cuda_cpu_offload`` on a GPTQ checkpoint
+        previously emitted zeros from its ``submit_forward`` path (no
+        fp16 stacked tensors + no AMX engine), which meant the
+        ``cuda_pim`` vs ``cuda_cpu_offload`` comparison in M-3 was
+        meaningless — the CPU path wasn't actually computing anything.
+
+        This path runs the canonical CPU grouped W4A32 matvec (the same
+        reference used by M-2's 120-cell sweep), giving cost-model
+        routing an honest CPU-side baseline to beat.
+        """
+        # Lazy import to avoid circular imports at module load time.
+        from .quantized_ops import cpu_w4a32_matvec
+
+        expert_gptq = self._gptq_experts.get(cpu_slot)
+        if expert_gptq is None:
+            raise RuntimeError(
+                f"CPUMoEBackend._compute_expert_output_cpu_gptq: "
+                f"no GPTQ weights for cpu_slot={cpu_slot}"
+            )
+
+        states_fp32 = states.detach().to(dtype=torch.float32, device="cpu").contiguous()
+        gate = cpu_w4a32_matvec(states_fp32, expert_gptq["gate"]).output
+        up = cpu_w4a32_matvec(states_fp32, expert_gptq["up"]).output
+        hidden = F.silu(gate) * up
+        down = cpu_w4a32_matvec(hidden, expert_gptq["down"]).output
+        return down
+
     def submit_forward(
         self,
         hidden_states: torch.Tensor,
@@ -442,18 +475,67 @@ class CPUMoEBackend(ExpertOffloadBackend):
             return
 
         # In GPTQ mode the CPU backend's fp16 stacked weights were never
-        # loaded and the C++ AMX engine was never initialised, so neither
-        # the ``use_fallback`` F.linear path nor the ``cpu_infer`` path
-        # below can run.  A subclass (e.g. PIMMoEBackend) is expected to
-        # have already filled ``self._fallback_output`` via its own
-        # ``_submit_forward_real``; if we still get here it means the
-        # subclass bailed out (prefill_force_cpu, batch_too_large, ...)
-        # and there is no honest fp16 fallback available — emit zeros so
-        # downstream sync_forward returns a well-shaped tensor instead of
-        # dereferencing None pointers.
+        # loaded and the C++ AMX engine was never initialised, so the
+        # ``use_fallback`` F.linear path and the ``cpu_infer`` path
+        # below can't run.  Two cases:
+        #
+        #   (a) A subclass (e.g. PIMMoEBackend) already filled
+        #       ``self._fallback_output`` via its own
+        #       ``_submit_forward_real`` — leave the result intact.
+        #
+        #   (b) No subclass handled this layer (pure cuda_cpu_offload
+        #       on GPTQ weights, or the PIM subclass returned False
+        #       because the cost model picked CPU).  Run the CPU
+        #       grouped W4A32 forward path — the same reference
+        #       baseline used by M-2's operator sweep.
         if self.is_gptq and self.cpu_infer is None:
-            if self._fallback_output is None or self._fallback_output.shape != hidden_states.shape:
-                self._fallback_output = torch.zeros_like(hidden_states)
+            # Case (a): a subclass has already populated the output for
+            # this submit call (PIMMoEBackend writes shape-matching
+            # tensors, not zeros-of-unknown-shape).
+            subclass_filled = (
+                self._fallback_output is not None
+                and isinstance(self._fallback_output, torch.Tensor)
+                and self._fallback_output.shape == hidden_states.shape
+                and self._fallback_output.dtype == hidden_states.dtype
+            )
+            if subclass_filled:
+                return
+
+            # Case (b): honestly compute CPU grouped W4A32.  We do it
+            # inline here rather than in a thread so sync_forward below
+            # sees the result when it unpacks _fallback_output.
+            cpu_mask = ~self.gpu_experts_mask.bool()
+            flat_cpu = flat.to("cpu", dtype=torch.float32)
+            topk_ids_cpu = topk_ids.to("cpu", dtype=torch.long)
+            topk_weights_cpu = topk_weights.to("cpu", dtype=torch.float32)
+
+            output = torch.zeros(
+                batch_size, self.hidden_size, dtype=torch.float32, device="cpu"
+            )
+            for expert_idx in range(self.num_experts):
+                if not cpu_mask[expert_idx]:
+                    continue
+                cpu_slot = self.cpu_expert_lookup.get(int(expert_idx))
+                if cpu_slot is None or cpu_slot not in self._gptq_experts:
+                    continue
+                match = topk_ids_cpu == expert_idx
+                token_indices = torch.where(match.any(dim=1))[0]
+                if len(token_indices) == 0:
+                    continue
+                expert_output = self._compute_expert_output_cpu_gptq(
+                    flat_cpu[token_indices], cpu_slot
+                )
+                row_idx, col_idx = torch.where(match[token_indices])
+                weights = (
+                    topk_weights_cpu[token_indices[row_idx], col_idx]
+                    .to(dtype=expert_output.dtype)
+                    .unsqueeze(1)
+                )
+                output.index_add_(
+                    0, token_indices[row_idx], expert_output[row_idx] * weights
+                )
+
+            self._fallback_output = output.to(device=device, dtype=hidden_states.dtype)
             return
 
         if self.use_fallback:

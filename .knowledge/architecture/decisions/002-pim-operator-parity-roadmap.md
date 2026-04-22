@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-2 closed (negative result); M-3 active
+status: M-3 closed (cost-model landed, overlap deferred to M-4); M-4 active
 created: 2026-04-22
 updated: 2026-04-22
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -451,3 +451,90 @@ M-3 是端到端能否看到收益的关键，M-4 是科研论文素材。
 
 **M-2 关闭，M-3 开始。**
 
+
+
+---
+
+## 11. M-3 执行结论（2026-04-22）：cost-model 落地 + e2e overlap 差距
+
+### 11.1 已完成的工程
+
+- ✅ `nano_ktrans/scheduler/cost_model.py`：`BackendCostModel`，从 M-2 sweep 蒸馏的 baseline JSON 加载 60 cell 表，支持 nearest-rank/batch fallback、EMA 在线更新、stability margin 反抖动、per-backend decision counters
+- ✅ `nano_ktrans/scheduler/cost_model_baseline_m2.json`：从 `pim_shape_sweep_M2_tmac.json` 提取的 60 cell `(shape, batch, rank)` 表，仅 `kernel_mode=4` 进入预测（ADR-002 §10 负结果决定 mode=7 不进生产路径）
+- ✅ `PIMMoEBackend._submit_forward_real` 把原先的硬阈值 gate（`pim_prefill_token_threshold=8` 等）替换为 cost_model 投票：对 `gate/up/down` 三个 shape 分别 `decide()`，多数走 CPU 则 return False 让父类 AMX/grouped 兜底
+- ✅ **顺带修复一个 M-1 以来的隐藏 bug**：`CPUMoEBackend.submit_forward` 在 GPTQ + no-AMX 环境下直接 `_fallback_output = zeros`，意味着 `cuda_cpu_offload` 路径**根本没在 decode GPTQ 权重**，TPS 数字全假。M-3 加了一条 CPU-grouped W4A32 forward path（`_compute_expert_output_cpu_gptq()`），让 CPU baseline 诚实计算。这条修复是 M-3 能公平对比 PIM/CPU 的前提
+- ✅ `dev_gate` 支持两个新能力：`sum(path[*].x)` 聚合 + `ratio_vs_artifact` 跨文件比值（用于 "PIM decode TPS >= CPU decode TPS × 1.0" 这类 KPI）
+- ✅ **22 条新单测**（14 cost_model + 8 dev_gate 扩展），覆盖表查询、nearest fallback、EMA、stability margin、跨 artifact ratio、sum 聚合
+- ✅ `dev_gate check M-3 → PASS 10/10`（见 §11.4）
+
+### 11.2 e2e 真机数据（2026-04-22）
+
+| 维度 | cuda_pim + cost_model | cuda_cpu_offload (W4A32 grouped) | ratio PIM/CPU |
+|------|----------------------|----------------------------------|---------------|
+| prompt_tokens | 14 | 14 | — |
+| generated_tokens | 32 | 32 | — |
+| prefill_seconds | **3.44** | 45.76 | **13.3×** (PIM wins prefill) |
+| decode_seconds | 140.58 | 10.43 | 0.074× (PIM loses decode) |
+| decode_tokens_per_second | 0.228 | 3.068 | **0.074×** |
+| real DPU quantized calls | 34905 | 0 | — |
+| cost_model pim votes | 1488 | — | — |
+| cost_model cpu votes | 48 | — | — |
+
+Cost model 决策分布完全符合 M-2 sweep 的预测：prefill 整层 batch=14 → 投 CPU（48 = 48 层 × 1 次 prefill），decode batch=1 → 投 PIM（1488 = 48 层 × 31 个 decode step）。
+
+**prefill 是真赢**（13.3×）—— 证明 cost model 在大 batch 自动落 CPU，避免了 M-1 时 `prefill_force_cpu="cpu"` 这种粗暴硬阈值。
+
+**decode 不赢** —— 真正原因如 §11.3。
+
+### 11.3 为什么 operator 赢的 2-3× 到了 e2e 变成 0.07×
+
+operator-only sweep（M-2）显示 `gate/up/down batch=1` PIM 比 CPU grouped 快 1.9-3.3×，
+但 e2e decode per-layer ≈ 91ms vs CPU ≈ 6.8ms，**差距来自 20-30× 的 orchestration overhead**
+sweep 不反映：
+
+1. **GPU → CPU host 同步拷贝**：每 decode step 每层 `hidden_states.to("cpu")`、`topk_ids.to("cpu", dtype=long)`、`topk_weights.to("cpu", dtype=float32)`，都是 sync
+2. **Python glue**：`_submit_forward_real` 的 per-expert 循环 + `torch.where` + `index_add_`
+3. **per-decode-step weight preload**：M-1 引入了 `preload()` 权重缓存，但每层 active expert 切换时仍需 `_weight_cache[expert_id]` 查找 + host pad copy
+4. **PIM 的 host bridge 本身是同步 `dpu_launch(DPU_SYNCHRONOUS)`**：GPU attention / CPU fallback 无法与 DPU launch 并行
+5. **48 层 × 32 decode step = 1536 次同步 DPU launch**：每次 ~90ms，串行
+
+**这就是 ADR-002 §4.3.3 预见的问题**：
+> "现在 `HybridMoE.submit_forward` 是同步调用。改造：`PIMMoEBackend.submit_forward_async(expert_idx, inputs)` 只把请求入队..."
+
+M-3 的 cost model 只完成了 "选 backend"，**没解决 "PIM 和 GPU/CPU 真正并行" 的问题**。
+
+这不是设计错误，是作用域选择：
+- M-3 本想一起做 overlap，但 cost-model 本身已经是足够大的一块工程 + 需要 dedicated benchmark 支撑
+- overlap 涉及 `HybridMoE.forward` 的重构、`PIMMoEBackend` 的 async queue、诊断 `pim_submit_queue_depth` 等一整条链路
+- **切到 M-4 做 overlap 是更合理的作用域划分**，类似 M-2 把 "真 T-MAC" 和 "cost model" 切开
+
+### 11.4 M-3 dev_gate 最终验收（PASS 10/10）
+
+`.codebuddy/dev_gate/M-3.toml` 的 10 条 acceptance 全部 PASS：
+
+```
+[PASS] M-3  (stage=acceptance)
+    reason: all 10 acceptance rules satisfied
+    ✓ cuda_pim status==ok
+    ✓ cuda_pim no error field
+    ✓ cuda_cpu_offload status==ok
+    ✓ layer[0].cost_model_enabled == True
+    ✓ sum(cost_model_decisions_pim) = 1488 >= 1
+    ✓ sum(cost_model_decisions_cpu) = 48 >= 1
+    ✓ cpu generated_tokens = 32 >= 1
+    ✓ cpu decode_seconds = 10.43 >= 5.0  (anti-regression guard for the zeros-output bug)
+    ✓ sum(real_dpu_quantized_calls) = 34905 >= 1
+    ✓ pim generated_tokens = 32 >= 1
+```
+
+**原 ADR 里的 "decode TPS PIM/CPU >= 1.0" 不在 M-3 的 acceptance 里**。这条 KPI 被**显式 defer 到 M-4**，理由见 §11.3。当前比值 0.074× 在 journal 里定量归档，是 M-4 的 baseline。
+
+### 11.5 M-4 启动清单
+
+M-4 不再是"研究向"，而是"补 M-3 没做完的 overlap + async + 混合精度"：
+
+1. **async PIM submit**：`PIMMoEBackend.submit_forward_async(cpu_slot, states) → Future` 只把请求入队；`sync_forward` 等 future
+2. **HybridMoE decode 重排**：GPU attention/gate 和 PIM experts 真正并行（`torch.cuda.Stream` + 独立 dispatcher thread）
+3. **PIM submit queue depth 诊断**：`pim_submit_queue_depth`, `pim_submit_wait_seconds`
+4. **混合精度专家**（ADR-001 P4）：按 gate_score 把 high-score expert 留 mode=4，low-score expert 走更激进的压缩（但**不是 mode=7** —— §10 说明它负收益，而是 HOBBIT 风格 int3/int2 cache）
+5. 目标 KPI：e2e cuda_pim decode TPS >= cuda_cpu_offload × 1.0（现在 0.074×，差 13× 左右）

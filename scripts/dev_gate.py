@@ -95,12 +95,20 @@ class AcceptanceRule:
     `path` uses dot notation into the artifact.  Indexing is allowed with
     `[N]` syntax, e.g. `results[0].pim_vs_cpu_grouped_ratio`.  A special
     aggregate `path` of the form `min(results[*].x)` / `max(...)` /
-    `count(...)` is supported for coarse bucket checks.
+    `count(...)` / `sum(...)` is supported for coarse bucket checks.
+
+    Cross-artifact ratio comparison is supported via
+    ``ratio_vs_artifact``: when set, the rule's observed value becomes
+    ``value_from(rule.artifact).path  /  value_from(ratio_vs_artifact).path``
+    and is compared to ``value``.  The path is applied to both files.
+    This is how ADR-002 M-3 expresses "PIM decode TPS >= 1.0× CPU decode
+    TPS on the same box".
     """
     path: str
     op: str                    # one of: ==, !=, <, <=, >, >=, exists, not_exists
     value: Any = None
     artifact: str | None = None  # defaults to spec.primary_artifact if unset
+    ratio_vs_artifact: str | None = None
     reason: str = ""           # human-readable rationale, shown in reports
 
 
@@ -155,6 +163,7 @@ def load_spec(milestone_id: str) -> MilestoneSpec:
             op=item["op"],
             value=item.get("value"),
             artifact=item.get("artifact"),
+            ratio_vs_artifact=item.get("ratio_vs_artifact"),
             reason=item.get("reason", ""),
         )
         for item in checks_raw
@@ -230,7 +239,7 @@ def _resolve_path(data: Any, path: str) -> Any:
     path = path.strip()
 
     # Aggregate forms: fn(inner)
-    for fn_name, fn in (("min", min), ("max", max), ("count", len)):
+    for fn_name, fn in (("min", min), ("max", max), ("count", len), ("sum", sum)):
         prefix = fn_name + "("
         if path.startswith(prefix) and path.endswith(")"):
             inner = path[len(prefix) : -1]
@@ -238,6 +247,11 @@ def _resolve_path(data: Any, path: str) -> Any:
             if fn_name == "count":
                 return len(values)
             filtered = [v for v in values if isinstance(v, (int, float))]
+            if fn_name == "sum":
+                # sum is valid even on an empty list (returns 0); keeps
+                # acceptance rules like "sum(cost_model_decisions_*) >= 1"
+                # meaningful even before any layers have decisions.
+                return sum(filtered)
             if not filtered:
                 raise KeyError(f"Aggregate {fn_name}: no numeric values at {inner!r}")
             return fn(filtered)
@@ -359,6 +373,44 @@ def evaluate_rule(
         observed = _resolve_path(data, rule.path)
     except KeyError as exc:
         return RuleOutcome(rule, False, error=str(exc))
+
+    # Cross-artifact ratio: observed = path(this) / path(other).
+    if rule.ratio_vs_artifact is not None:
+        other = artifacts_data.get(rule.ratio_vs_artifact)
+        if other is None:
+            return RuleOutcome(
+                rule,
+                False,
+                observed=observed,
+                error=f"ratio_vs_artifact {rule.ratio_vs_artifact!r} not loaded",
+            )
+        try:
+            denom = _resolve_path(other, rule.path)
+        except KeyError as exc:
+            return RuleOutcome(
+                rule,
+                False,
+                observed=observed,
+                error=f"denominator path missing in {rule.ratio_vs_artifact!r}: {exc}",
+            )
+        if not isinstance(observed, (int, float)) or not isinstance(denom, (int, float)):
+            return RuleOutcome(
+                rule,
+                False,
+                observed=observed,
+                error=(
+                    f"ratio_vs_artifact requires numeric values on both sides; "
+                    f"got numerator={observed!r}, denominator={denom!r}"
+                ),
+            )
+        if denom == 0:
+            return RuleOutcome(
+                rule,
+                False,
+                observed=observed,
+                error="ratio_vs_artifact: denominator is zero",
+            )
+        observed = float(observed) / float(denom)
 
     op_fn = _OPS.get(rule.op)
     if op_fn is None:

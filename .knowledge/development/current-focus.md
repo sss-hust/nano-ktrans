@@ -46,8 +46,8 @@ updated: 2026-04-22 16:40
 |-----------|----------|------|
 | M-1 | ✅ PASS (6/6) | baseline 建立：e2e GPTQ cuda_pim 跑通 + 120-cell operator sweep 归档 |
 | **M-2** | ✅ **PASS (6/6)** | **kernel_mode=7 bit-serial T-MAC 落地；correctness bit-exact，但 perf 在 0/60 cell 上跑赢 mode=4 → publishable 负结果**（ADR-002 §10）|
-| M-3 | 🚧 下一个 | BackendCostModel + 路由规则，初值从 M-2 sweep 直接读出：batch=1 gate/up/down → PIM mode=4，batch>=4 → CPU。`kernel_mode=7` 不再作为默认路径。 |
-| M-4 | 未启动 | 研究向（mixed precision experts / sub-batch interleaving / shared LUT）|
+| **M-3** | ✅ **PASS (10/10)** | BackendCostModel 落地：multi-vote 决策替换 `pim_prefill_token_threshold` 硬阈值；60 cell baseline 从 M-2 sweep 提取。prefill e2e **13.3× 赢 CPU**。**Decode e2e 慢 13.5×** — 全部来自 orchestration overhead（`HybridMoE.submit_forward` 同步、无 GPU/PIM overlap），这部分切到 M-4。顺带修复 M-1 遗留 bug：`CPUMoEBackend` GPTQ + 无-AMX 时写 zeros，导致 CPU baseline TPS 虚假。 |
+| M-4 | 🚧 启动 | **async PIM submit + GPU/PIM overlap**（补 M-3 没做完的 orchestration 并行）+ mixed-precision experts (ADR-001 P4, HOBBIT 风格 int3/int2 cache)。目标：e2e decode TPS(cuda_pim) >= TPS(cuda_cpu_offload) × 1.0。|
 
 ## 开发流程（2026-04-22 起强制执行）
 

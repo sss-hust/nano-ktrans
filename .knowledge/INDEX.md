@@ -6,7 +6,7 @@ updated: 2026-04-22
 
 # nano-ktrans
 
-> 一个面向学习和实验的 Hybrid MoE 推理框架。当前已打通 CPU、`cuda_cpu_offload` 和实验性真实 DPU `pim` backend；新的主目标是让非专家层常驻 GPU，而专家在 GPU/PIM 间动态迁移与调度。已在 `2026-04-21` 落地 P1 (MRS score-aware hotness) 与 P2 (Expert Map Store + prompt 语义预取) 的最小可用版本，两者默认关闭，需显式启用。`2026-04-22` 修复了 v0.3.0-rc1 测试套件的 3 个历史回归；**ADR-002 M-1 / M-2 均已在真机 Qwen3-30B-A3B-GPTQ-Int4 上关闭**（`dev_gate check M-{1,2}` = PASS 6/6 rules）。**M-2 实现了真正的 bit-serial T-MAC DPU kernel (`kernel_mode=7`)，数值与 mode=4 bit-exact，但 120-cell 真机 sweep 显示其在 0/60 个 cell 跑赢 mode=4 — 这是 publishable 的负结果**（根因：UPMEM DPU 的 int8 软件乘法已高度优化 + 缺 SIMD/ctz 硬件支持；详见 ADR-002 §10）。对下游 M-3 cost-model 的路由规则已从 sweep 数据直接导出（`batch=1 gate/up/down → PIM mode=4`，`batch>=4 → CPU`）。`pytest tests` 现为 **186 passed**。
+> 一个面向学习和实验的 Hybrid MoE 推理框架。当前已打通 CPU、`cuda_cpu_offload` 和实验性真实 DPU `pim` backend；主目标是让非专家层常驻 GPU、专家在 GPU/PIM 间动态迁移。**ADR-002 M-1 / M-2 / M-3 已全部在真机 Qwen3-30B-A3B-GPTQ-Int4 上关闭**（`dev_gate check` = 全 PASS）。M-2 实现了真 bit-serial T-MAC DPU kernel (`kernel_mode=7`)，数值 bit-exact 但 perf 在 0/60 cell 跑赢 `kernel_mode=4` — publishable 负结果（ADR-002 §10）。M-3 实装 `BackendCostModel` 做数据驱动 PIM/CPU 路由，e2e 真机 **prefill 比 cuda_cpu_offload 快 13.3×**；**decode 因 `HybridMoE.submit_forward` 同步调用仍慢 13.5×**，这部分切到 M-4 （async PIM submit + GPU/PIM overlap）。M-3 还顺带修了一个 M-1 遗留 bug：`CPUMoEBackend` 在 GPTQ + 无-AMX 时写 zeros，导致 `cuda_cpu_offload` 基线 TPS 虚假。`pytest tests` 现为 **208 passed** (+22 新增单测)。
 
 ## 技术栈
 

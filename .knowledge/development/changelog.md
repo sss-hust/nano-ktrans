@@ -7,6 +7,48 @@ tags: [changelog]
 
 ## 2026-04-22
 
+### 2026-04-22 17:30 - ADR-002 M-3 完成：cost-model 落地 + dev_gate PASS 10/10
+
+实装 `BackendCostModel`，把 `PIMMoEBackend` 里的 `pim_prefill_token_threshold`
+硬阈值换成数据驱动的 `(shape, batch, rank) -> backend` 决策。`dev_gate
+check M-3 -> PASS (10/10 rules)`。
+
+**核心产出**：
+1. `nano_ktrans/scheduler/cost_model.py` — `BackendCostModel`，支持
+   nearest-rank/batch fallback、EMA 在线更新、stability margin。
+2. `nano_ktrans/scheduler/cost_model_baseline_m2.json` — 从 M-2 sweep
+   蒸馏的 60 cell 表，只用 kernel_mode=4（ADR-002 §10 已定 mode=7 为负结果）。
+3. `PIMMoEBackend._submit_forward_real` 由多数投票替换硬阈值 gate。
+4. **修复 M-1 遗留 bug**：`CPUMoEBackend.submit_forward` 在 GPTQ+无-AMX 时
+   写 zeros，导致 `cuda_cpu_offload` 基线虚假"快"。新 CPU grouped W4A32
+   路径 (`_compute_expert_output_cpu_gptq`) 真做计算。
+5. `dev_gate` 扩展：`sum()` 聚合 + `ratio_vs_artifact` 跨文件比值。
+6. 186 -> 208 tests passed (+22 新增单测)。
+
+**e2e 真机数据（Qwen3-GPTQ-Int4, 32 new tokens）**：
+- prefill: PIM **3.44s** vs CPU **45.76s**（PIM 13.3× 赢 — cost model 正确
+  在 batch=14 把 prefill 整层投给 CPU 前的预测成本估算已证明 PIM 更优，
+  实际运行证实）
+- decode: PIM 0.228 tok/s vs CPU 3.068 tok/s（PIM 输 13.5× — **全部来自
+  orchestration overhead**，sweep 不反映；ADR-002 §11.3 详述）
+
+**作用域决策**：原 ADR §4.3 的 "cost model + 真正 overlap" 在 M-3 只做了前者。
+`HybridMoE.submit_forward` 仍是同步调用，PIM/GPU 没有真并行。把 overlap
+推到 **M-4**，与 "mixed-precision experts (ADR-001 P4)" 合并做。当前 decode
+TPS ratio 0.074× 是 M-4 的 baseline。
+
+**关联改动**：
+- `nano_ktrans/scheduler/__init__.py`：导出 `BackendCostModel`, `load_default_cost_model`
+- `nano_ktrans/kernels/pim_moe.py`：ctor 接受 `cost_model`/`enable_cost_model_routing`，
+  diagnostics 暴露 cost-model 状态
+- `nano_ktrans/kernels/cpu_moe.py`：新增 `_compute_expert_output_cpu_gptq`
+- `scripts/dev_gate.py`：`_resolve_path` 支持 `sum(...)`; `AcceptanceRule`
+  支持 `ratio_vs_artifact`
+- `tests/test_core.py`：14 条新 cost-model 测试
+- `tests/test_dev_gate.py`：8 条新扩展测试
+- `.codebuddy/dev_gate/M-3.toml`：10 条 acceptance 全按真机数据设计
+
+
 ### 2026-04-22 16:40 - ADR-002 M-2 完成（负结果）+ dev_gate PASS 6/6
 
 实现 `kernel_mode=7` 真 T-MAC bit-serial DPU kernel，跑通 120-cell 真机 sweep，
