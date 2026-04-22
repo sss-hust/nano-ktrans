@@ -7,6 +7,60 @@ tags: [changelog]
 
 ## 2026-04-22
 
+### 2026-04-22 19:50 - ADR-002 M-6 闭合：multi-slot MRAM DPU binary + host LRU（infra landed + null e2e，dev_gate PASS 8/8）
+
+最大的一次 DPU binary 改动：`dpu_quantized_kernel.c` 和 host bridge
+都加 `NUM_SLOTS=8` 概念 + `active_slot` 广播 + LRU 分配器。
+**micro-bench 证明 LRU hit 正确且 bit-exact**（4 expert round-robin 后
+反向 preload 4/4 hit）；**e2e hit ratio 仍 0%** 因为 48 层共享同一
+`PIMQuantizedRuntime.get_shared()` 单例，8 slot 被每 forward 的 384
+slot-claim 洗穿。**第三个以 null e2e 闭合的 milestone**（继 M-2 kernel_mode=7、
+M-5 dual runtime 之后），但 infra 完全到位给 M-7 per-layer scoping 用。
+
+**DPU binary 改动**：
+- `qweight_mram / scales_mram / lut_mram` 按 NUM_SLOTS=8 等分
+- 所有 mode（3/4/5/6/7）的 MRAM 索引加 `active_slot * *_PER_SLOT` 偏移
+- `__host active_slot` 每次 run 前由 host broadcast 进来
+
+**Host bridge 改动**：
+- `pim_quantized_load_weights(...)` 和 `pim_quantized_run(...)` 都加
+  `uint32_t slot_id` 参数
+- `dpu_push_xfer` 的 `offset_bytes` 按 slot 偏移写入目标 slot 区间
+- `g_slot_loaded_mask` 校验 run 目标 slot 已装载
+
+**Python 层改动**：
+- `PIMQuantizedRuntime.NUM_SLOTS = 8`（必须匹配 DPU binary）
+- `_allocate_slot(eid) → (slot, was_resident)` LRU 分配器
+- `preload(eid, w, km)` 重写：hit 跳过 DMA、miss 写入选中 slot
+- `infer(inputs, slot_id=None)` 默认用 `_last_touched_slot`
+- `preload_and_infer_concat` 同样接入 slot LRU
+- `evict()` / `shutdown()` / `evict_cached_weights()` 清 slot 表
+- ctypes signatures 全更新
+
+**真机 e2e (Qwen3-GPTQ-Int4, 32 tokens)**：
+
+| metric              | M-4   | M-5   | M-6     | delta vs M-4 |
+|---------------------|-------|-------|---------|--------------|
+| DPU quantized calls | 23246 | 23214 | 23270   | ~0           |
+| preload hit_local   | 0     | 0     | 0       | 0            |
+| decode_tps          | 0.317 | 0.309 | 0.300   | -5.4% (noise)|
+
+**Root cause 无法赢**：48 层共享一个 `get_shared()` 单例。hit 理论上限
+= 8 / (48 × 8) ≈ 0.2%。M-7 per-layer scoping 是唯一解。
+
+**关联改动**：
+- `nano_ktrans/kernels/pim_native/dpu_quantized_kernel.c` + `host_quantized_bridge.c`
+- `nano_ktrans/kernels/pim_quantized_runtime.py`（~150 行 slot 逻辑）
+- `.codebuddy/dev_gate/M-6.toml`（8 条"infra + no regression"类 KPI）
+- `tests/test_core.py::TestPIMQuantizedRuntimeSlotLRU`（7 条纯 CPU 单测）
+- 3 个 JSON artifacts（M-6 e2e 32-token + micro-bench smoke + 此前 M-5 CPU=64 attempt）
+
+**测试**：217 → **224 passed** (+7)。
+
+**下一步 M-7**：per-layer scoped `PIMQuantizedRuntime`（打破 48 层共享）
++ prefill 预热 slot + `dpu_launch(DPU_ASYNCHRONOUS)`。预期把 decode_tps
+从 0.30 推到 ~0.45-0.60。
+
 ### 2026-04-22 19:00 - ADR-002 M-5 闭合：dual-runtime 基础设施 + null 性能结果（诊断 MRAM 单槽瓶颈）+ dev_gate PASS 7/7
 
 把 `PIMMoEBackend` 的 `PIMQuantizedRuntime` 由单例拆成 dual：gate_up

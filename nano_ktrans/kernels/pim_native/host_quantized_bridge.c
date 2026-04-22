@@ -60,6 +60,14 @@
 #define MAX_INPUT_BITPLANES_U64 ((MAX_INPUT_FLOATS / 64) * 8)
 #endif
 
+/* ADR-002 M-6.1: multi-slot MRAM residency (must match DPU kernel) */
+#ifndef NUM_SLOTS
+#define NUM_SLOTS 8
+#endif
+#define WORDS_PER_SLOT     (MAX_QWEIGHT_WORDS / NUM_SLOTS)
+#define SCALES_PER_SLOT    (MAX_SCALE_FLOATS  / NUM_SLOTS)
+#define LUT_INT16_PER_SLOT (MAX_LUT_INT16     / NUM_SLOTS)
+
 static struct dpu_set_t g_set;
 static bool g_initialized = false;
 static bool g_weights_loaded = false;
@@ -85,6 +93,10 @@ static int16_t *g_lut_i16_shards = NULL;
 static int8_t *g_input_i8_shards = NULL;
 static int32_t *g_output_i32_shards = NULL;
 static int16_t *g_runtime_lut_i16_shards = NULL;
+/* ADR-002 M-6.1: per-slot occupancy tracking.  Bit b set => slot b
+ * has valid weights loaded.  Host-side LRU logic in Python sets the
+ * active slot on every run; this flag just gates sanity checks. */
+static uint32_t g_slot_loaded_mask = 0;
 
 static void
 set_error(char *error_buffer, size_t error_buffer_len, const char *fmt, ...)
@@ -194,6 +206,7 @@ pim_quantized_load_weights(
     uint32_t kernel_mode,
     const void *packed_qweights,
     const void *scales,
+    uint32_t slot_id,
     char *error_buffer,
     size_t error_buffer_len)
 {
@@ -228,6 +241,10 @@ pim_quantized_load_weights(
         set_error(error_buffer, error_buffer_len, "input_dim must be divisible by pack factor and group_size");
         return -1;
     }
+    if (slot_id >= NUM_SLOTS) {
+        set_error(error_buffer, error_buffer_len, "slot_id must be < NUM_SLOTS (%d)", NUM_SLOTS);
+        return -1;
+    }
 
     g_input_dim = input_dim;
     g_output_dim = output_dim;
@@ -240,16 +257,23 @@ pim_quantized_load_weights(
     shard_scale_floats = g_shard_output_dim * (size_t)num_groups;
     shard_lut_i16 = shard_scale_floats * (size_t)(1u << BITS_PER_WEIGHT);
 
-    if (shard_qweight_words > MAX_QWEIGHT_WORDS) {
-        set_error(error_buffer, error_buffer_len, "qweight shard too large");
+    /* M-6.1: each slot only sees 1/NUM_SLOTS of the total MRAM budget. */
+    if (shard_qweight_words > WORDS_PER_SLOT) {
+        set_error(error_buffer, error_buffer_len,
+                  "qweight shard too large for slot: %zu > %d (NUM_SLOTS=%d)",
+                  shard_qweight_words, WORDS_PER_SLOT, NUM_SLOTS);
         return -1;
     }
-    if (shard_scale_floats > MAX_SCALE_FLOATS) {
-        set_error(error_buffer, error_buffer_len, "scale shard too large");
+    if (shard_scale_floats > SCALES_PER_SLOT) {
+        set_error(error_buffer, error_buffer_len,
+                  "scale shard too large for slot: %zu > %d",
+                  shard_scale_floats, SCALES_PER_SLOT);
         return -1;
     }
-    if (shard_lut_i16 > MAX_LUT_INT16) {
-        set_error(error_buffer, error_buffer_len, "lut shard too large");
+    if (shard_lut_i16 > LUT_INT16_PER_SLOT) {
+        set_error(error_buffer, error_buffer_len,
+                  "lut shard too large for slot: %zu > %d",
+                  shard_lut_i16, LUT_INT16_PER_SLOT);
         return -1;
     }
 
@@ -346,7 +370,9 @@ pim_quantized_load_weights(
             }
         }
         if (check_dpu_error(
-                dpu_push_xfer(g_set, DPU_XFER_TO_DPU, "lut_mram", 0, shard_lut_i16 * sizeof(int16_t), DPU_XFER_DEFAULT),
+                dpu_push_xfer(g_set, DPU_XFER_TO_DPU, "lut_mram",
+                              (size_t)slot_id * LUT_INT16_PER_SLOT * sizeof(int16_t),
+                              shard_lut_i16 * sizeof(int16_t), DPU_XFER_DEFAULT),
                 error_buffer, error_buffer_len, "dpu_push_xfer(lut_mram)") != 0) {
             goto cleanup;
         }
@@ -363,7 +389,9 @@ pim_quantized_load_weights(
         }
     }
     if (check_dpu_error(
-            dpu_push_xfer(g_set, DPU_XFER_TO_DPU, "qweight_mram", 0, shard_qweight_words * sizeof(uint32_t), DPU_XFER_DEFAULT),
+            dpu_push_xfer(g_set, DPU_XFER_TO_DPU, "qweight_mram",
+                          (size_t)slot_id * WORDS_PER_SLOT * sizeof(uint32_t),
+                          shard_qweight_words * sizeof(uint32_t), DPU_XFER_DEFAULT),
             error_buffer, error_buffer_len, "dpu_push_xfer(qweight_mram)") != 0) {
         goto cleanup;
     }
@@ -380,13 +408,16 @@ pim_quantized_load_weights(
         }
     }
     if (check_dpu_error(
-            dpu_push_xfer(g_set, DPU_XFER_TO_DPU, "scales_mram", 0, shard_scale_floats * sizeof(float), DPU_XFER_DEFAULT),
+            dpu_push_xfer(g_set, DPU_XFER_TO_DPU, "scales_mram",
+                          (size_t)slot_id * SCALES_PER_SLOT * sizeof(float),
+                          shard_scale_floats * sizeof(float), DPU_XFER_DEFAULT),
             error_buffer, error_buffer_len, "dpu_push_xfer(scales_mram)") != 0) {
         goto cleanup;
     }
     clock_gettime(CLOCK_MONOTONIC, &scale_end);
 
     g_weights_loaded = true;
+    g_slot_loaded_mask |= (1u << slot_id);
     clock_gettime(CLOCK_MONOTONIC, &total_end);
     g_last_load_qweight_transfer_seconds = timespec_diff_seconds(&qweight_start, &qweight_end);
     g_last_load_scale_transfer_seconds = timespec_diff_seconds(&scale_start, &scale_end);
@@ -407,6 +438,7 @@ pim_quantized_run(
     uint32_t batch_size,
     const void *inputs,
     void *outputs,
+    uint32_t slot_id,
     char *error_buffer,
     size_t error_buffer_len)
 {
@@ -498,9 +530,28 @@ pim_quantized_run(
 
     clock_gettime(CLOCK_MONOTONIC, &total_start);
 
+    /* M-6.1: guard against running a slot that was never loaded. */
+    if (slot_id >= NUM_SLOTS) {
+        set_error(error_buffer, error_buffer_len, "slot_id must be < NUM_SLOTS (%d)", NUM_SLOTS);
+        goto cleanup;
+    }
+    if ((g_slot_loaded_mask & (1u << slot_id)) == 0) {
+        set_error(error_buffer, error_buffer_len,
+                  "slot %u has no weights loaded (g_slot_loaded_mask=0x%x)",
+                  slot_id, g_slot_loaded_mask);
+        goto cleanup;
+    }
+
     if (check_dpu_error(
             dpu_broadcast_to(g_set, "batch_size", 0, &batch_size, sizeof(batch_size), DPU_XFER_DEFAULT),
             error_buffer, error_buffer_len, "dpu_broadcast_to(batch_size)") != 0) {
+        goto cleanup;
+    }
+
+    /* M-6.1: tell the kernel which slot to compute from this call. */
+    if (check_dpu_error(
+            dpu_broadcast_to(g_set, "active_slot", 0, &slot_id, sizeof(slot_id), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(active_slot)") != 0) {
         goto cleanup;
     }
     clock_gettime(CLOCK_MONOTONIC, &input_start);

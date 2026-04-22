@@ -23,6 +23,12 @@ class PIMQuantizedRuntime:
     MAX_OUTPUT_FLOATS = 65_536
     ERROR_BUFFER_SIZE = 2048
 
+    # ADR-002 M-6.1: multi-slot MRAM residency.  Must match NUM_SLOTS
+    # in dpu_quantized_kernel.c and host_quantized_bridge.c.  Keeping
+    # N > top_k (Qwen3 uses top_k=8) lets a decode step that revisits
+    # an expert in the next step find its bundle still resident.
+    NUM_SLOTS = 8
+
     _shared: dict[tuple[str, int], "PIMQuantizedRuntime"] = {}
     _shared_lock = threading.Lock()
 
@@ -54,6 +60,7 @@ class PIMQuantizedRuntime:
             ctypes.c_uint32,
             ctypes.c_void_p,
             ctypes.c_void_p,
+            ctypes.c_uint32,   # slot_id (ADR-002 M-6.1)
             ctypes.c_char_p,
             ctypes.c_size_t,
         ]
@@ -62,6 +69,7 @@ class PIMQuantizedRuntime:
             ctypes.c_uint32,
             ctypes.c_void_p,
             ctypes.c_void_p,
+            ctypes.c_uint32,   # slot_id (ADR-002 M-6.1)
             ctypes.c_char_p,
             ctypes.c_size_t,
         ]
@@ -104,6 +112,21 @@ class PIMQuantizedRuntime:
 
         # Cached pre-padded quantized weights: expert_id → (qweight_i32, scales_f32, padded_input_dim, padded_output_dim, group_size, kernel_mode, original_output_dim)
         self._weight_cache: dict[int, tuple[torch.Tensor, torch.Tensor, int, int, int, int, int]] = {}
+
+        # ADR-002 M-6.1: per-slot residency + LRU bookkeeping.
+        #
+        # ``_slot_expert_id[slot]`` == 0 means the slot is empty; any other
+        # value is the expert_id whose weights are currently in that
+        # slot.  ``_slot_lru`` is a rolling counter so eviction picks
+        # the slot with the oldest touch.  ``_expert_to_slot`` is the
+        # inverse map used for O(1) hit detection on ``preload``.
+        self._slot_expert_id: list[int] = [0] * self.NUM_SLOTS
+        self._slot_lru_ticker: list[int] = [0] * self.NUM_SLOTS
+        self._expert_to_slot: dict[int, int] = {}
+        self._lru_counter: int = 0
+        # ``_last_touched_slot`` remembers which slot the last preload
+        # landed in; infer() uses it when no explicit slot_id is passed.
+        self._last_touched_slot: int = 0
 
         # Stats
         self.preload_hits: int = 0
@@ -267,6 +290,52 @@ class PIMQuantizedRuntime:
 
     # ── NEW: preload — load quantized weights to DPU MRAM ──────────────
 
+    def _touch_slot(self, slot: int) -> None:
+        """Bump LRU tick on a slot (called on hit and on fresh load)."""
+        self._lru_counter += 1
+        self._slot_lru_ticker[slot] = self._lru_counter
+
+    def _allocate_slot(self, expert_id: int) -> tuple[int, bool]:
+        """
+        Return ``(slot_id, was_resident)`` for this expert.  If the
+        expert already lives in some slot, returns that slot with
+        ``was_resident=True`` and the LRU tick is bumped.  Otherwise
+        picks the LRU-oldest slot, evicts whatever was there, and
+        returns ``(slot, False)`` — the caller is responsible for
+        uploading weights into the slot via ``pim_quantized_load_weights``.
+        """
+        slot = self._expert_to_slot.get(expert_id)
+        if slot is not None:
+            self._touch_slot(slot)
+            return slot, True
+
+        # Pick an empty slot if any (prefer slot 1 .. N-1 over slot 0
+        # only to keep slot 0 empty during init; any slot works once
+        # we're past bootstrap).  Empty == _slot_expert_id[slot] == 0.
+        chosen: int = -1
+        for s in range(self.NUM_SLOTS):
+            if self._slot_expert_id[s] == 0:
+                chosen = s
+                break
+        if chosen < 0:
+            # All slots full — evict least-recently-touched.
+            chosen = min(range(self.NUM_SLOTS), key=lambda s: self._slot_lru_ticker[s])
+            old_eid = self._slot_expert_id[chosen]
+            if old_eid in self._expert_to_slot:
+                del self._expert_to_slot[old_eid]
+
+        self._slot_expert_id[chosen] = expert_id
+        self._expert_to_slot[expert_id] = chosen
+        self._touch_slot(chosen)
+        return chosen, False
+
+    def _evict_from_slots(self, expert_id: int) -> None:
+        """Drop ``expert_id`` from the slot table if present."""
+        slot = self._expert_to_slot.pop(expert_id, None)
+        if slot is not None:
+            self._slot_expert_id[slot] = 0
+            self._slot_lru_ticker[slot] = 0
+
     def preload(
         self,
         expert_id: int,
@@ -277,13 +346,25 @@ class PIMQuantizedRuntime:
         Load quantized expert weights to DPU MRAM if not already resident.
 
         Returns True if weights were actually transferred (cache miss),
-        False if they were already resident (cache hit).
+        False if they were already resident in some slot (cache hit).
+
+        ADR-002 M-6.1: this path now maintains an 8-slot LRU cache
+        backed by the DPU's multi-slot MRAM layout.  A hit takes zero
+        host->DPU DMA; a miss transfers only into the slot chosen by
+        ``_allocate_slot``.
         """
-        if self._resident_expert_id == expert_id:
+        slot, was_resident = self._allocate_slot(expert_id)
+        self._last_touched_slot = slot
+
+        if was_resident:
+            # Also keep legacy single-slot state in sync so callers
+            # inspecting ``resident_expert_id`` see a sensible value.
+            self._resident_expert_id = expert_id
             self.preload_hits += 1
             return False
 
-        # Get or create padded tensors (cached)
+        # Miss path: make sure the host-side padded cache exists then
+        # upload to the chosen slot.
         if expert_id not in self._weight_cache:
             qweight_i32, scales_f32, padded_input_dim, padded_output_dim, orig_output_dim = \
                 self._prepare_quantized_weights(quantized, kernel_mode)
@@ -303,13 +384,17 @@ class PIMQuantizedRuntime:
             ctypes.c_uint32(km),
             ctypes.c_void_p(qweight_i32.data_ptr()),
             ctypes.c_void_p(scales_f32.data_ptr()),
+            ctypes.c_uint32(slot),
             error_buffer,
             len(error_buffer),
         )
         if rc != 0:
             raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
 
-        # Also update legacy signature for backward compat
+        # Legacy single-slot fields — kept for backward compatibility
+        # with anything that still reads them.  Semantics change
+        # slightly: ``_resident_expert_id`` is now the most-recently
+        # preloaded expert rather than the single occupant.
         self._loaded_signature = (padded_input_dim, padded_output_dim, group_size, km, expert_id)
         self._resident_expert_id = expert_id
         self.preload_misses += 1
@@ -317,10 +402,15 @@ class PIMQuantizedRuntime:
 
     # ── NEW: infer — run DPU quantized kernel with resident weights ────
 
-    def infer(self, inputs: torch.Tensor) -> torch.Tensor:
+    def infer(self, inputs: torch.Tensor, *, slot_id: Optional[int] = None) -> torch.Tensor:
         """
         Run the DPU quantized kernel using weights already resident in MRAM.
         Only transfers input activations to DPU.
+
+        ADR-002 M-6.1: ``slot_id`` selects which MRAM slot to compute
+        from.  If omitted, we use the slot touched by the most recent
+        ``preload()`` — which is the right default for the common
+        ``preload(eid); infer()`` pair and keeps the pre-M-6 API shape.
         """
         if self._resident_expert_id == 0:
             raise RuntimeError("No quantized weights are resident. Call preload() first.")
@@ -328,11 +418,22 @@ class PIMQuantizedRuntime:
         if inputs.ndim != 2:
             raise ValueError("PIMQuantizedRuntime.infer() expects 2D input tensor.")
 
+        effective_slot = int(slot_id) if slot_id is not None else self._last_touched_slot
+        if not (0 <= effective_slot < self.NUM_SLOTS):
+            raise ValueError(
+                f"slot_id must be in [0, {self.NUM_SLOTS}); got {effective_slot}"
+            )
+
         batch_size, input_dim = inputs.shape
         inputs_f32 = inputs.detach().to(device="cpu", dtype=torch.float32, copy=True).contiguous()
 
+        # Resolve which expert's padded-weight cache entry describes
+        # this slot's shape (caller may have preloaded a different
+        # expert after this one).
+        slot_expert = self._slot_expert_id[effective_slot]
+        cache_key = slot_expert if slot_expert in self._weight_cache else self._resident_expert_id
         _, _, padded_input_dim, padded_output_dim, _, _, orig_output_dim = \
-            self._weight_cache[self._resident_expert_id]
+            self._weight_cache[cache_key]
 
         if padded_input_dim != input_dim:
             padded_inputs = torch.zeros(batch_size, padded_input_dim, dtype=torch.float32)
@@ -345,6 +446,7 @@ class PIMQuantizedRuntime:
             ctypes.c_uint32(batch_size),
             ctypes.c_void_p(inputs_f32.data_ptr()),
             ctypes.c_void_p(outputs.data_ptr()),
+            ctypes.c_uint32(effective_slot),
             error_buffer,
             len(error_buffer),
         )
@@ -359,12 +461,22 @@ class PIMQuantizedRuntime:
         """Clear the current DPU quantized weight residency."""
         self._resident_expert_id = 0
         self._loaded_signature = None
+        # M-6.1: also drop all slot residency so nothing stale lingers.
+        self._slot_expert_id = [0] * self.NUM_SLOTS
+        self._slot_lru_ticker = [0] * self.NUM_SLOTS
+        self._expert_to_slot.clear()
+        self._lru_counter = 0
+        self._last_touched_slot = 0
 
     def evict_cached_weights(self, expert_id: int) -> None:
         """Remove cached pre-padded weights for a specific expert."""
         self._weight_cache.pop(expert_id, None)
+        # M-6.1: drop the slot table entry too so a future preload of
+        # a fresh expert_id is not confused by stale bookkeeping.
+        self._evict_from_slots(expert_id)
         if self._resident_expert_id == expert_id:
-            self.evict()
+            self._resident_expert_id = 0
+            self._loaded_signature = None
 
     # ── NEW (ADR-002 M-4.1): fused preload+infer for two concatenated
     #    projections sharing the same input.  One DPU launch instead
@@ -422,8 +534,13 @@ class PIMQuantizedRuntime:
                 self._weight_cache[expert_id]
             concat_lhs_orig = lhs.output_dim
 
-        # Preload into MRAM if this concat bundle isn't already resident.
-        if self._resident_expert_id != expert_id:
+        # ADR-002 M-6.1: route through slot LRU — if this expert's
+        # concat bundle is already resident in some slot, skip the
+        # host->DPU transfer entirely.
+        slot, was_resident = self._allocate_slot(expert_id)
+        self._last_touched_slot = slot
+
+        if not was_resident:
             error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
             rc = self._lib.pim_quantized_load_weights(
                 ctypes.c_uint32(padded_in),
@@ -432,6 +549,7 @@ class PIMQuantizedRuntime:
                 ctypes.c_uint32(kernel_mode),
                 ctypes.c_void_p(concat_qw.data_ptr()),
                 ctypes.c_void_p(concat_sc.data_ptr()),
+                ctypes.c_uint32(slot),
                 error_buffer,
                 len(error_buffer),
             )
@@ -441,6 +559,9 @@ class PIMQuantizedRuntime:
             self._loaded_signature = (padded_in, concat_rows, lhs.group_size, kernel_mode, expert_id)
             self.preload_misses += 1
         else:
+            # Hit: keep ``_resident_expert_id`` pointing at this bundle
+            # so infer()'s shape lookup finds it.
+            self._resident_expert_id = expert_id
             self.preload_hits += 1
 
         # Pad inputs if needed.
@@ -456,6 +577,7 @@ class PIMQuantizedRuntime:
             ctypes.c_uint32(batch_size),
             ctypes.c_void_p(inputs_f32.data_ptr()),
             ctypes.c_void_p(outputs.data_ptr()),
+            ctypes.c_uint32(slot),
             error_buffer,
             len(error_buffer),
         )
@@ -517,6 +639,7 @@ class PIMQuantizedRuntime:
                 ctypes.c_uint32(kernel_mode),
                 ctypes.c_void_p(qweight_i32.data_ptr()),
                 ctypes.c_void_p(scales_f32.data_ptr()),
+                ctypes.c_uint32(0),  # legacy .linear() always uses slot 0
                 error_buffer,
                 len(error_buffer),
             )
@@ -530,6 +653,7 @@ class PIMQuantizedRuntime:
             ctypes.c_uint32(batch_size),
             ctypes.c_void_p(inputs_f32.data_ptr()),
             ctypes.c_void_p(outputs.data_ptr()),
+            ctypes.c_uint32(0),  # legacy .linear() always uses slot 0
             error_buffer,
             len(error_buffer),
         )
@@ -565,3 +689,9 @@ class PIMQuantizedRuntime:
         self._loaded_signature = None
         self._resident_expert_id = 0
         self._weight_cache.clear()
+        # M-6.1: drop all slot-table state so a future (re-)init starts clean.
+        self._slot_expert_id = [0] * self.NUM_SLOTS
+        self._slot_lru_ticker = [0] * self.NUM_SLOTS
+        self._expert_to_slot.clear()
+        self._lru_counter = 0
+        self._last_touched_slot = 0
