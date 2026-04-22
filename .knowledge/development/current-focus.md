@@ -34,9 +34,30 @@ updated: 2026-04-21 20:05
 updated: 2026-04-22 10:50
 updated: 2026-04-22 11:10
 updated: 2026-04-22 11:25
+updated: 2026-04-22 11:50
 ---
 
 # 🔥 当前工作焦点
+
+## 开发流程（2026-04-22 起强制执行）
+
+> 每一轮 ADR-002 milestone 的推进**必须**先过 `scripts/dev_gate.py`。
+> 没有 PASS 前不得启动下一个 milestone 的编码。
+
+```bash
+# 典型单轮循环：
+# 1) 在宿主机跑当前 milestone 需要的 benchmark（spec 里 suggested_commands 有范例）
+# 2) 回到开发机：
+python scripts/dev_gate.py check          # 全量评估
+python scripts/dev_gate.py check M-1      # 只评估某一个
+python scripts/dev_gate.py status         # 查看缓存的 verdict
+# 3) 只有 PASS 才启动下一个 milestone 的实现
+```
+
+Gate 三阶段：`prerequisite → artifact 存在且新鲜 → acceptance 规则全过`。
+任一阶段失败就 WAIT / HALT / BLOCKED / PARTIAL，并列出具体失败项。规格
+在 `.codebuddy/dev_gate/*.toml`，运行时状态落 `.codebuddy/dev_gate_state.json`
++ `.codebuddy/dev_gate_log.jsonl`（后两者 git-ignored）。
 
 ## 下一阶段目标（2026-04-22 起）
 

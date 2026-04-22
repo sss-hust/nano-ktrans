@@ -7,6 +7,71 @@ tags: [changelog]
 
 ## 2026-04-22
 
+### 2026-04-22 11:50 - dev_gate：数据驱动的 milestone 守门人
+
+为了避免 ADR-002 里 M-1 → M-2 → M-3 → M-4 推进时出现"用旧数据替
+新数据的证据"或"没数据也往下推"这两类错误，落地一个**单入口的
+milestone gate**：`scripts/dev_gate.py`。
+
+**行为**：
+
+```
+stage 1  prerequisite_check
+         对 spec.prerequisites 的每个 milestone 查 state.json；
+         任何一个不是 PASS → HALT，报告是哪条阻塞
+
+stage 2  artifact_check
+         spec.required_artifacts 全部存在 AND mtime 严格新于上次 PASS 的
+         snapshot；缺 → WAIT（打印 suggested_commands）；未更新 → WAIT
+         (拒绝重放上次的 PASS)
+
+stage 3  acceptance_check
+         对 spec.acceptance_checks 的每条规则评估，rule = {path, op, value};
+         全过 → PASS；部分过 → PARTIAL；全失败 → BLOCKED
+```
+
+**关键性质**：
+
+- **幂等 + 防重放**：PASS 时把 artifact mtime 写入 state.json；下次评估
+  如果文件没变，WAIT 而不是 PASS（不允许静默复用旧判决）
+- **可审计**：每次 verdict 追加一行到 `.codebuddy/dev_gate_log.jsonl`
+- **显式 bypass**：`dev_gate bless <id> --force --note "..."` 才能手动
+  标 PASS，状态里同时记录 `bypassed: true`
+- **零耦合**：脚本不 `import nano_ktrans`，只读 artifact JSON，即便主代码
+  在重构也能独立工作
+- **空规则拒绝**：`acceptance_checks: []` 会返回 BLOCKED，防止 "spec 留空→
+  自动 PASS" 这种漏洞
+
+**落地文件**：
+
+- `scripts/dev_gate.py`（~670 行，无第三方依赖，py3.10 回退到 `tomli`）
+- `.codebuddy/dev_gate/M-1.toml`（7 条 acceptance rules：smoke status==ok、
+  误差上限、sweep 覆盖 cell 数、至少一个 cell PIM ≥ CPU 等）
+- `.codebuddy/dev_gate/M-2.toml`（5 条：`prerequisites=["M-1"]`、
+  `max(...) ≥ 1.5x`、`min(...) ≥ 0.9x`（无 batch cliff）、
+  `max_abs_error ≤ 0.05`、kernel_modes 字段存在）
+- `.codebuddy/dev_gate/README.md`（spec 格式、支持的路径语法、ops）
+- `tests/test_dev_gate.py`（23 条单测：path 解析、规则评估、PASS/WAIT/PARTIAL/
+  BLOCKED/HALT 五种 verdict、freshness gate、prereq 链）
+- `.gitignore`：un-ignore `.codebuddy/dev_gate/*.toml`，新增忽略
+  `dev_gate_state.json` / `dev_gate_log.jsonl` 两个 runtime 产物
+
+**使用**：
+
+```bash
+python scripts/dev_gate.py list              # 列出所有已注册 milestone
+python scripts/dev_gate.py check             # 评估全部；exit=1 如果有任意非 PASS
+python scripts/dev_gate.py check M-1 M-2     # 只评估指定 milestone
+python scripts/dev_gate.py status            # 打印 state.json 缓存
+python scripts/dev_gate.py bless M-1 --force --note "..."   # 手动标 PASS（审计）
+```
+
+当前本地真跑一次 `check`：M-1 返回 **WAIT**（sweep artifacts 还没在宿主机生成），
+M-2 返回 **HALT**（M-1 没 PASS 就不看它的 artifacts），exit code = 1。完全符合
+"数据未就绪时暂停流程、清晰报告状态"的原始要求。
+
+测试结果：`pytest tests -q` → **183 passed, 1 warning**（较 11:25 的 160 多出 23 条 gate 测试）。
+
 ### 2026-04-22 11:25 - ADR-002 M-1：打通 e2e GPTQ + sweep 脚本 + mode=6 审计
 
 落地 ADR-002 M-1 的三个子任务：

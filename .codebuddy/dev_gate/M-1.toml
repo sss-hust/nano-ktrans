@@ -1,0 +1,73 @@
+milestone_id = "M-1"
+title = "Establish trustworthy baseline: e2e GPTQ unblocked + full shape/batch/rank/mode sweep"
+
+# M-1 is the root of the ADR-002 milestone chain; nothing precedes it.
+prerequisites = []
+
+# Two artifacts together are the M-1 evidence:
+#   a) the e2e cuda_pim smoke run on real Qwen3-GPTQ-Int4 (proves M1-T1 fix works)
+#   b) the shape x batch x rank x kernel_mode operator sweep (proves M1-T2 ran)
+#
+# Neither file exists in the current session (no /dev/dpu_rank* here);
+# the gate will report WAIT with the suggested commands until they
+# appear and are judged fresh.
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M1_2026-04-22.json",
+    "benchmarks/results/pim_shape_sweep_M1_2026-04-22.json",
+]
+primary_artifact = "benchmarks/results/pim_shape_sweep_M1_2026-04-22.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 2 --max-new-tokens 2 --json-out benchmarks/results/e2e_gptq_cuda_pim_M1_2026-04-22.json",
+    "python benchmarks/benchmark_pim_shape_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --json-out benchmarks/results/pim_shape_sweep_M1_2026-04-22.json",
+]
+
+next_tasks = [
+    "M-2: implement kernel_mode=7 genuine T-MAC (host-side _build_tmac_luts + DPU kernel rewrite)",
+    "Select the initial (shape, batch) targets for M-2 based on which cells show the widest pim_vs_cpu_grouped_ratio shortfall in the M-1 sweep.",
+]
+
+# -- e2e smoke artifact checks -----------------------------------------
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M1_2026-04-22.json"
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "e2e cuda_pim on Qwen3-GPTQ-Int4 must not abort (ADR-002 §2.2 Gap D)."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M1_2026-04-22.json"
+path     = "results[0].error"
+op       = "not_exists"
+reason   = "No top-level error field means the gate_up_proj / .qweight layout adaptation really worked."
+
+# -- sweep-structure checks --------------------------------------------
+[[acceptance_checks]]
+path   = "count(results[*].shape_name)"
+op     = ">="
+value  = 60
+reason = "Sweep must cover enough cells (default 3 shapes x 4 batches x 5 ranks x 3 modes = 180; accept >=60 to tolerate failed PIM cells)."
+
+[[acceptance_checks]]
+path   = "use_synthetic"
+op     = "=="
+value  = false
+reason = "ADR-002 §5.3: synthetic data is not admissible as M-1 evidence."
+
+# -- sweep numeric checks ----------------------------------------------
+# This is an intentionally loose bound for the M-1 baseline.  The KPI
+# from ADR-002 §1 (PIM >= 1.5x CPU grouped across all shape/batch/rank)
+# is what M-2's gate enforces.  For M-1 we only require that the sweep
+# ran and produced at least one cell where PIM already beat CPU; i.e.
+# the measurement infrastructure itself is trustworthy.
+[[acceptance_checks]]
+path   = "max(results[*].pim_vs_cpu_grouped_ratio)"
+op     = ">="
+value  = 1.0
+reason = "At least one sweep cell must show PIM >= CPU grouped, otherwise the whole baseline is suspect."
+
+[[acceptance_checks]]
+path   = "max(results[*].max_abs_error_vs_cpu_grouped)"
+op     = "<="
+value  = 0.5
+reason = "No sweep cell may exceed 0.5 absolute error vs CPU grouped reference (M-2 will tighten this to 0.05)."

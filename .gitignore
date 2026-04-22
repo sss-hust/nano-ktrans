@@ -138,6 +138,8 @@ env.bak/
 venv.bak/
 .python-version
 *.toml
+# Un-ignore dev_gate milestone specs (we track these).
+!.codebuddy/dev_gate/*.toml
 
 # Spyder project settings
 .spyderproject
@@ -208,3 +210,7 @@ nano_ktrans/kernels/pim_native/build/
 
 # IDE / internal metadata
 .xac/
+
+# dev_gate runtime artefacts (the scripts produce these; specs are tracked)
+.codebuddy/dev_gate_state.json
+.codebuddy/dev_gate_log.jsonl

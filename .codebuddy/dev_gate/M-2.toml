@@ -1,0 +1,63 @@
+milestone_id = "M-2"
+title = "Genuine T-MAC kernel_mode=7: DPU software multiply removed from the inner loop"
+
+# M-2 is unlocked only after M-1 passes (so we have trustworthy numbers
+# to compare mode=7 against).
+prerequisites = ["M-1"]
+
+required_artifacts = [
+    "benchmarks/results/pim_shape_sweep_M2_tmac.json",
+]
+primary_artifact = "benchmarks/results/pim_shape_sweep_M2_tmac.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_pim_shape_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --kernel-modes 4 7 --json-out benchmarks/results/pim_shape_sweep_M2_tmac.json",
+]
+
+next_tasks = [
+    "M-3: BackendCostModel + async PIM submit (ADR-001 P3+P6).",
+    "Replace tests/test_core.py::TestQuantizedKernelAudit with a mode=7 numerical-correctness test suite.",
+]
+
+# ADR-002 §4.2.4 exit criteria, mapped to sweep-cell aggregates.
+#
+# KPI-a: batch=1 mode=7 must beat the honest baseline (mode=4 int8 fixed)
+#        by >= 1.3x on at least one shape.
+[[acceptance_checks]]
+path   = "max(results[*].pim_vs_cpu_grouped_ratio)"
+op     = ">="
+value  = 1.5
+reason = "ADR-002 KPI: at least one cell must reach PIM >= 1.5x CPU grouped."
+
+# KPI-b: no batch=4/8 cell in mode=7 may fall below 0.9x CPU grouped
+#        (no performance cliff when batch grows).  Enforced as a min()
+#        over all mode=7 cells; in M-2.1+ we will narrow with a
+#        `filter=` spec-field but for now the sweep is already
+#        constrained to modes {4, 7}.
+[[acceptance_checks]]
+path   = "min(results[*].pim_vs_cpu_grouped_ratio)"
+op     = ">="
+value  = 0.9
+reason = "ADR-002 KPI: batch>1 must not drop below 0.9x CPU (eliminates the batch cliff)."
+
+# KPI-c: numerical accuracy bound from ADR-002 §1.
+[[acceptance_checks]]
+path   = "max(results[*].max_abs_error_vs_cpu_grouped)"
+op     = "<="
+value  = 0.05
+reason = "ADR-002 numerical accuracy requirement: max_abs_error <= 0.05 relative to saturation."
+
+# KPI-d: coverage check — sweep must include mode=7 and at least the
+# canonical {1, 4, 8} batch samples.  The rule below flags absence of
+# mode=7 by requiring the sweep declare it.  Mode=4 must also be
+# present as honest baseline.
+[[acceptance_checks]]
+path   = "kernel_modes"
+op     = "exists"
+reason = "sweep metadata must record which kernel_modes were swept so the verdict is reproducible."
+
+[[acceptance_checks]]
+path   = "use_synthetic"
+op     = "=="
+value  = false
+reason = "ADR-002 §5.3: M-2 verdicts require real GPTQ data."
