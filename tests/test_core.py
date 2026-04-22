@@ -7899,3 +7899,146 @@ class TestPIMQuantizedRuntimeSlotLRU:
     def test_num_slots_is_public_constant(self):
         from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
         assert PIMQuantizedRuntime.NUM_SLOTS == 8  # must match DPU binary's NUM_SLOTS
+
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-7 — per-layer-group scoping + GPTQ speculative preload flag
+# ----------------------------------------------------------------------
+
+
+class TestPIMMoEBackendLayerGroupScoping:
+    """Tests for M-7 additions: pim_layer_group_size + enable_speculative_preload_gptq."""
+
+    def _make_dummy(self, tmp_path, hidden_size=64, intermediate_size=32, num_experts=2, layer_indices=(0,)):
+        from safetensors.torch import save_file
+        tensors = {}
+        for layer_idx in layer_indices:
+            for e in range(num_experts):
+                tensors[f"model.layers.{layer_idx}.block_sparse_moe.experts.{e}.w1.weight"] = (
+                    torch.randn(intermediate_size, hidden_size)
+                )
+                tensors[f"model.layers.{layer_idx}.block_sparse_moe.experts.{e}.w3.weight"] = (
+                    torch.randn(intermediate_size, hidden_size)
+                )
+                tensors[f"model.layers.{layer_idx}.block_sparse_moe.experts.{e}.w2.weight"] = (
+                    torch.randn(hidden_size, intermediate_size)
+                )
+        save_file(tensors, str(tmp_path / "model.safetensors"))
+        return hidden_size, intermediate_size, num_experts
+
+    def test_default_layer_group_size_is_3(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0,
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path),
+            pim_execution_mode="shadow",
+        )
+        assert backend.pim_layer_group_size == 3
+        diag = backend.diagnostics()
+        assert diag["pim_layer_group_size"] == 3
+        # layer 0 with group_size 3 → group 0.
+        assert diag["pim_layer_group_id"] == 0
+
+    def test_layer_group_id_wraps_by_group_size(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(
+            tmp_path, layer_indices=(5,)
+        )
+        # layer 5 with group_size=3 → group_id = 5 // 3 = 1
+        backend = PIMMoEBackend(
+            layer_idx=5,
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path),
+            pim_execution_mode="shadow",
+            pim_layer_group_size=3,
+        )
+        assert backend.diagnostics()["pim_layer_group_id"] == 1
+
+    def test_group_size_1_means_per_layer(self, tmp_path):
+        """group_size=1 is the "every layer gets its own runtime pair"
+        setting; profile key must include the unique layer id."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(
+            tmp_path, layer_indices=(0, 2)
+        )
+        b0 = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+            pim_layer_group_size=1,
+        )
+        b2 = PIMMoEBackend(
+            layer_idx=2, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+            pim_layer_group_size=1,
+        )
+        assert b0.diagnostics()["pim_layer_group_id"] != \
+            b2.diagnostics()["pim_layer_group_id"]
+
+    def test_group_size_48_collapses_to_single_group(self, tmp_path):
+        """With a group_size >= num_layers, all layers share group 0
+        and the setup degrades back to M-6 behaviour."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(
+            tmp_path, layer_indices=(0, 47)
+        )
+        b0 = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+            pim_layer_group_size=48,
+        )
+        b47 = PIMMoEBackend(
+            layer_idx=47, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+            pim_layer_group_size=48,
+        )
+        assert b0.diagnostics()["pim_layer_group_id"] == 0
+        assert b47.diagnostics()["pim_layer_group_id"] == 0
+
+    def test_speculative_preload_gptq_default_off(self, tmp_path):
+        """M-7 ships the GPTQ speculative preload path, but defaults
+        OFF because the current host_quantized_bridge.c static globals
+        make it crash under concurrent runtimes (see ADR-002 §15)."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+        )
+        assert backend.enable_speculative_preload_gptq is False
+        assert backend.diagnostics()["enable_speculative_preload_gptq"] is False
+
+    def test_speculative_preload_gptq_count_field_exists(self, tmp_path):
+        """Counter field must be present from construction so M-8
+        runs can check whether the warm-up actually fired."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+        )
+        diag = backend.diagnostics()
+        assert "speculative_preload_gptq_count" in diag
+        assert diag["speculative_preload_gptq_count"] == 0

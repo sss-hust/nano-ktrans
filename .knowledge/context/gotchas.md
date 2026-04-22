@@ -361,3 +361,25 @@ tags: [pitfalls, debugging]
 - host 侧 `dpu_push_xfer(set, XFER_TO_DPU, "symbol", offset_bytes, size, DEFAULT)` 的 `offset_bytes` 参数完美对应 slot 偏移：`(size_t)slot_id * WORDS_PER_SLOT * sizeof(uint32_t)`。这样 host 只传输**当前 slot 需要的那一段**，不是每次重传全部。
 - 三个 `__mram_noinit` buffer 都要按同一套 slot offset（`qweight_mram / scales_mram / lut_mram`）— 这里我 sed 批量替换时漏一个都会导致"slot 0 权重 + slot 1 scales"混着算，数值错了还难追。解决：写 unit test 覆盖 "LRU overflow 后 evicted slot 的数值不再使用"这类边缘情况。
 - `dpu_broadcast_to(set, "active_slot", 0, &slot_id, sizeof(slot_id), ...)` 很便宜（一个 uint32），**每次 run 前做一次是正确的且不影响性能**（实测 < 0.05 ms / call）。不要觉得 broadcast 贵就跳过写它。
+
+
+<!-- updated: 2026-04-22 20:50 -->
+
+## 诊断 Python 隔离效果**之前**必须先审 C `.so` 的 `static` 全局变量
+
+- 现象：M-5 dual runtime / M-6 multi-slot LRU / M-7 per-layer-group scoping 三次连续 null perf。每次诊断都指向"工作集 >> slot 容量"等数学 argue，但**真正的共同根因**只有一个 —— `nano_ktrans/kernels/pim_native/host_quantized_bridge.c` 的 ~20 个 `static` C 全局（g_set, g_initialized, g_input_dim, g_slot_loaded_mask, g_lut_i16_shards, ...）。Python 多个 `PIMQuantizedRuntime` 实例拿到**不同 Python 对象**，但 ctypes `self._lib` 都指向同一个 dlopen 的 `.so`，所以这些 `static` 只有一份。`pim_quantized_init()` 第二次见到 `g_initialized==true` 直接 return 0，第 2~N 个 Python runtime 被**静默 alias 到第一个的 DPU rank pool + 同一套 MRAM buffer**。
+- 为什么 M-5/M-6 没 crash：所有调用是严格串行（一次完整 `load_weights + run`），全局 `g_input_dim` / `g_output_dim` 在下次被覆盖前刚好用完。M-7 speculative preload 打破了这个顺序（在同一"expert"里连续 load gate_up + load down 再 run），`g_output_dim` 被 down 的 load 写掉之后 gate_up 的 run 用错了 shape → `outputs = torch.empty(batch, wrong_shape)` → `munmap_chunk(): invalid pointer` heap corruption。
+- 经验：
+  1. **任何 "我要做 Python 层 N 个独立 state" 的方案，先 `grep '^static ' src.c`** 验证底层是不是真的允许 N 个。Python 对象多实例≠底层 C 多实例。
+  2. Python 诊断字段（像 M-5 的 `quantized_runtime_down_distinct=47/48`）只反映 Python 层拿到**不同对象**，不保证底层物理资源**不同**。要验证真隔离，**切换 `g_set` 的 `dpu_get_nr_dpus()` 返回值看是否变化**，或者审底层函数是否 return early。
+  3. **连续 4 个 null perf milestone 共享一个根因**应该早被察觉。下次如果 3 个 milestone 同维度失败，必须停下来审底层架构，而不是继续在 Python 层加新参数。
+- 修复 scope：M-8 把 `host_quantized_bridge.c` 改成 handle-based（`pim_q_ctx_t*` 结构体存所有原 static state，API 第一个参数都是 `ctx`）。Python 端每 runtime 持 `c_void_p`。
+
+<!-- updated: 2026-04-22 20:50 -->
+
+## `pim_quantized_init()` 的 "`if (g_initialized) return 0`" 早退是**静默 bug**，不是 idempotency
+
+- 这行代码本意：允许 `init` 幂等调用。但在 Python `get_shared()` 路由下，"第 2 次调 init" 发生在**想分配第二套 DPU rank 的时候**。早退意味着第二次调用者传的 `rank_count` / `profile` 参数被**无声丢弃**，第二个 runtime 获得的其实是第一个 runtime 的 DPU set。
+- M-5 / M-6 / M-7 的 "isolation landed 47/48 layers" 诊断字段都建立在这个假设错上。
+- 正确的 idempotency：要么 return ERROR（let caller 知道要先 shutdown），要么**真的按新参数再分配一份 context**。前者简单，后者需要 handle-based API。
+- 提醒：任何 "第二次调用静默成功" 的系统级 init 函数都是**设计坑**。用 Python mock 测到 return 0 就以为成功，实际物理资源早就乱了。

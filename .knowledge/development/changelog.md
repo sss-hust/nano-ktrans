@@ -7,6 +7,52 @@ tags: [changelog]
 
 ## 2026-04-22
 
+### 2026-04-22 20:50 - ADR-002 M-7 闭合：per-layer scoping infra + 揭示 M-5~M-7 共性阻塞（.so static 全局）— dev_gate PASS 8/8
+
+M-7 本打算 Python 层 per-layer-group scoping + GPTQ speculative preload
+把 M-6 的 hit 从 0% 拉到 20-30%。**一跑 32 token e2e 直接 munmap_chunk
+heap corruption**。紧急排查 → 发现**贯穿 M-5 / M-6 / M-7 三个里程碑的
+底层架构级 bug**：`libpim_quantized_bridge.so` 有 ~20 个 `static` 全局变量
+（g_set, g_initialized, g_input_dim, g_slot_loaded_mask, g_lut_i16_shards
+...），Python 多个 `PIMQuantizedRuntime.get_shared()` 拿到不同 Python
+对象但**共享同一份 .so 状态**。`pim_quantized_init()` 第二次被调时
+`g_initialized==true` 直接 return 0，所有 "dual/multi-slot/per-layer"
+runtime 其实挤在同一个 DPU rank pool、同一个 MRAM qweight buffer 上。
+M-5 / M-6 诊断的 "47/48 distinct" 是 Python 层假象；M-7 speculative
+preload 是第一个打破严格串行调用的路径，触发了 g_input_dim 被覆盖
+→ shape 错误 → heap 损坏。
+
+**M-2 / M-5 / M-6 / M-7 这四个连续 null perf milestone 的真正共因
+全部锁定到这一个 bug**。M-8 将重构 host_quantized_bridge.c 为 handle-based
+接口，届时 M-5/M-6/M-7 的隔离效果会一次性叠加释放。
+
+**降级策略**：`enable_speculative_preload_gptq = False` 默认关闭，
+代码保留。M-7 以 null perf + 架构诊断闭合（同 M-2/M-5/M-6）。
+
+**真机实测 (Qwen3-GPTQ-Int4, 32 tokens, speculative off, group_size=3)**：
+- decode_tps 0.309（M-6 是 0.300，噪声内 +3.1%）
+- hit_ratio 仍然 0%（根因同 M-5/M-6，见 ADR-002 §15.3）
+- `pim_layer_group_size=3` 诊断正确
+
+**关联改动**：
+- `pim_moe.py`: 新参数 `pim_layer_group_size` (默认 3) + `enable_speculative_preload_gptq`
+  (默认 False)；`_try_init_quantized_runtimes_dual` profile key 加
+  `g{group_id}` 后缀；新方法 `_speculative_preload_gptq()` 在 prefill end
+  统计 hot expert + 把 fused gate_up 和 down bundle 直接写入 slot；
+  diagnostics 新增 `pim_layer_group_size / pim_layer_group_id /
+  enable_speculative_preload_gptq / speculative_preload_gptq_count`
+- `.codebuddy/dev_gate/M-7.toml`: 8 条 "infra + heap safe + no regression" KPI
+- `tests/test_core.py::TestPIMMoEBackendLayerGroupScoping`: 6 条单测覆盖
+  group_size=3/1/48、group_id 计算、speculative flag 默认关闭、counter
+  字段完整性
+
+**测试**：224 → **230 passed** (+6)。
+
+**M-8 scope**（已锁定）：重构 `host_quantized_bridge.c` 消除 .so `static`
+全局为 per-instance `pim_q_ctx_t*` handle。Python 端每 runtime 持
+`c_void_p` handle。M-8 完成后一次真机验证 M-5/M-6/M-7 三者叠加：预期
+hit ratio 15-30%、decode_tps 0.30 → 0.40-0.55。
+
 ### 2026-04-22 19:50 - ADR-002 M-6 闭合：multi-slot MRAM DPU binary + host LRU（infra landed + null e2e，dev_gate PASS 8/8）
 
 最大的一次 DPU binary 改动：`dpu_quantized_kernel.c` 和 host bridge

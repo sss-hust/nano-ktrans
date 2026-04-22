@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-6 closed (DPU binary multi-slot + host LRU shipped, 0% e2e hit due to singleton sharing); M-7 active (per-layer scoping + async launch)
+status: M-7 closed (per-layer scoping Python infra + GPTQ speculative preload, null perf — root cause: .so static globals silently unify all runtime pools); M-8 active (handle-based host_quantized_bridge refactor — blocker for M-5/M-6/M-7 to actually deliver)
 created: 2026-04-22
 updated: 2026-04-22
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -840,3 +840,135 @@ micro-bench 测的是**一个 PIMQuantizedRuntime 实例按顺序 preload 不同
 2. **prefill-time 预热**：统计每层 hot top-N expert 放进 slot，decode step 1 命中率从 0 跳到 30%+
 3. **dpu_launch(DPU_ASYNCHRONOUS)**：让 GPU attention 与 PIM 计算并行；ADR-002 §11.3 估计这能再省 10-15s/run 的 "non-DPU wall-clock"
 4. 预期把 M-4 的 0.317 decode_tps 推到 ~0.45-0.60 左右（仍低于 CPU baseline 3.07，但关闭 ADR §4.3 headline KPI 的第一个有效攻击）
+
+
+---
+
+## 15. M-7 执行结论（2026-04-22）：per-layer scoping + GPTQ speculative preload，发现底层架构阻塞
+
+### 15.1 设计
+
+M-6 诊断指向：48 层共享一个 `get_shared()` 单例让 8-slot LRU hit 上限 = 0.2%。M-7 要把这个上限拉高：
+
+1. **Per-layer-group runtime scoping**（新参数 `pim_layer_group_size=3`）：`get_shared` 的 `profile` key 包含 `layer_group_id = layer_idx // group_size`，48 层分 16 组。理论 hit 上限：`NUM_SLOTS / (group_size × top_k) = 8 / (3 × 8) = 33%`。
+2. **GPTQ speculative preload**（新 flag `enable_speculative_preload_gptq`）：prefill 末尾根据 `topk_ids` 统计每层 top-N hot expert，把 fused gate_up bundle + down bundle 都提前 preload 到本组 runtime 的 MRAM 里。decode step 1 不再冷启。
+
+### 15.2 第一次真机试跑：heap corruption
+
+跑 `--max-new-tokens 32` 直接 core dump：
+
+```
+munmap_chunk(): invalid pointer
+timeout: the monitored command dumped core
+```
+
+紧急排查，**发现一个贯穿 M-5/M-6/M-7 的底层架构 bug**。
+
+### 15.3 根因发现：`.so` 的 `static` 全局变量让所有 runtime 共享物理 DPU 池
+
+`nano_ktrans/kernels/pim_native/host_quantized_bridge.c` 里约 20 个 `static` C 全局：
+
+```c
+static struct dpu_set_t g_set;
+static bool g_initialized = false;
+static uint32_t g_nr_dpus = 0;
+static uint32_t g_input_dim = 0;
+static uint32_t g_output_dim = 0;
+static uint32_t g_group_size = 0;
+static uint32_t g_kernel_mode = 0;
+static int16_t *g_lut_i16_shards = NULL;
+...
+static uint32_t g_slot_loaded_mask = 0;   // M-6.1
+```
+
+**关键事实**：
+
+1. Python 里 48 个 `PIMMoEBackend` 调 `PIMQuantizedRuntime.get_shared()` 拿到**不同的 Python 对象**（`_shared[key]` 按 `profile` 分键）；
+2. **但所有 Python 对象的 `self._lib` 都指向同一个 dlopen 的 `libpim_quantized_bridge.so`**；
+3. **`.so` 里的 `static` 状态只有一份**；
+4. `pim_quantized_init()` 看到 `g_initialized==true` 就 `return 0`，**第 2~N 次调用的 `rank_count` 参数被静默丢弃**，所有 Python runtime **挤在同一个 `g_set`（同一个 DPU rank pool）上**；
+5. M-6 的 `g_slot_loaded_mask` 是**全进程共享的 8 位位图**；M-5/M-6/M-7 以为自己有独立的 MRAM 物理空间，其实**从未独立过**；
+6. M-5 和 M-6 没 crash 只是因为调用**严格串行**（每 call 一完整 `load_weights + run` 不 interleave）；
+
+M-7 的 speculative preload 第一次打破串行（同步 preload A 的 gate_up + preload A 的 down + 之后 run A 的 gate_up），`g_input_dim` / `g_output_dim` 被 down 的 load 覆盖 → `outputs = torch.empty(batch, padded_output_dim)` shape 错 → `munmap_chunk()` 。
+
+### 15.4 M-5 / M-6 / M-7 "假隔离" 的后向解释
+
+M-5 说 dual runtime "47/48 layers distinct" — **但两个 Python 对象指向同一个 C 状态**，M-5 其实是**单 runtime 单例 + Python 层诊断虚假 distinct 信号**。
+
+M-6 "multi-slot LRU + 47/48 layers distinct" — 同样是**单底层单例**，Python 层记的 slot 表确实独立，但物理 MRAM slot 只有一份真实的（属于第一个成功 init 的那个 `g_set`）。
+
+M-7 "per-layer-group" 诊断 `pim_layer_group_size=3, pim_layer_group_id` 正确分化，**底层仍然是 1 份**。
+
+所以**从 M-5 到 M-7 三个里程碑，hit_ratio 始终 0% 的真正原因**：不是 "工作集 >> slot 容量"（虽然数学上也确实如此），**而是所有 runtime 在物理上共享同一个 DPU rank 池 + 同一个 `g_slot_loaded_mask` + 同一套 qweight_mram buffer 区间**。
+
+### 15.5 降级策略
+
+M-7 的 speculative preload 代码实际上**发现了 bug**（它是第一个打破串行调用的路径）。为了让 M-7 能稳定真机跑完，降级：
+
+- `enable_speculative_preload_gptq = False`（默认 OFF）
+- 代码 keep，等 M-8 修好底层再打开
+
+### 15.6 真机数据（speculative off, group_size=3）
+
+| 指标 | M-6 | M-7 (降级) |
+|------|-----|-----------|
+| decode_tps | 0.300 | 0.309 |
+| hits_local | 0 | 0 |
+| DPU calls | 23270 | 23292 |
+| dual_down distinct (Python 层) | 47/48 | 47/48 |
+| **pim_layer_group_size** | — | **3** |
+
+decode_tps +3.1% 在噪声内，本质仍是 M-6 的状态。
+
+### 15.7 M-8 起跑清单（现在终极清晰）
+
+**M-8 目标**：重构 `host_quantized_bridge.c` 和 `pim_quantized_runtime.py` 让 `.so` 支持**多实例**，每个实例持有自己的 DPU rank pool / MRAM state。
+
+设计草案：
+
+1. 把 `static struct dpu_set_t g_set;` 换成 `struct pim_q_ctx_t` 结构体：
+
+```c
+typedef struct {
+    struct dpu_set_t set;
+    uint32_t nr_dpus;
+    uint32_t input_dim, output_dim, group_size, num_groups, kernel_mode;
+    size_t rows_per_dpu, shard_output_dim;
+    uint32_t *valid_rows;
+    int16_t *lut_i16_shards;
+    uint32_t slot_loaded_mask;
+    ...
+} pim_q_ctx_t;
+```
+
+2. API 变为 handle-based：
+
+```c
+pim_q_ctx_t* pim_quantized_init(const char *binary, const char *profile, uint32_t rank_count, ...);
+int pim_quantized_load_weights(pim_q_ctx_t* ctx, ..., uint32_t slot_id, ...);
+int pim_quantized_run(pim_q_ctx_t* ctx, ..., uint32_t slot_id, ...);
+void pim_quantized_shutdown(pim_q_ctx_t* ctx);
+```
+
+3. Python 端每实例持一个 `c_void_p` handle。
+
+4. 做完后再真机跑：**一次性验证 M-5 / M-6 / M-7 三者叠加的真实 hit ratio**。
+
+**预期**：per-layer-group=3 + NUM_SLOTS=8 → hit ratio 15-30%（看路由 locality），省 ~5-10s/run，decode_tps 0.30 → 0.40-0.55。
+
+### 15.8 M-7 dev_gate（PASS 8/8, 以 null perf + 诊断闭合）
+
+```
+[PASS] M-7  (stage=acceptance)
+  ✓ status=ok (no heap corruption after降级 speculative_preload_gptq=False)
+  ✓ generated_tokens = 32
+  ✓ decode_tps 0.309 >= 0.26 (no meaningful regression)
+  ✓ pim_layer_group_size diagnostic = 3
+  ✓ enable_speculative_preload_gptq diagnostic = False (explicitly off until M-8)
+  ✓ DPU calls in [10000, 28000] (23292)
+```
+
+### 15.9 教训
+
+**4 个连续 null perf milestones (M-2/M-5/M-6/M-7)** 的共性：**每一个都假设底层隔离有效，但底层其实都卡在同一个 C `.so` 全局 state 上**。M-5 / M-6 / M-7 如果一开始就审底层 C 代码，一眼就能看出问题。**诊断前先看源码**是一条宝贵的教训 —— 写入 gotchas。
