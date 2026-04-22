@@ -1414,39 +1414,55 @@ class TestDynamicScheduler:
         """Test that notify_expert_evicted is called when experts are demoted from GPU to PIM"""
         from safetensors.torch import save_file
         from nano_ktrans.layers.hybrid_moe import HybridMoE
-        from nano_ktrans.utils.context import reset_context, set_context, InferenceContext
+        from nano_ktrans.layers.expert_mlp import build_expert_module, load_expert_weights
         from nano_ktrans.utils.expert_runtime_state import ExpertResidency, ExpertResidencyPlan
         
         weight_path = tmp_path / "weights"
         weight_path.mkdir()
         save_file(
             {
-                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(8, 4),
-                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(4, 8),
-                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(8, 4),
-                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(8, 4),
-                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(4, 8),
-                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w1.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.0.w2.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.0.w3.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w1.weight": torch.randn(4, 8),
+                "model.layers.0.block_sparse_moe.experts.1.w2.weight": torch.randn(8, 4),
+                "model.layers.0.block_sparse_moe.experts.1.w3.weight": torch.randn(4, 8),
             },
             str(weight_path / "model.safetensors"),
         )
         
-        # Start with both experts on GPU
-        gpu_mask = torch.tensor([True, True], dtype=torch.bool)
+        # Keep one CPU expert so offload backend is actually initialized.
+        gpu_mask = torch.tensor([True, False], dtype=torch.bool)
         residency_plan = ExpertResidencyPlan.from_gpu_masks([gpu_mask])
         
         moe = HybridMoE(
-            layer_idx=0,
             num_experts=2,
-            expert_hidden_size=8,
-            expert_intermediate_size=4,
             top_k=2,
-            expert_key_template="model.layers.{layer_idx}.block_sparse_moe.experts.{expert_idx}",
-            expert_proj_names={"gate": "w1", "up": "w3", "down": "w2"},
+            hidden_size=8,
+            moe_intermediate_size=4,
+            gpu_experts=torch.nn.ModuleDict(),
+            gpu_experts_mask=gpu_mask.clone(),
+            layer_idx=0,
             weight_path=str(weight_path),
-            offload_backend_name="cpu",
+            offload_backend="cpu",
             residency_plan=residency_plan,
+            expert_key_template="model.layers.{layer}.block_sparse_moe.experts.{expert}.{proj}.weight",
+            expert_proj_names={"gate": "w1", "up": "w3", "down": "w2"},
+            expert_prefetch_workers=0,
         )
+
+        expert = build_expert_module(
+            hidden_size=8,
+            intermediate_size=4,
+            hidden_act="silu",
+            experts_are_packed=False,
+        )
+        load_expert_weights(
+            expert,
+            moe.materialization_manager.get_expert(0, 0),
+        )
+        expert.eval()
+        moe.gpu_experts["0"] = expert
         
         # Track calls to notify_expert_evicted
         notify_calls = []
@@ -1458,27 +1474,15 @@ class TestDynamicScheduler:
         
         moe.offload_backend.notify_expert_evicted = tracked_notify
         
-        # Update GPU mask to demote expert 1 to PIM
-        new_gpu_mask = torch.tensor([True, False], dtype=torch.bool)
-        moe.update_residency_plan(
-            ExpertResidencyPlan.from_gpu_masks([new_gpu_mask])
-        )
-        
-        # Trigger the migration by calling forward
-        set_context(InferenceContext(
-            token_idx=0,
-            batch_size=1,
-            sequence_length=4,
-            is_prefill=True,
-        ))
-        
-        hidden = torch.randn(4, 8)
-        moe.forward(hidden)
-        
-        # Verify that notify_expert_evicted was called for expert 1
-        reset_context()
-        evicted_experts = [idx for idx, src in notify_calls if idx == 1]
-        assert len(evicted_experts) > 0, f"Expected notify_expert_evicted to be called for expert 1, got calls: {notify_calls}"
+        demoted = moe._demote_expert_from_gpu(0, ExpertResidency.PIM)
+
+        assert demoted is True
+        assert "0" not in moe.gpu_experts
+        assert moe.gpu_experts_mask[0].item() is False
+
+        # Verify that notify_expert_evicted was called for expert 0
+        evicted_experts = [idx for idx, src in notify_calls if idx == 0]
+        assert len(evicted_experts) > 0, f"Expected notify_expert_evicted to be called for expert 0, got calls: {notify_calls}"
 
     def test_hybrid_moe_applies_decode_migration_plan(self, tmp_path):
         from safetensors.torch import save_file

@@ -469,3 +469,10 @@ tags: [changelog]
 
 - `kernel_mode=4` 现已补齐 `FIXED_BATCH_TILE` 编译期开关，允许在真实 DPU 上对 int8 fixed-point 路径做 batch-tile sweep，而无需手改 kernel 源码。
 - 在真实 `Qwen/Qwen3-30B-A3B-GPTQ-Int4` 上完成 `FIXED_BATCH_TILE=1/2/4/8` sweep：`down batch=4` 因 shape-gated fallback 基本维持在接近 CPU grouped 的水平，但 `gate batch=4/8` 没有出现稳定优于 CPU grouped 的 tile 配置；tile 主要改变常数项，尚不足以解决大输入维度下 `batch>1` 的核心瓶颈。
+
+<!-- updated: 2026-04-20 10:20 -->
+
+- 代码主线现已把 quantized PIM 路径正式并入 `PIMMoEBackend`：backend 会探测 GPTQ 权重、初始化 `PIMQuantizedRuntime`，并优先走 quantized DPU path；同时新增 `notify_expert_evicted()` 钩子，在 GPU→PIM demotion 时清理 DPU resident/cached weights。
+- 针对这轮更新执行了 targeted 回归：`tests/test_core.py + tests/test_quantized_ops.py + tests/test_pim_runtime.py` 当前结果为 `140 passed, 1 warning`。其间修复了新增测试里的两处 API 演进失配：
+  - 旧的 `InferenceContext` 用法改为当前 `set_context(...)`
+  - eviction 测试改为直接命中 `_demote_expert_from_gpu()`，并对齐现有 `HybridMoE` 构造签名与权重模板约定
