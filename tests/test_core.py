@@ -7322,3 +7322,239 @@ class TestExpertWeightLoaderCache:
         assert "old_key" not in second._key_to_file
         # Must have produced a distinct index dict, not reused the stale one.
         assert second._key_to_file is not first._key_to_file
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-3 — BackendCostModel tests
+# ----------------------------------------------------------------------
+
+
+def _make_dummy_safetensor(tmp_path, hidden_size, intermediate_size, num_experts):
+    from safetensors.torch import save_file
+    tensors = {}
+    for e in range(num_experts):
+        tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w1.weight"] = (
+            torch.randn(intermediate_size, hidden_size)
+        )
+        tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w3.weight"] = (
+            torch.randn(intermediate_size, hidden_size)
+        )
+        tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w2.weight"] = (
+            torch.randn(hidden_size, intermediate_size)
+        )
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+
+
+class TestBackendCostModel:
+    """Tests for nano_ktrans/scheduler/cost_model.py."""
+
+    def _make_model(self, **overrides):
+        from nano_ktrans.scheduler.cost_model import BackendCostModel
+        # Tiny hand-built table matching the sweep schema.
+        table = [
+            {"shape_name": "gate", "in_features": 2048, "out_features": 768,
+             "batch": 1, "rank_count": 1, "pim_seconds_avg": 0.002,
+             "cpu_grouped_seconds_avg": 0.006,
+             "pim_vs_cpu_grouped_ratio": 3.0},
+            {"shape_name": "gate", "in_features": 2048, "out_features": 768,
+             "batch": 1, "rank_count": 4, "pim_seconds_avg": 0.002,
+             "cpu_grouped_seconds_avg": 0.006,
+             "pim_vs_cpu_grouped_ratio": 3.0},
+            {"shape_name": "gate", "in_features": 2048, "out_features": 768,
+             "batch": 4, "rank_count": 1, "pim_seconds_avg": 0.010,
+             "cpu_grouped_seconds_avg": 0.008,
+             "pim_vs_cpu_grouped_ratio": 0.8},
+            {"shape_name": "gate", "in_features": 2048, "out_features": 768,
+             "batch": 4, "rank_count": 4, "pim_seconds_avg": 0.010,
+             "cpu_grouped_seconds_avg": 0.008,
+             "pim_vs_cpu_grouped_ratio": 0.8},
+            {"shape_name": "down", "in_features": 768, "out_features": 2048,
+             "batch": 1, "rank_count": 1, "pim_seconds_avg": 0.003,
+             "cpu_grouped_seconds_avg": 0.006,
+             "pim_vs_cpu_grouped_ratio": 2.0},
+            {"shape_name": "down", "in_features": 768, "out_features": 2048,
+             "batch": 4, "rank_count": 1, "pim_seconds_avg": 0.012,
+             "cpu_grouped_seconds_avg": 0.009,
+             "pim_vs_cpu_grouped_ratio": 0.75},
+        ]
+        return BackendCostModel(table=table, kernel_mode=4, **overrides)
+
+    def test_exact_cell_lookup(self):
+        model = self._make_model()
+        pim, cpu = model.estimate(shape_name="gate", batch=1, rank_count=1)
+        assert pim is not None and cpu is not None
+        assert pim.seconds == pytest.approx(0.002)
+        assert cpu.seconds == pytest.approx(0.006)
+        assert pim.source == "exact"
+
+    def test_decide_batch1_gate_goes_to_pim(self):
+        model = self._make_model()
+        d = model.decide(shape_name="gate", batch=1, rank_count=1)
+        assert d.backend == "pim"
+        assert d.pim_seconds == pytest.approx(0.002)
+        assert d.cpu_seconds == pytest.approx(0.006)
+
+    def test_decide_batch4_gate_goes_to_cpu(self):
+        model = self._make_model()
+        d = model.decide(shape_name="gate", batch=4, rank_count=1)
+        # pim=0.010, cpu=0.008 -> cpu wins.
+        assert d.backend == "cpu"
+
+    def test_decide_pim_unavailable_forces_cpu(self):
+        model = self._make_model()
+        d = model.decide(shape_name="gate", batch=1, rank_count=1,
+                         pim_available=False)
+        assert d.backend == "cpu"
+        assert d.reason == "pim_unavailable"
+        assert d.source == "rule"
+
+    def test_nearest_rank_fallback(self):
+        model = self._make_model()
+        pim, _cpu = model.estimate(shape_name="gate", batch=1, rank_count=8)
+        assert pim is not None
+        assert pim.source == "nearest_rank"
+
+    def test_nearest_batch_fallback(self):
+        model = self._make_model()
+        pim, _cpu = model.estimate(shape_name="gate", batch=2, rank_count=1)
+        assert pim is not None
+        assert pim.source == "nearest_batch"
+
+    def test_ema_update_shifts_prediction(self):
+        model = self._make_model(ema_alpha=0.5)
+        model.update(shape_name="gate", batch=1, rank_count=1,
+                     backend="pim", observed_seconds=0.008)
+        pim, _cpu = model.estimate(shape_name="gate", batch=1, rank_count=1)
+        # 0.5*0.002 + 0.5*0.008 = 0.005
+        assert pim.seconds == pytest.approx(0.005, rel=1e-6)
+
+    def test_stability_margin_prevents_thrashing(self):
+        model = self._make_model(stability_margin=1.5)
+        d1 = model.decide(shape_name="gate", batch=1, rank_count=1)
+        assert d1.backend == "pim"
+        model.update(shape_name="gate", batch=1, rank_count=1,
+                     backend="pim", observed_seconds=0.005)
+        d2 = model.decide(shape_name="gate", batch=1, rank_count=1)
+        assert d2.backend == "pim"
+
+    def test_from_json_roundtrip(self, tmp_path):
+        import json
+        from nano_ktrans.scheduler.cost_model import BackendCostModel
+        payload = {
+            "kernel_mode": 4,
+            "table": [
+                {"shape_name": "gate", "in_features": 2048,
+                 "out_features": 768, "batch": 1, "rank_count": 1,
+                 "pim_seconds_avg": 0.001,
+                 "cpu_grouped_seconds_avg": 0.010,
+                 "pim_vs_cpu_grouped_ratio": 10.0},
+            ],
+        }
+        path = tmp_path / "cm.json"
+        path.write_text(json.dumps(payload))
+        model = BackendCostModel.from_json(path)
+        d = model.decide(shape_name="gate", batch=1, rank_count=1)
+        assert d.backend == "pim"
+        diag = model.diagnostics()
+        assert diag["source_path"] == str(path)
+        assert diag["cell_count"] == 1
+        assert diag["kernel_mode"] == 4
+
+    def test_load_default_cost_model_from_baseline_file(self):
+        from nano_ktrans.scheduler.cost_model import load_default_cost_model
+        model = load_default_cost_model()
+        if model is None:
+            pytest.skip("Default baseline not present in this install")
+        diag = model.diagnostics()
+        assert diag["cell_count"] >= 30
+        assert diag["shape_count"] >= 1
+        assert diag["kernel_mode"] == 4
+        for shape in ("gate", "up", "down"):
+            d = model.decide(shape_name=shape, batch=1, rank_count=1)
+            assert d.backend in {"pim", "cpu"}
+
+    def test_decision_counters_accumulate(self):
+        model = self._make_model()
+        model.decide(shape_name="gate", batch=1, rank_count=1)
+        model.decide(shape_name="gate", batch=4, rank_count=1)
+        model.decide(shape_name="down", batch=1, rank_count=1)
+        assert model.decisions_pim == 2
+        assert model.decisions_cpu == 1
+
+
+class TestPIMMoEBackendCostModelIntegration:
+    """PIMMoEBackend must expose and wire up the cost model."""
+
+    def test_backend_ctor_loads_default_cost_model(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size = 64, 32
+        num_experts = 2
+        _make_dummy_safetensor(tmp_path, hidden_size, intermediate_size,
+                               num_experts)
+        backend = PIMMoEBackend(
+            layer_idx=0,
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path),
+            pim_execution_mode="shadow",
+        )
+        diag = backend.diagnostics()
+        assert "cost_model_enabled" in diag
+        assert diag["cost_model_routing_flag"] is True
+        assert "cost_model_decisions_pim" in diag
+        assert "cost_model_decisions_cpu" in diag
+
+    def test_backend_accepts_explicit_cost_model(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        from nano_ktrans.scheduler.cost_model import BackendCostModel
+        hidden_size, intermediate_size = 64, 32
+        num_experts = 2
+        _make_dummy_safetensor(tmp_path, hidden_size, intermediate_size,
+                               num_experts)
+        custom = BackendCostModel(
+            table=[
+                {"shape_name": "gate", "in_features": hidden_size,
+                 "out_features": intermediate_size, "batch": 1,
+                 "rank_count": 1, "pim_seconds_avg": 0.001,
+                 "cpu_grouped_seconds_avg": 0.002,
+                 "pim_vs_cpu_grouped_ratio": 2.0},
+            ],
+        )
+        backend = PIMMoEBackend(
+            layer_idx=0,
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path),
+            pim_execution_mode="shadow",
+            cost_model=custom,
+        )
+        assert backend.cost_model is custom
+        assert backend.enable_cost_model_routing is True
+
+    def test_backend_disable_cost_model_routing(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size = 64, 32
+        num_experts = 2
+        _make_dummy_safetensor(tmp_path, hidden_size, intermediate_size,
+                               num_experts)
+        backend = PIMMoEBackend(
+            layer_idx=0,
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path),
+            pim_execution_mode="shadow",
+            enable_cost_model_routing=False,
+        )
+        assert backend.cost_model is None
+        diag = backend.diagnostics()
+        assert diag["cost_model_enabled"] is False
+        assert diag["cost_model_routing_flag"] is False

@@ -1,5 +1,11 @@
 from .dynamic_expert_scheduler import DynamicExpertScheduler, SchedulerConfig
 from .diagnostics import summarize_offload_diagnostics, summarize_profile_sweep_results
+from .cost_model import (
+    BackendCostModel,
+    BackendDecision,
+    CostEstimate,
+    load_default_cost_model,
+)
 from .profiles import (
     SCHEDULER_PROFILE_BASELINE,
     SCHEDULER_PROFILE_EAGER,
@@ -15,6 +21,9 @@ from .profiles import (
 from nano_ktrans.kernels.migration_runtime import MigrationPipelineRuntime
 
 __all__ = [
+    "BackendCostModel",
+    "BackendDecision",
+    "CostEstimate",
     "DynamicExpertScheduler",
     "MigrationPipelineRuntime",
     "SchedulerConfig",
@@ -23,6 +32,7 @@ __all__ = [
     "SCHEDULER_PROFILE_NAMES",
     "SCHEDULER_PROFILE_OVERLAP_SAFE",
     "apply_scheduler_overrides",
+    "load_default_cost_model",
     "normalize_scheduler_profiles",
     "resolve_prepared_cache_budget",
     "resolve_prepared_controller_aggressiveness",

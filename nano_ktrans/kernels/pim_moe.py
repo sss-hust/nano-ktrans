@@ -12,6 +12,23 @@ from .pim_linear_runtime import PIMLinearRuntime
 from .pim_quantized_runtime import PIMQuantizedRuntime
 from nano_ktrans.utils.context import get_context
 
+# ADR-002 M-3: cost-model-driven backend routing.  Imported lazily at
+# use-time via ``_get_default_cost_model`` so shadow-mode backends that
+# never touch real DPUs don't pay the table load.
+_DEFAULT_COST_MODEL: Optional[object] = None
+
+
+def _get_default_cost_model():
+    global _DEFAULT_COST_MODEL
+    if _DEFAULT_COST_MODEL is not None:
+        return _DEFAULT_COST_MODEL
+    try:
+        from nano_ktrans.scheduler.cost_model import load_default_cost_model
+    except Exception:
+        return None
+    _DEFAULT_COST_MODEL = load_default_cost_model()
+    return _DEFAULT_COST_MODEL
+
 
 class PIMMoEBackend(CPUMoEBackend):
     """
@@ -49,6 +66,8 @@ class PIMMoEBackend(CPUMoEBackend):
         pim_kernel_variant: str = "linear",
         pim_prefill_policy: str = "cpu",
         pim_prefill_token_threshold: int = 8,
+        cost_model: Optional[object] = None,
+        enable_cost_model_routing: bool = True,
     ):
         self.pim_rank_count = pim_rank_count
         self.pim_bytes_per_dpu = pim_bytes_per_dpu
@@ -59,6 +78,20 @@ class PIMMoEBackend(CPUMoEBackend):
         self.pim_kernel_variant = pim_kernel_variant
         self.pim_prefill_policy = pim_prefill_policy
         self.pim_prefill_token_threshold = pim_prefill_token_threshold
+        # ADR-002 M-3: cost model.  If the caller didn't pass one and
+        # cost-model routing is enabled, load the M-2 baseline.  A
+        # failure to load (missing file, parse error) is soft: we fall
+        # back to the legacy threshold behaviour.
+        self.enable_cost_model_routing = bool(enable_cost_model_routing)
+        if cost_model is not None:
+            self.cost_model = cost_model
+        elif self.enable_cost_model_routing:
+            self.cost_model = _get_default_cost_model()
+        else:
+            self.cost_model = None
+        # Per-decision counters (for diagnostics).
+        self.cost_model_decisions_pim: int = 0
+        self.cost_model_decisions_cpu: int = 0
         self.visible_pim_ranks = count_visible_pim_ranks()
         self.offloaded_pairs = 0
         self.offloaded_tokens = 0
@@ -290,17 +323,73 @@ class PIMMoEBackend(CPUMoEBackend):
         device = hidden_states.device
         context = get_context()
 
-        if context.is_prefill:
-            if self.pim_prefill_policy == "cpu":
-                self._record_fallback("prefill_force_cpu")
+        # ADR-002 M-3: cost-model-driven layer-level gate.
+        #
+        # The previous logic was a trio of hardcoded knobs
+        # (``pim_prefill_policy``, ``pim_prefill_token_threshold``,
+        # ``pim_max_batch_tokens``) that approximated "only trust PIM at
+        # batch=1".  M-2 produced 120 real cells showing exactly which
+        # (shape, batch, rank) combinations are faster on PIM vs CPU
+        # grouped; we now query that table directly.
+        #
+        # Gate decision rule:
+        #   * If the cost model is unavailable OR cost-model routing is
+        #     disabled, keep the legacy threshold path (back-compat).
+        #   * Otherwise, ask the cost model for each of the three expert
+        #     projection shapes (gate/up/down).  If the model picks CPU
+        #     for the majority, return False (drop to CPU-AMX fallback).
+        #     If it picks PIM for at least one projection, go through
+        #     the existing per-expert loop — the per-expert code already
+        #     handles fine-grained dispatch (quantized / fused / linear /
+        #     cpu fallback) so we don't need to re-route here.
+        use_cost_model = (
+            self.cost_model is not None
+            and self.enable_cost_model_routing
+            and self.is_gptq  # M-2 baseline only covers GPTQ quantized experts
+        )
+        if use_cost_model:
+            decisions = []
+            for shape_name in ("gate", "up", "down"):
+                try:
+                    decision = self.cost_model.decide(
+                        shape_name=shape_name,
+                        batch=batch_size,
+                        rank_count=self.pim_rank_count,
+                        is_prefill=context.is_prefill,
+                        pim_available=True,
+                    )
+                except Exception:
+                    decision = None
+                decisions.append(decision)
+            picks = [
+                d.backend for d in decisions if d is not None and d.backend in ("pim", "cpu")
+            ]
+            pim_votes = sum(1 for p in picks if p == "pim")
+            cpu_votes = sum(1 for p in picks if p == "cpu")
+            if picks and cpu_votes > pim_votes:
+                # Majority of projections predicted cheaper on CPU — drop
+                # to CPU-AMX/grouped entirely.
+                self._record_fallback("cost_model_prefers_cpu")
+                self.cost_model_decisions_cpu += 1
                 return False
-            if batch_size > self.pim_prefill_token_threshold:
-                self._record_fallback("prefill_batch_too_large")
-                return False
+            # Else PIM wins (or tied) — fall through and execute per-expert
+            # loop.  Record the decision.
+            self.cost_model_decisions_pim += 1
+        else:
+            # Legacy hard-threshold path (pre-M-3).  Preserved so
+            # production deployments that predate the cost model still
+            # run deterministically.
+            if context.is_prefill:
+                if self.pim_prefill_policy == "cpu":
+                    self._record_fallback("prefill_force_cpu")
+                    return False
+                if batch_size > self.pim_prefill_token_threshold:
+                    self._record_fallback("prefill_batch_too_large")
+                    return False
 
-        if batch_size > self.pim_max_batch_tokens:
-            self._record_fallback("batch_too_large")
-            return False
+            if batch_size > self.pim_max_batch_tokens:
+                self._record_fallback("batch_too_large")
+                return False
 
         flat_cpu = flat.to("cpu", dtype=torch.float32)
         topk_ids_cpu = topk_ids.to("cpu", dtype=torch.long)
@@ -479,6 +568,18 @@ class PIMMoEBackend(CPUMoEBackend):
                 "pim_kernel_variant": self.pim_kernel_variant,
                 "pim_prefill_policy": self.pim_prefill_policy,
                 "pim_prefill_token_threshold": self.pim_prefill_token_threshold,
+                # ADR-002 M-3: cost-model routing diagnostics.
+                "cost_model_enabled": (
+                    self.cost_model is not None and self.enable_cost_model_routing
+                ),
+                "cost_model_routing_flag": self.enable_cost_model_routing,
+                "cost_model_decisions_pim": self.cost_model_decisions_pim,
+                "cost_model_decisions_cpu": self.cost_model_decisions_cpu,
+                "cost_model_state": (
+                    self.cost_model.diagnostics()
+                    if (self.cost_model is not None and hasattr(self.cost_model, "diagnostics"))
+                    else None
+                ),
                 "offloaded_pairs": self.offloaded_pairs,
                 "offloaded_tokens": self.offloaded_tokens,
                 "real_dpu_linear_calls": self.real_dpu_linear_calls,

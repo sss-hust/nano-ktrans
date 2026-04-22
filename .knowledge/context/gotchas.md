@@ -248,3 +248,29 @@ tags: [pitfalls, debugging]
   3. **负结果也要完整落地并 benchmark**，不是只写个伪代码就下结论。这次 M-2 的 120 cell 真机数据 + bit-exact correctness 验证本身就是论文素材。
   4. **DPU kernel 新增大 stack 局部变量（>= ~512B）前务必先算 `STACK_SIZE_DEFAULT`**。本次 mode=7 加 `w0_block[64]+w1_block[64]+bp_cache[8]` ≈ 592B 直接把栈顶爆，全部 DPU `in fault`。修复是改用 `mem_alloc` 从 WRAM heap 分配。
 - 参考：`ADR-002 §10`、`dpu_quantized_kernel.c::kernel_mode == 7` 的长注释块、`.codebuddy/dev_gate/M-2.toml` 的 KPI rationale。
+
+
+<!-- updated: 2026-04-22 17:30 -->
+
+## operator-only sweep 和 e2e decode 成本**不可同日而语**
+
+- 现象：M-2 sweep 显示 PIM mode=4 `batch=1` 比 CPU grouped 快 2-3×；实装 cost-model 路由后 e2e decode 反而慢 13×（`decode_tps=0.228` vs `cpu=3.068`）。
+- 根因：sweep 只测 "单算子 + weight 已 preload" 的稳态；e2e decode 每层每 step 都要付：
+  1. GPU→CPU 同步拷贝（`hidden_states.to("cpu")`, `topk_ids.to("cpu", long)`）
+  2. Python glue（`torch.where` + `index_add_`）
+  3. per-step expert 切换的 `preload()` lookup + host pad copy
+  4. 同步 `dpu_launch(DPU_SYNCHRONOUS)`，GPU attention 无法与 DPU 并行
+- 合计 per-layer 实测 ~91ms（sweep 预测 ~2ms），~45× 加成全来自 orchestration，不是 kernel。
+- 经验：**任何把 operator-only 数字外推到 e2e TPS 的路线图都要显式标注 overlap/async 假设**。M-3 cost model 对"决策对不对"有效，但"决策的收益落不落得下来"还要 M-4 async submit + GPU/PIM overlap 才能兑现。
+
+<!-- updated: 2026-04-22 17:30 -->
+
+## CPU baseline 如果输出 zeros，所有 "PIM vs CPU" TPS 对比都是假的
+
+- 现象：`cuda_cpu_offload` 跑 GPTQ checkpoint 时 32-token decode 仅 4.17s（~7.7 tok/s）— 看起来 CPU 非常强；但 output_text 是完全乱码。
+- 根因：`CPUMoEBackend.submit_forward` 在 `is_gptq and cpu_infer is None` 时写 `_fallback_output = torch.zeros_like(hidden_states)` 直接 return（M-1 为避免测试崩而加），decode 完全 no-op，TPS 只反映 GPU attention + logits + sampling，**不反映 MoE expert 计算**。
+- 修复：`CPUMoEBackend._compute_expert_output_cpu_gptq(states, cpu_slot)` 调 `cpu_w4a32_matvec` 真算 CPU grouped W4A32；`submit_forward` 只有在子类已填 shape-matching `_fallback_output` 时才认为子类处理过，否则自己跑这条新路径。修后同样 prompt+32 token decode 跳到 10.43s（3.07 tok/s，**符合真实 W4A32 grouped 成本**）。
+- 经验：
+  1. **永远不要让 "fallback output = zeros" 看起来像正常执行路径**。至少 log 一个 warning 或标记 `computed=False` diagnostic。
+  2. **任何 KPI 对比 baseline 要先单独验证 "baseline 真的在算"**：检查 output_text 合理性 + 检查 decode_seconds 是否与 model size 数量级一致（30B 模型 decode 不可能 < 1s/token）。
+  3. dev_gate 现在有一条显式反回归规则：`decode_seconds >= 5.0`（32 token），防止 zeros-output 类 bug 混过 CI。

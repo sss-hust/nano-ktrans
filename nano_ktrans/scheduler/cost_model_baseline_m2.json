@@ -1,0 +1,607 @@
+{
+  "source": "benchmarks/results/pim_shape_sweep_M2_tmac.json",
+  "kernel_mode": 4,
+  "note": "PIM data is kernel_mode=4 only; ADR-002 \u00a710 established kernel_mode=7 as a negative result.  CPU baseline is the grouped W4A32 reference on the same hardware.",
+  "table": [
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 1,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.0023618499748408795,
+      "cpu_grouped_seconds_avg": 0.0071264364756643776,
+      "pim_vs_cpu_grouped_ratio": 3.01731123973888
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 1,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.002150232531130314,
+      "cpu_grouped_seconds_avg": 0.0071264364756643776,
+      "pim_vs_cpu_grouped_ratio": 3.3142631657229273
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 1,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.0021819953806698324,
+      "cpu_grouped_seconds_avg": 0.0071264364756643776,
+      "pim_vs_cpu_grouped_ratio": 3.266018131292603
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 1,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.0021509751677513123,
+      "cpu_grouped_seconds_avg": 0.0071264364756643776,
+      "pim_vs_cpu_grouped_ratio": 3.3131188971904995
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 1,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.0021494535729289057,
+      "cpu_grouped_seconds_avg": 0.0071264364756643776,
+      "pim_vs_cpu_grouped_ratio": 3.315464248875911
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 2,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.004064694419503212,
+      "cpu_grouped_seconds_avg": 0.00824455711990595,
+      "pim_vs_cpu_grouped_ratio": 2.0283338103713096
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 2,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.004090947471559048,
+      "cpu_grouped_seconds_avg": 0.00824455711990595,
+      "pim_vs_cpu_grouped_ratio": 2.015317277286861
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 2,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.0040977718308568,
+      "cpu_grouped_seconds_avg": 0.00824455711990595,
+      "pim_vs_cpu_grouped_ratio": 2.0119610022752537
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 2,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.004058886226266623,
+      "cpu_grouped_seconds_avg": 0.00824455711990595,
+      "pim_vs_cpu_grouped_ratio": 2.0312363195972902
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 2,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.00410089623183012,
+      "cpu_grouped_seconds_avg": 0.00824455711990595,
+      "pim_vs_cpu_grouped_ratio": 2.0104281244460127
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 4,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.0072097907774150375,
+      "cpu_grouped_seconds_avg": 0.006957736518234015,
+      "pim_vs_cpu_grouped_ratio": 0.9650400036613277
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 4,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.006994480732828379,
+      "cpu_grouped_seconds_avg": 0.006957736518234015,
+      "pim_vs_cpu_grouped_ratio": 0.9947466844219177
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 4,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.006984203867614269,
+      "cpu_grouped_seconds_avg": 0.006957736518234015,
+      "pim_vs_cpu_grouped_ratio": 0.9962103985104181
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 4,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.006988809537142515,
+      "cpu_grouped_seconds_avg": 0.006957736518234015,
+      "pim_vs_cpu_grouped_ratio": 0.9955538895797116
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 4,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.007012921944260597,
+      "cpu_grouped_seconds_avg": 0.006957736518234015,
+      "pim_vs_cpu_grouped_ratio": 0.9921308940174721
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 8,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.013844876177608966,
+      "cpu_grouped_seconds_avg": 0.008502388838678598,
+      "pim_vs_cpu_grouped_ratio": 0.6141180845249694
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 8,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.013755584880709649,
+      "cpu_grouped_seconds_avg": 0.008502388838678598,
+      "pim_vs_cpu_grouped_ratio": 0.618104494458978
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 8,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.013988523744046688,
+      "cpu_grouped_seconds_avg": 0.008502388838678598,
+      "pim_vs_cpu_grouped_ratio": 0.6078117315486626
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 8,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.013924156874418258,
+      "cpu_grouped_seconds_avg": 0.008502388838678598,
+      "pim_vs_cpu_grouped_ratio": 0.6106214484195707
+    },
+    {
+      "shape_name": "gate",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 8,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.01442965269088745,
+      "cpu_grouped_seconds_avg": 0.008502388838678598,
+      "pim_vs_cpu_grouped_ratio": 0.5892303176533132
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 1,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.0022615784779191016,
+      "cpu_grouped_seconds_avg": 0.006502948515117168,
+      "pim_vs_cpu_grouped_ratio": 2.8754025467648545
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 1,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.002468705642968416,
+      "cpu_grouped_seconds_avg": 0.006502948515117168,
+      "pim_vs_cpu_grouped_ratio": 2.634153056537719
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 1,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.00243468601256609,
+      "cpu_grouped_seconds_avg": 0.006502948515117168,
+      "pim_vs_cpu_grouped_ratio": 2.670959820508126
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 1,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.0024323821067810058,
+      "cpu_grouped_seconds_avg": 0.006502948515117168,
+      "pim_vs_cpu_grouped_ratio": 2.6734897025381903
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 1,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.0022223769687116147,
+      "cpu_grouped_seconds_avg": 0.006502948515117168,
+      "pim_vs_cpu_grouped_ratio": 2.9261230685301522
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 2,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.004286535177379846,
+      "cpu_grouped_seconds_avg": 0.008341273665428162,
+      "pim_vs_cpu_grouped_ratio": 1.94592446352599
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 2,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.004160020966082811,
+      "cpu_grouped_seconds_avg": 0.008341273665428162,
+      "pim_vs_cpu_grouped_ratio": 2.0051037563117218
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 2,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.004152260255068541,
+      "cpu_grouped_seconds_avg": 0.008341273665428162,
+      "pim_vs_cpu_grouped_ratio": 2.0088513611944765
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 2,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.004143446963280439,
+      "cpu_grouped_seconds_avg": 0.008341273665428162,
+      "pim_vs_cpu_grouped_ratio": 2.0131242753555676
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 2,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.004144558776170015,
+      "cpu_grouped_seconds_avg": 0.008341273665428162,
+      "pim_vs_cpu_grouped_ratio": 2.0125842377692926
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 4,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.007215981930494308,
+      "cpu_grouped_seconds_avg": 0.006091110687702894,
+      "pim_vs_cpu_grouped_ratio": 0.8441139052693889
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 4,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.007065638434141874,
+      "cpu_grouped_seconds_avg": 0.006091110687702894,
+      "pim_vs_cpu_grouped_ratio": 0.8620750615075399
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 4,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.007021644059568644,
+      "cpu_grouped_seconds_avg": 0.006091110687702894,
+      "pim_vs_cpu_grouped_ratio": 0.8674764251831195
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 4,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.007076982967555523,
+      "cpu_grouped_seconds_avg": 0.006091110687702894,
+      "pim_vs_cpu_grouped_ratio": 0.8606931393826484
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 4,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.007018822617828846,
+      "cpu_grouped_seconds_avg": 0.006091110687702894,
+      "pim_vs_cpu_grouped_ratio": 0.8678251352627965
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 8,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.013707878720015287,
+      "cpu_grouped_seconds_avg": 0.008343781623989344,
+      "pim_vs_cpu_grouped_ratio": 0.6086851068944998
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 8,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.01413841750472784,
+      "cpu_grouped_seconds_avg": 0.008343781623989344,
+      "pim_vs_cpu_grouped_ratio": 0.5901496133636747
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 8,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.014148437324911356,
+      "cpu_grouped_seconds_avg": 0.008343781623989344,
+      "pim_vs_cpu_grouped_ratio": 0.5897316737091756
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 8,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.01379337850958109,
+      "cpu_grouped_seconds_avg": 0.008343781623989344,
+      "pim_vs_cpu_grouped_ratio": 0.6049121046155318
+    },
+    {
+      "shape_name": "up",
+      "in_features": 2048,
+      "out_features": 768,
+      "batch": 8,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.014338583033531905,
+      "cpu_grouped_seconds_avg": 0.008343781623989344,
+      "pim_vs_cpu_grouped_ratio": 0.581911169637666
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 1,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.0013954871334135532,
+      "cpu_grouped_seconds_avg": 0.002715886663645506,
+      "pim_vs_cpu_grouped_ratio": 1.946192550698819
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 1,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.0014297984540462493,
+      "cpu_grouped_seconds_avg": 0.002715886663645506,
+      "pim_vs_cpu_grouped_ratio": 1.8994891594404089
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 1,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.0013807236216962337,
+      "cpu_grouped_seconds_avg": 0.002715886663645506,
+      "pim_vs_cpu_grouped_ratio": 1.967002389883799
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 1,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.0013564325869083404,
+      "cpu_grouped_seconds_avg": 0.002715886663645506,
+      "pim_vs_cpu_grouped_ratio": 2.0022275267182366
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 1,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.001350945606827736,
+      "cpu_grouped_seconds_avg": 0.002715886663645506,
+      "pim_vs_cpu_grouped_ratio": 2.0103597435154312
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 2,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.0023069560527801515,
+      "cpu_grouped_seconds_avg": 0.002962484862655401,
+      "pim_vs_cpu_grouped_ratio": 1.2841531415760004
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 2,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.0023060936480760576,
+      "cpu_grouped_seconds_avg": 0.002962484862655401,
+      "pim_vs_cpu_grouped_ratio": 1.2846333734655406
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 2,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.002328365296125412,
+      "cpu_grouped_seconds_avg": 0.002962484862655401,
+      "pim_vs_cpu_grouped_ratio": 1.2723453951084116
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 2,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.0023455747403204443,
+      "cpu_grouped_seconds_avg": 0.002962484862655401,
+      "pim_vs_cpu_grouped_ratio": 1.263010217380955
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 2,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.0023334270343184473,
+      "cpu_grouped_seconds_avg": 0.002962484862655401,
+      "pim_vs_cpu_grouped_ratio": 1.2695853862517241
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 4,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.004257274139672518,
+      "cpu_grouped_seconds_avg": 0.0028165655210614206,
+      "pim_vs_cpu_grouped_ratio": 0.6615889483870727
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 4,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.004425610229372978,
+      "cpu_grouped_seconds_avg": 0.0028165655210614206,
+      "pim_vs_cpu_grouped_ratio": 0.6364242161154966
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 4,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.004270466044545174,
+      "cpu_grouped_seconds_avg": 0.0028165655210614206,
+      "pim_vs_cpu_grouped_ratio": 0.6595452326940113
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 4,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.004440098349004984,
+      "cpu_grouped_seconds_avg": 0.0028165655210614206,
+      "pim_vs_cpu_grouped_ratio": 0.6343475526150466
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 4,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.004417939856648445,
+      "cpu_grouped_seconds_avg": 0.0028165655210614206,
+      "pim_vs_cpu_grouped_ratio": 0.6375291679950879
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 8,
+      "rank_count": 1,
+      "pim_seconds_avg": 0.00810347255319357,
+      "cpu_grouped_seconds_avg": 0.0034094688482582567,
+      "pim_vs_cpu_grouped_ratio": 0.42074170374213077
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 8,
+      "rank_count": 4,
+      "pim_seconds_avg": 0.008098848909139634,
+      "cpu_grouped_seconds_avg": 0.0034094688482582567,
+      "pim_vs_cpu_grouped_ratio": 0.42098190576325434
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 8,
+      "rank_count": 8,
+      "pim_seconds_avg": 0.008086813054978848,
+      "cpu_grouped_seconds_avg": 0.0034094688482582567,
+      "pim_vs_cpu_grouped_ratio": 0.4216084661632103
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 8,
+      "rank_count": 16,
+      "pim_seconds_avg": 0.008115519396960735,
+      "cpu_grouped_seconds_avg": 0.0034094688482582567,
+      "pim_vs_cpu_grouped_ratio": 0.4201171461108335
+    },
+    {
+      "shape_name": "down",
+      "in_features": 768,
+      "out_features": 2048,
+      "batch": 8,
+      "rank_count": 32,
+      "pim_seconds_avg": 0.008069473411887884,
+      "cpu_grouped_seconds_avg": 0.0034094688482582567,
+      "pim_vs_cpu_grouped_ratio": 0.42251441627348996
+    }
+  ]
+}
