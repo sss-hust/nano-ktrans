@@ -6,7 +6,7 @@ updated: 2026-04-22
 
 # nano-ktrans
 
-> 一个面向学习和实验的 Hybrid MoE 推理框架。当前已打通 CPU、`cuda_cpu_offload` 和实验性真实 DPU `pim` backend；主目标是让非专家层常驻 GPU、专家在 GPU/PIM 间动态迁移。**ADR-002 M-1 / M-2 / M-3 / M-4 已在真机 Qwen3-30B-A3B-GPTQ-Int4 上全部关闭**（`dev_gate check` = 全 PASS，共 34 条 acceptance 规则）。**M-4** 落地 fused gate+up：host 端把一个 expert 的 gate 和 up W4A32 权重沿 row 轴 concat，一次 DPU launch 同时算出两者，DPU binary 零改动。真机 decode TPS **0.228 → 0.317 (+39.2%)**，DPU 调用 −33.4%，数值 bit-exact。M-2 的真 T-MAC `kernel_mode=7` 被锁定为 publishable 负结果（ADR-002 §10）。M-3 的 `BackendCostModel` 数据驱动路由让 prefill 比 CPU baseline 快 13.3×，decode 因仍是同步 DPU launch 还差 CPU ~9.7×，留给 **M-5**（async + overlap + batched preload）。M-3 还顺带修了 M-1 遗留的 `CPUMoEBackend` 在 GPTQ + 无-AMX 时写 zeros 的假 baseline 回归。`pytest tests` 现为 **213 passed** (+27 新增单测覆盖 cost_model、dev_gate 扩展、concat prep)。
+> 一个面向学习和实验的 Hybrid MoE 推理框架。当前已打通 CPU、`cuda_cpu_offload` 和实验性真实 DPU `pim` backend；主目标是让非专家层常驻 GPU、专家在 GPU/PIM 间动态迁移。**ADR-002 M-1 ~ M-5 已在真机 Qwen3-30B-A3B-GPTQ-Int4 上全部关闭**（`dev_gate check` = 全 PASS，共 41 条 acceptance 规则）。**M-5** 把 `PIMQuantizedRuntime` 拆成 dual runtime（gate_up + down 各占独立 DPU rank pool），47/48 层成功 landed，但 e2e decode_tps 0.309 vs M-4 0.317 噪声内持平 —— 作为 publishable null result 闭合，因为 Qwen3 top_k=8 的跨-expert 工作集 ≫ 2-slot 容量。Micro-bench 精确定位 preload miss 成本 = **0.96 ms/call 纯 DPU DMA**（非 Python），锁定 M-6 的确切预算。**M-4** 的 fused gate+up 仍是最大单点胜利（DPU 调用 −33.4%，decode_tps +39.2%，bit-exact）。**M-3** 的 `BackendCostModel` 让 prefill 比 cuda_cpu_offload 快 13.3×。**M-2** 的真 T-MAC `kernel_mode=7` 是 publishable 负结果（ADR-002 §10）。decode 仍差 CPU baseline ~9.9×（ratio 0.101×），M-6 要改 DPU binary MRAM 布局 + 接 `dpu_launch(DPU_ASYNCHRONOUS)` 才能进一步赢。`pytest tests` 现为 **217 passed** (+31 新单测覆盖 cost_model / dev_gate 扩展 / concat prep / dual runtime)。
 
 ## 技术栈
 

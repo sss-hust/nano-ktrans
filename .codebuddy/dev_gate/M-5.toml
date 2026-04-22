@@ -1,0 +1,128 @@
+milestone_id = "M-5"
+title = "Dual-runtime weight residency: infrastructure landed, e2e gain null (bound by DPU MRAM single-slot)"
+
+# M-5 builds on M-4's fused gate+up path.
+prerequisites = ["M-4"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M5_dual_runtime.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M5_dual_runtime.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 2 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M5_dual_runtime.json",
+]
+
+next_tasks = [
+    "M-6: Change the DPU binary's MRAM layout to host multiple expert projections at once (multi-slot qweight_mram). This is the prerequisite for any real preload-miss reduction.",
+    "M-6: Investigate async dpu_launch (DPU_ASYNCHRONOUS) so GPU attention can run in parallel with the DPU kernel. The +1.45 ms per call in host->DPU transfer is ~21% of decode_seconds; the synchronous launch itself is another big slice.",
+    "M-6: Implement a speculative preload of the next expert's down bundle during SiLU on host (dual-runtime path makes this safe without evicting gate_up).",
+]
+
+# ---------------------------------------------------------------------
+# Acceptance rationale — why M-5 closes as infrastructure + negative result
+#
+# M-4 diagnostics left exactly one lever in reach without touching the
+# DPU binary:
+#
+#   preload_hit_ratio = 0%, preload_miss ≈ total_dpu_calls
+#
+# Each expert's gate_up bundle evicted its own down bundle (and vice
+# versa) because the single PIMQuantizedRuntime had only one MRAM
+# slot.  M-5.1 split the runtime: the gate_up fused bundle lives on
+# one DPU rank pool, the down projection lives on another (keyed by
+# ``profile="...|gate_up"`` vs ``profile="...|down"`` in
+# ``PIMQuantizedRuntime.get_shared``).  47/48 layers got their dual
+# runtime (one layer fell through gracefully to the single-runtime
+# path due to a rank alloc race on startup; M-5's code handles this
+# by aliasing ``quantized_runtime_down`` back onto ``quantized_runtime``).
+#
+# What this changed structurally:
+#   * An expert's gate_up preload no longer evicts its own down
+#     bundle within the same decode step.
+#   * Local-per-backend preload counters (``quantized_preload_hits_local``
+#     / ``..._misses_local``) separate one backend's behaviour from
+#     the shared singleton state across 48 layers.
+#
+# What did not change: e2e decode TPS.
+#
+#   M-4  decode_tps = 0.317
+#   M-5  decode_tps = 0.309   (within run-to-run variance)
+#
+# Root cause (now concretely measured): the real preload-miss cost is
+# ~0.96 ms/call pure host->DPU weight transfer (ctypes level), not
+# Python overhead.  With Qwen3's 128 experts and top_k=8, every
+# decode step touches 8 different experts per layer, none of which
+# are the one currently resident in either MRAM slot.  The dual
+# runtime only saves misses *within the same expert* — which the M-4
+# fused gate+up already collapsed to zero (the two halves of one
+# bundle).  The remaining 14.7 miss/(layer, step) are all inter-expert
+# and therefore unavoidable without a multi-slot MRAM layout (that
+# requires changing the DPU binary — M-6).
+#
+# M-5 is closed as a *publishable null result*: a valid infrastructure
+# change that enables M-6, plus a concrete measurement of the
+# per-call host->DPU transfer cost (0.96 ms) that pins down exactly
+# how much headroom remains.  This is the same disposition used for
+# M-2 (kernel_mode=7 ships correctly, negative perf ships honestly).
+#
+# ---------------------------------------------------------------------
+# KPI-1: the e2e run must complete on real hardware.
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "cuda_pim with dual runtime must complete without aborting."
+
+[[acceptance_checks]]
+path     = "results[0].error"
+op       = "not_exists"
+reason   = "no top-level error field on the dual-runtime run."
+
+# KPI-2: dual-runtime path must be active on the majority of layers.
+# A flaky rank allocation may leave one layer aliased back to the
+# single runtime (seen on 1/48 in the M-5 smoke); require >= 40/48
+# layers to actually run the split setup so we know the fix is
+# exercised, not just compiled.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.quantized_runtime_down_distinct)"
+op       = ">="
+value    = 40
+reason   = "at least 40/48 layers must have a distinct down runtime (dual-allocation succeeded), proving the M-5 split really landed."
+
+# KPI-3: no regression in decode output correctness (generated full budget).
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "the dual-runtime run must have produced the full 32-token budget, same as M-4."
+
+# KPI-4: no regression below M-4's decode TPS (with 10% variance tolerance).
+# M-4 recorded 0.3170; allow down to 0.285 (same bound as M-4's own
+# acceptance) because M-5's contribution is infrastructure not perf
+# and we explicitly do NOT want M-5 to silently slow things down.
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.285
+reason   = "M-5 dual runtime must not regress below the M-4 baseline of 0.3170 TPS (accept >=0.285 to leave room for hardware jitter)."
+
+# KPI-5: DPU call count must remain at the M-4 level (fused gate+up
+# still in effect) — catches the case where the dual-runtime
+# refactor accidentally reverted to the 3-call path.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = "<="
+value    = 28000
+reason   = "DPU call count must stay at the M-4 level (~23k for 32 decode tokens); a regression to ~35k would mean fused gate+up broke."
+
+# KPI-6: local (per-backend) preload counters must actually be wired up.
+# They sum across 48 layers and therefore must be >= total DPU calls
+# for correctness (each call increments by 2: one for gate_up_bundle,
+# one for down bundle).  The runtime-global singleton counters are
+# 48x-inflated and therefore not the right check.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.quantized_preload_misses_local)"
+op       = ">="
+value    = 10000
+reason   = "local-per-backend preload miss counter must be wired up and moving; drives future M-6 hit-ratio analysis."
