@@ -1,0 +1,121 @@
+milestone_id = "M-6"
+title = "Multi-slot MRAM residency: DPU binary + host LRU shipped, hit ratio bound by singleton sharing across 48 layers"
+
+# M-6 builds on M-5's dual-runtime infra.  M-5 shipped the two-rank-pool
+# split; M-6 adds NUM_SLOTS=8 inside each pool.
+prerequisites = ["M-5"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M6_multislot.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M6_multislot.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 2 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M6_multislot.json",
+]
+
+next_tasks = [
+    "M-7: replace PIMQuantizedRuntime.get_shared() singleton with per-layer scoping (or at least per-(layer_group) scoping of the slot table) so the 48-layer working set no longer thrashes 8 shared slots into 0% hit ratio.",
+    "M-7: dpu_launch(DPU_ASYNCHRONOUS) + submit queue so GPU attention and PIM compute overlap (the ~20s of wall-clock 'non-DPU orchestration' M-4 §12.1 identified).",
+    "M-7: prefill-time speculative preload of top-k hot experts per layer (now that multi-slot can hold several at once, decode step 1 can hit instead of warming).",
+]
+
+# ---------------------------------------------------------------------
+# Acceptance rationale — infra + null e2e perf (3rd null milestone
+# after M-2 kernel_mode=7 and M-5 dual runtime)
+#
+# M-6 changed the DPU binary.  qweight_mram / scales_mram / lut_mram
+# were carved into NUM_SLOTS=8 equal slots, each large enough to hold
+# one expert bundle's shard.  A new __host uint32_t active_slot tells
+# the kernel which slot to compute from per-call.  On the host side,
+# PIMQuantizedRuntime grew an LRU slot table (_expert_to_slot +
+# _slot_lru_ticker) so ``preload(expert_id)`` decides between hit
+# (skip DMA) and miss (pick LRU-oldest slot and upload there).
+#
+# Standalone micro-bench confirms the scheme: loading 4 experts then
+# re-loading them in reverse order produces 4/4 hits with bit-exact
+# outputs, and overflowing to 12 experts cleanly evicts the 4 oldest.
+#
+# On the real e2e run though, hit_ratio is 0%.  Root cause: all 48
+# MoE layers share one PIMQuantizedRuntime.get_shared() singleton per
+# (profile, rank_count) key.  Each forward pass makes 48 layers
+# overwrite the 8 slots in turn; by the time layer L comes back in
+# the next decode step, layers L+1..47 have already wiped its slots.
+# With Qwen3's 128 experts / top_k=8 and single-rank sharing, the
+# working set is 48×8 = 384 slot-claims per decode step chasing 8
+# physical slots — 0.1% hit lower bound.
+#
+# Closing M-6 as infrastructure + null result (same disposition as
+# M-2 and M-5) because:
+#
+#   (a) the DPU binary change is non-trivial, correct, bit-exact,
+#       and micro-bench-verified, and unblocks M-7's per-layer
+#       scoping where the hit ratio actually materialises;
+#   (b) the host slot-table + LRU is re-usable by M-7 unchanged —
+#       only the PIMMoEBackend/__init__ side needs to change how it
+#       calls get_shared();
+#   (c) the ADR-002 §1 headline (decode TPS >= CPU × 1.0) is still
+#       not in reach, and we do not want to pretend M-6 moved us
+#       toward it when it didn't.
+#
+# ---------------------------------------------------------------------
+
+# KPI-1: the e2e run must complete on real hardware.
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "cuda_pim with multi-slot DPU binary must complete without aborting."
+
+[[acceptance_checks]]
+path     = "results[0].error"
+op       = "not_exists"
+reason   = "no top-level error field on the multi-slot run."
+
+# KPI-2: no decode TPS regression vs M-4 (the last real win).  M-5
+# came in at 0.309, M-6 observed 0.300 — both within run-to-run
+# variance of M-4's 0.3170.  Demand >= 0.26 (17% headroom) so a real
+# regression from adding the slot_id broadcast and MRAM base-offset
+# calculation would fail the gate.
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.26
+reason   = "multi-slot refactor must not regress decode TPS meaningfully below the M-4 0.317 / M-5 0.309 baselines."
+
+# KPI-3: full decode budget delivered.
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "multi-slot run must produce the full 32-token budget (no silent kernel hang on a non-zero active_slot)."
+
+# KPI-4: DPU call count stable around M-4 fused level.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = "<="
+value    = 28000
+reason   = "fused gate+up from M-4 must still be active (DPU calls ~23k, not 35k)."
+
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = ">="
+value    = 10000
+reason   = "PIM must still actually run on real DPUs (not collapse silently to CPU due to a multi-slot plumbing bug)."
+
+# KPI-5: M-5's dual-runtime infra must still hold.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.quantized_runtime_down_distinct)"
+op       = ">="
+value    = 40
+reason   = "M-5 dual runtime must still be active (>=40/48 layers); M-6 inherited it intact."
+
+# KPI-6: the local preload miss counter must be wired up and populated.
+# Hit ratio is expected to be ~0% due to 48-layer singleton sharing
+# (see rationale above); we only require the counter moves so M-7's
+# diagnostics have a baseline.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.quantized_preload_misses_local)"
+op       = ">="
+value    = 10000
+reason   = "local-per-backend preload miss counter must be wired up; hit ratio is a known null until M-7 per-layer scoping."

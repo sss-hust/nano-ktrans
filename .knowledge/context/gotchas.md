@@ -339,3 +339,25 @@ tags: [pitfalls, debugging]
   3. 这次 M-5 的价值不在 perf，而在**排除**了 "dual runtime 就够了"
      这个假设，为 M-6 去改 DPU binary MRAM 布局提供了明确依据。
      publish 负结果也是结果。
+
+
+<!-- updated: 2026-04-22 19:50 -->
+
+## LRU slot hit 在 micro-bench 里 work，在 e2e 里 0% — **单例 runtime 被 N 层共享**
+
+- 现象：`PIMQuantizedRuntime` M-6.1 加了 8-slot LRU 缓存，micro-bench 显示 4 expert round-robin 后反向 preload 4/4 hit（bit-exact），但真机 e2e (Qwen3 48 层 × 128 experts × top_k=8, 32 decode tokens) hit ratio = 0%。
+- 根因：`PIMMoEBackend.__init__` 对每层调 `PIMQuantizedRuntime.get_shared(profile, rank_count)`，返回**同一个 process 级单例**。一次 forward pass 过 48 层，每层 top_k=8 expert，等效于对**同一个 8-slot LRU** 做 384 次 preload 请求；到下一个 decode step 同一层回来时，8 个 slot 已经全被下游层的 expert 覆盖。理论 hit 上限 = NUM_SLOTS / (num_layers × top_k) = 8/(48×8) = 0.2%。
+- 修复（已 scope 到 M-7）：让 `get_shared` 的 key 包含 `layer_idx` 或 `layer_group_id`，把 48 层分成多组独立 runtime。或者每层独占一个 runtime（要求 DPU rank 资源足够）。
+- 经验：
+  1. **"cache 容量 vs 工作集"** 要按**实际并发访问模式**算，不是按单一 client 模型。一个 process 里多 consumer 共享一个 cache 时，工作集 = Σ per-consumer 工作集，不是 max。
+  2. **micro-bench 和 e2e 的 hit ratio 可能差 3 个数量级**。不要用 micro-bench 的 hit ratio 外推到 e2e；至少要模拟 concurrent consumer 数量。
+  3. M-6 是项目内第三个 "infra landed, null e2e" 的 milestone（继 M-2 kernel_mode=7、M-5 dual runtime）。这不丢人：排除假设 + ship 可用 infra 本身是路线图成果，但要诚实归类 + 不拿 "代码跑通了" 当 perf 胜利。
+
+<!-- updated: 2026-04-22 19:50 -->
+
+## DPU MRAM 多 slot 布局：`__host active_slot` + `dpu_push_xfer(offset_bytes)`
+
+- DPU kernel C 如何用 runtime 动态 offset：在 kernel 里用 `__host uint32_t active_slot;` 暴露一个变量，算出 `const uint32_t slot_base = active_slot * CONST_PER_SLOT;` 然后所有 `mram_read((__mram_ptr void const *)(buffer + slot_base + other_offset), ...)` 就能根据 host 广播的值动态取位置。**编译期常量 `CONST_PER_SLOT` 必须把 MAX_* 总量除以 NUM_SLOTS 得出**，否则 slot offset 会超出 buffer 边界 → SILENT silent memory corruption。
+- host 侧 `dpu_push_xfer(set, XFER_TO_DPU, "symbol", offset_bytes, size, DEFAULT)` 的 `offset_bytes` 参数完美对应 slot 偏移：`(size_t)slot_id * WORDS_PER_SLOT * sizeof(uint32_t)`。这样 host 只传输**当前 slot 需要的那一段**，不是每次重传全部。
+- 三个 `__mram_noinit` buffer 都要按同一套 slot offset（`qweight_mram / scales_mram / lut_mram`）— 这里我 sed 批量替换时漏一个都会导致"slot 0 权重 + slot 1 scales"混着算，数值错了还难追。解决：写 unit test 覆盖 "LRU overflow 后 evicted slot 的数值不再使用"这类边缘情况。
+- `dpu_broadcast_to(set, "active_slot", 0, &slot_id, sizeof(slot_id), ...)` 很便宜（一个 uint32），**每次 run 前做一次是正确的且不影响性能**（实测 < 0.05 ms / call）。不要觉得 broadcast 贵就跳过写它。

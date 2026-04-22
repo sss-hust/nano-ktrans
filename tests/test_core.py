@@ -7797,3 +7797,105 @@ class TestPIMMoEBackendDualRuntime:
         base_eid = backend._expert_id(0)
         assert set(gu.evicted) == {base_eid ^ m for m in expected_masks}
         assert set(dn.evicted) == {base_eid ^ m for m in expected_masks}
+
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-6.1 — Multi-slot LRU allocator in PIMQuantizedRuntime
+# ----------------------------------------------------------------------
+
+
+class TestPIMQuantizedRuntimeSlotLRU:
+    """Unit tests for the slot table / LRU logic added in M-6.1.
+
+    These tests drive ``_allocate_slot`` / ``_touch_slot`` /
+    ``_evict_from_slots`` directly on a PIMQuantizedRuntime instance
+    that bypasses DPU allocation via ``__new__``.  This keeps the
+    tests pure-CPU so they run in CI without UPMEM hardware.
+    """
+
+    def _make(self, num_slots=8):
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+        rt = PIMQuantizedRuntime.__new__(PIMQuantizedRuntime)
+        # Minimal field initialisation (mirrors __init__ tail after
+        # the ctypes/DPU bootstrap).
+        rt._slot_expert_id = [0] * num_slots
+        rt._slot_lru_ticker = [0] * num_slots
+        rt._expert_to_slot = {}
+        rt._lru_counter = 0
+        rt._last_touched_slot = 0
+        # Patch NUM_SLOTS on the instance so the allocator sees the
+        # test size without hitting the class attribute.
+        rt.NUM_SLOTS = num_slots
+        return rt
+
+    def test_allocate_slot_fresh_picks_empty(self):
+        rt = self._make(num_slots=4)
+        slot, was_resident = rt._allocate_slot(42)
+        assert was_resident is False
+        assert 0 <= slot < 4
+        assert rt._slot_expert_id[slot] == 42
+        assert rt._expert_to_slot[42] == slot
+
+    def test_allocate_slot_hit_on_resident(self):
+        rt = self._make(num_slots=4)
+        slot1, _ = rt._allocate_slot(42)
+        slot2, was_resident = rt._allocate_slot(42)
+        assert was_resident is True
+        assert slot2 == slot1
+        # LRU ticker must have advanced.
+        assert rt._slot_lru_ticker[slot1] >= 2
+
+    def test_allocate_slot_lru_eviction_picks_oldest(self):
+        rt = self._make(num_slots=3)
+        # Fill every slot with distinct experts.
+        slots = []
+        for eid in (10, 20, 30):
+            s, _ = rt._allocate_slot(eid)
+            slots.append(s)
+        # Touch slot of expert 20 so 10 becomes LRU-oldest.
+        rt._allocate_slot(20)
+        # Now allocate a new expert — must evict 10.
+        new_slot, was_resident = rt._allocate_slot(40)
+        assert was_resident is False
+        assert rt._slot_expert_id[new_slot] == 40
+        assert 10 not in rt._expert_to_slot
+        # 20 and 30 must still be present.
+        assert 20 in rt._expert_to_slot
+        assert 30 in rt._expert_to_slot
+
+    def test_allocate_slot_lru_after_multiple_evictions(self):
+        """Thrashing: NUM_SLOTS + 2 experts, last-N must be resident.
+
+        Note: expert_id=0 is reserved as the "slot-empty" sentinel
+        throughout PIMQuantizedRuntime (matches ``_resident_expert_id == 0``
+        meaning "no weights resident"), so this test allocates 1..10.
+        """
+        rt = self._make(num_slots=4)
+        for eid in range(1, 11):
+            rt._allocate_slot(eid)
+        # After 10 allocations in a 4-slot cache, only the last 4
+        # accessed must be resident.
+        resident = set(rt._expert_to_slot.keys())
+        assert resident == {7, 8, 9, 10}
+
+    def test_evict_from_slots_removes_entry(self):
+        rt = self._make(num_slots=4)
+        rt._allocate_slot(42)
+        assert 42 in rt._expert_to_slot
+        rt._evict_from_slots(42)
+        assert 42 not in rt._expert_to_slot
+        # And the slot must be reusable.
+        slot, was_resident = rt._allocate_slot(99)
+        assert was_resident is False
+        assert rt._slot_expert_id[slot] == 99
+
+    def test_evict_from_slots_is_noop_for_unknown_eid(self):
+        rt = self._make(num_slots=4)
+        # Should not raise.
+        rt._evict_from_slots(999)
+        assert rt._expert_to_slot == {}
+
+    def test_num_slots_is_public_constant(self):
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+        assert PIMQuantizedRuntime.NUM_SLOTS == 8  # must match DPU binary's NUM_SLOTS

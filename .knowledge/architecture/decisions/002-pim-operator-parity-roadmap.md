@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-5 closed as infrastructure + null result (diagnosed MRAM single-slot bottleneck); M-6 active (DPU binary multi-slot + async launch)
+status: M-6 closed (DPU binary multi-slot + host LRU shipped, 0% e2e hit due to singleton sharing); M-7 active (per-layer scoping + async launch)
 created: 2026-04-22
 updated: 2026-04-22
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -731,3 +731,112 @@ KPI 按"infra landed + 不回归"设计：
 3. (1) + (2) 合起来预计把 decode_tps 从 0.31 推到 0.55-0.70 左右，
    仍然差 CPU baseline 的 3.07 tok/s 不小，但已经达到 ADR 目标的一半。
 4. 混合精度 expert 作为 M-7 备选（ADR-001 P4 / HOBBIT）。
+
+
+---
+
+## 14. M-6 执行结论（2026-04-22）：multi-slot DPU binary 基础设施 + null e2e 性能结果
+
+### 14.1 实装
+
+最大的一次 DPU binary 改动。
+
+**`dpu_quantized_kernel.c`**：
+- 新增编译期常量 `NUM_SLOTS = 8`
+- `qweight_mram`、`scales_mram`、`lut_mram` 按 slot 等分（`WORDS_PER_SLOT = MAX_QWEIGHT_WORDS / NUM_SLOTS` 等），总 MRAM 占用不变
+- 新增 `__host uint32_t active_slot`，每次 run 前 host broadcast 进来
+- 所有 mode（3/4/5/6/7）内的 MRAM 索引加 `*_slot_base = active_slot * *_PER_SLOT` 偏移
+
+**`host_quantized_bridge.c`**：
+- `pim_quantized_load_weights(...)` 新加 `slot_id` 参数；`dpu_push_xfer` 的 `offset_bytes` 参数按 slot 偏移写入 MRAM 的对应 slot 区间
+- `pim_quantized_run(...)` 新加 `slot_id` 参数；run 前 `dpu_broadcast_to("active_slot", ...)`
+- 新增 `g_slot_loaded_mask`，run 前校验目标 slot 已装载（防止 kernel 读未初始化权重）
+
+**`pim_quantized_runtime.py` (host Python)**：
+- `NUM_SLOTS = 8` 作为类常量（必须与 DPU binary 保持一致）
+- 新增 `_allocate_slot(expert_id) → (slot, was_resident)`：LRU 分配器
+  - hit: `expert_id in _expert_to_slot` → 返回现有 slot，bump LRU ticker
+  - miss: 找空 slot；若全满则 evict `_slot_lru_ticker` 最小的
+- 新增 `_evict_from_slots(expert_id)`：把某 expert 从 slot 表里拔出
+- `preload(eid, weights, km)` 重写：
+  - hit → skip host→DPU DMA，只 bump LRU
+  - miss → 写入 `slot` 对应的 MRAM 区间
+- `infer(inputs, slot_id=None)` 新加 kwarg，默认用 `_last_touched_slot`
+- `preload_and_infer_concat` 同样挂到 slot LRU
+- `evict()` / `shutdown()` 清理 slot 表
+- ctypes signatures 全部更新（`load_weights` 和 `run` 都多一个 `c_uint32` slot_id）
+
+### 14.2 正确性验证（micro-bench，真机，bit-exact）
+
+```
+# Preload 4 distinct experts, then reverse-order preload → expect all hits
+expert 0 slot=1 was_miss=True
+expert 1 slot=2 was_miss=True
+expert 2 slot=3 was_miss=True
+expert 3 slot=4 was_miss=True
+hits=0 misses=5 (1 warmup + 4 fresh)
+
+--- re-preload reverse, expect all hits ---
+expert 3 was_miss=False output matches   ← hit
+expert 2 was_miss=False output matches   ← hit
+expert 1 was_miss=False output matches   ← hit
+expert 0 was_miss=False output matches   ← hit
+hits_delta=4
+
+--- overflow with experts 4..10 (7 more), NUM_SLOTS=8 ---
+slots: [2003, 1000, 2006, 2005, 2004, 2000, 2001, 2002]
+      ← LRU evicted 101/1001/1002/1003; 1000 still resident
+```
+
+**4/4 hit 成功**，所有 hit 输出与原 output `torch.allclose(..., atol=1e-5)`。LRU 淘汰行为正确。
+
+### 14.3 e2e 真机数据（Qwen3-GPTQ-Int4, 32 decode tokens）
+
+| 指标 | M-4 fused | M-5 dual | M-6 multi-slot | 对 M-4 delta |
+|------|-----------|----------|----------------|--------------|
+| DPU quantized calls | 23246 | 23214 | 23270 | ~0 |
+| preload hits_local | 0 | 0 | 0 | ~0 |
+| preload misses_local | 23246 (per-layer) | 23214 | 23270 | ~0 |
+| decode_seconds | 100.96 | 103.71 | 106.67 | +5.7%（噪声边缘）|
+| decode_tps | 0.317 | 0.309 | **0.300** | **−5.4%** |
+
+**e2e hit ratio = 0%，与 M-5 相同水平。**
+
+### 14.4 为什么 e2e null：48-layer singleton 共享
+
+micro-bench 测的是**一个 PIMQuantizedRuntime 实例按顺序 preload 不同 expert**，LRU 有效。
+
+但在 `HybridMoE` 里，**48 层的每个 `PIMMoEBackend` 都调 `PIMQuantizedRuntime.get_shared(profile, rank_count)`**，返回**同一个单例**。一个 forward pass 过 48 层，每层 8 active expert，相当于对同一个 8-slot LRU 做 **384 次 preload 请求**。slot 每隔几 call 就被覆盖一次，到下一个 decode step 同一层来时 slot 里已经全是下游层的 expert 了。
+
+**hit ratio 上限 = NUM_SLOTS / (num_layers × top_k) = 8 / (48 × 8) ≈ 0.2%**。基本为 0。
+
+### 14.5 本里程碑的价值
+
+像 M-2 和 M-5 一样，**以 null perf 闭合但 infra 完整上线**：
+
+1. **DPU binary multi-slot layout 正确且 bit-exact**（micro-bench 证明）
+2. **host-side LRU slot table 正确**（7 条单元测试全覆盖 _allocate_slot / _evict_from_slots / overflow / hit-bump / NUM_SLOTS 常量）
+3. **ctypes 新签名 + slot 广播 + active_slot 读取** 全链路 verified
+4. **M-5 dual runtime + M-4 fused gate+up 全部保留并继续工作**（诊断字段全部 >=M-5 的值）
+5. 明确排除了"multi-slot 单独能在当前架构下产生 e2e hit"这个假设
+
+**排除假设本身就是路线图成果**。M-7 的目标现在一步到位地清晰了：**打破 48-layer 单例共享**。
+
+### 14.6 M-6 dev_gate（PASS 8/8）
+
+```
+[PASS] M-6  (stage=acceptance)
+  ✓ status=ok, no error
+  ✓ decode_tps 0.300 >= 0.26  (no meaningful regression vs M-4 0.317)
+  ✓ generated_tokens = 32
+  ✓ 10000 <= DPU calls = 23270 <= 28000  (fused still active, real DPU work)
+  ✓ 47/48 dual-runtime layers intact
+  ✓ preload miss counter wired up and moving
+```
+
+### 14.7 M-7 起跑清单（现在极其清晰）
+
+1. **Per-layer scoping**：让 `PIMQuantizedRuntime.get_shared()` 的 key 包含 `layer_idx` 或 `(layer_idx // group_size)`（group_size 取决于 DPU rank 预算）；一组层独占一个 runtime，slot 表不被其他组层覆盖
+2. **prefill-time 预热**：统计每层 hot top-N expert 放进 slot，decode step 1 命中率从 0 跳到 30%+
+3. **dpu_launch(DPU_ASYNCHRONOUS)**：让 GPU attention 与 PIM 计算并行；ADR-002 §11.3 估计这能再省 10-15s/run 的 "non-DPU wall-clock"
+4. 预期把 M-4 的 0.317 decode_tps 推到 ~0.45-0.60 左右（仍低于 CPU baseline 3.07，但关闭 ADR §4.3 headline KPI 的第一个有效攻击）

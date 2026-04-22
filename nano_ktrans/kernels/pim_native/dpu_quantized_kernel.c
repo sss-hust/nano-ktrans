@@ -61,6 +61,31 @@
 #define FIXED_BATCH_TILE 4
 #endif
 
+/* ADR-002 M-6.1: Multi-slot MRAM residency.
+ *
+ * Rather than a single qweight/scales/lut buffer per DPU, we carve the
+ * same total MRAM budget into NUM_SLOTS equally-sized slots.  The host
+ * tells us which slot holds the weights for the current call via
+ * ``active_slot`` and can keep up to NUM_SLOTS expert bundles resident
+ * simultaneously.  M-4 and M-5 showed preload miss cost ~= 0.96 ms/call
+ * pure DPU DMA; multi-slot residency lets a decode step hit MRAM when
+ * its active expert was already loaded by an earlier step.
+ *
+ * All slots share the same (input_dim, output_dim, group_size, kernel_mode)
+ * — a single-layer MoE backend always works with one bundle shape, so
+ * the host-side pair (PIMMoEBackend.quantized_runtime for gate_up,
+ * quantized_runtime_down for down) keeps that invariant trivially.
+ *
+ * The per-slot capacity is MAX_QWEIGHT_WORDS / NUM_SLOTS words etc, so
+ * total MRAM footprint is unchanged relative to M-5. */
+#ifndef NUM_SLOTS
+#define NUM_SLOTS 8
+#endif
+
+#define WORDS_PER_SLOT     (MAX_QWEIGHT_WORDS / NUM_SLOTS)
+#define SCALES_PER_SLOT    (MAX_SCALE_FLOATS  / NUM_SLOTS)
+#define LUT_INT16_PER_SLOT (MAX_LUT_INT16     / NUM_SLOTS)
+
 /* kernel_mode=7 (genuine T-MAC bit-serial): we pre-decompose activations
  * into bit-plane bitmasks on the host.  For each batch/block we store
  * a sign bitmask plus 7 magnitude bit-plane bitmasks, each packing 64
@@ -80,6 +105,7 @@ __host uint32_t output_dim;
 __host uint32_t group_size;
 __host uint32_t num_groups;
 __host uint32_t kernel_mode;
+__host uint32_t active_slot;   /* ADR-002 M-6.1: which slot to compute from */
 __host uint64_t kernel_cycles;
 
 __mram_noinit uint32_t qweight_mram[MAX_QWEIGHT_WORDS];
@@ -144,6 +170,13 @@ main(void)
     const uint32_t words_per_row = input_dim / WEIGHTS_PER_WORD;
     const float zero_point = (float)(1 << (BITS_PER_WEIGHT - 1));
 
+    /* M-6.1: compute slot-scoped base offsets once.  The kernel
+     * addresses qweight/scales/lut as if they were per-slot arrays;
+     * host bridge is responsible for writing into the matching slot. */
+    const uint32_t qw_slot_base    = active_slot * WORDS_PER_SLOT;
+    const uint32_t scale_slot_base = active_slot * SCALES_PER_SLOT;
+    const uint32_t lut_slot_base   = active_slot * LUT_INT16_PER_SLOT;
+
     for (uint32_t row = tasklet_id * 2; row < output_dim; row += NR_TASKLETS * 2) {
         for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
 
@@ -190,19 +223,19 @@ main(void)
                         bp_cache_heap,
                         8 * sizeof(uint64_t));
                     mram_read(
-                        (__mram_ptr void const *)(lut_mram + lut_row_offset0),
+                        (__mram_ptr void const *)(lut_mram + (lut_slot_base + lut_row_offset0)),
                         lut0_i16,
                         sizeof(lut0_i16));
                     mram_read(
-                        (__mram_ptr void const *)(lut_mram + lut_row_offset1),
+                        (__mram_ptr void const *)(lut_mram + (lut_slot_base + lut_row_offset1)),
                         lut1_i16,
                         sizeof(lut1_i16));
                     mram_read(
-                        (__mram_ptr void const *)(qweight_mram + ((row * words_per_row) + word_offset)),
+                        (__mram_ptr void const *)(qweight_mram + (qw_slot_base + (row * words_per_row) + word_offset)),
                         qweight0_cache,
                         words_this_block * sizeof(uint32_t));
                     mram_read(
-                        (__mram_ptr void const *)(qweight_mram + (((row + 1) * words_per_row) + word_offset)),
+                        (__mram_ptr void const *)(qweight_mram + (qw_slot_base + ((row + 1) * words_per_row) + word_offset)),
                         qweight1_cache,
                         words_this_block * sizeof(uint32_t));
 
@@ -361,19 +394,19 @@ main(void)
                         input_i8_cache,
                         BLOCK_FLOATS * sizeof(int8_t));
                     mram_read(
-                        (__mram_ptr void const *)(lut_mram + lut_row_offset0),
+                        (__mram_ptr void const *)(lut_mram + (lut_slot_base + lut_row_offset0)),
                         lut0_i16,
                         sizeof(lut0_i16));
                     mram_read(
-                        (__mram_ptr void const *)(lut_mram + lut_row_offset1),
+                        (__mram_ptr void const *)(lut_mram + (lut_slot_base + lut_row_offset1)),
                         lut1_i16,
                         sizeof(lut1_i16));
                     mram_read(
-                        (__mram_ptr void const *)(qweight_mram + ((row * words_per_row) + word_offset)),
+                        (__mram_ptr void const *)(qweight_mram + (qw_slot_base + (row * words_per_row) + word_offset)),
                         qweight0_cache,
                         words_this_block * sizeof(uint32_t));
                     mram_read(
-                        (__mram_ptr void const *)(qweight_mram + (((row + 1) * words_per_row) + word_offset)),
+                        (__mram_ptr void const *)(qweight_mram + (qw_slot_base + ((row + 1) * words_per_row) + word_offset)),
                         qweight1_cache,
                         words_this_block * sizeof(uint32_t));
 
@@ -457,11 +490,11 @@ main(void)
                         lut1_i16,
                         sizeof(lut1_i16));
                     mram_read(
-                        (__mram_ptr void const *)(qweight_mram + ((row * words_per_row) + word_offset)),
+                        (__mram_ptr void const *)(qweight_mram + (qw_slot_base + (row * words_per_row) + word_offset)),
                         qweight0_cache,
                         words_this_block * sizeof(uint32_t));
                     mram_read(
-                        (__mram_ptr void const *)(qweight_mram + (((row + 1) * words_per_row) + word_offset)),
+                        (__mram_ptr void const *)(qweight_mram + (qw_slot_base + ((row + 1) * words_per_row) + word_offset)),
                         qweight1_cache,
                         words_this_block * sizeof(uint32_t));
 
@@ -510,19 +543,19 @@ main(void)
                             (((row + 1) * num_groups) + group_idx) * (1u << BITS_PER_WEIGHT);
 
                         mram_read(
-                            (__mram_ptr void const *)(lut_mram + lut_row_offset0),
+                            (__mram_ptr void const *)(lut_mram + (lut_slot_base + lut_row_offset0)),
                             lut0_i16,
                             sizeof(lut0_i16));
                         mram_read(
-                            (__mram_ptr void const *)(lut_mram + lut_row_offset1),
+                            (__mram_ptr void const *)(lut_mram + (lut_slot_base + lut_row_offset1)),
                             lut1_i16,
                             sizeof(lut1_i16));
                         mram_read(
-                            (__mram_ptr void const *)(qweight_mram + ((row * words_per_row) + word_offset)),
+                            (__mram_ptr void const *)(qweight_mram + (qw_slot_base + (row * words_per_row) + word_offset)),
                             qweight0_cache,
                             words_this_block * sizeof(uint32_t));
                         mram_read(
-                            (__mram_ptr void const *)(qweight_mram + (((row + 1) * words_per_row) + word_offset)),
+                            (__mram_ptr void const *)(qweight_mram + (qw_slot_base + ((row + 1) * words_per_row) + word_offset)),
                             qweight1_cache,
                             words_this_block * sizeof(uint32_t));
                         for (uint32_t tile_idx = 0; tile_idx < tile_count; ++tile_idx) {
@@ -578,19 +611,19 @@ main(void)
                             input_i8_cache,
                             BLOCK_FLOATS * sizeof(int8_t));
                         mram_read(
-                            (__mram_ptr void const *)(lut_mram + lut_row_offset0),
+                            (__mram_ptr void const *)(lut_mram + (lut_slot_base + lut_row_offset0)),
                             lut0_i16,
                             sizeof(lut0_i16));
                         mram_read(
-                            (__mram_ptr void const *)(lut_mram + lut_row_offset1),
+                            (__mram_ptr void const *)(lut_mram + (lut_slot_base + lut_row_offset1)),
                             lut1_i16,
                             sizeof(lut1_i16));
                         mram_read(
-                            (__mram_ptr void const *)(qweight_mram + ((row * words_per_row) + word_offset)),
+                            (__mram_ptr void const *)(qweight_mram + (qw_slot_base + (row * words_per_row) + word_offset)),
                             qweight0_cache,
                             words_this_block * sizeof(uint32_t));
                         mram_read(
-                            (__mram_ptr void const *)(qweight_mram + (((row + 1) * words_per_row) + word_offset)),
+                            (__mram_ptr void const *)(qweight_mram + (qw_slot_base + ((row + 1) * words_per_row) + word_offset)),
                             qweight1_cache,
                             words_this_block * sizeof(uint32_t));
 
@@ -634,11 +667,11 @@ main(void)
                 }
 
                 mram_read(
-                    (__mram_ptr void const *)(scales_mram + (row * num_groups)),
+                    (__mram_ptr void const *)(scales_mram + (scale_slot_base + row * num_groups)),
                     scales0_cache,
                     num_groups * sizeof(float));
                 mram_read(
-                    (__mram_ptr void const *)(scales_mram + ((row + 1) * num_groups)),
+                    (__mram_ptr void const *)(scales_mram + (scale_slot_base + (row + 1) * num_groups)),
                     scales1_cache,
                     num_groups * sizeof(float));
 
@@ -659,11 +692,11 @@ main(void)
                         input_cache,
                         BLOCK_FLOATS * sizeof(float));
                     mram_read(
-                        (__mram_ptr void const *)(qweight_mram + ((row * words_per_row) + word_offset)),
+                        (__mram_ptr void const *)(qweight_mram + (qw_slot_base + (row * words_per_row) + word_offset)),
                         qweight0_cache,
                         words_this_block * sizeof(uint32_t));
                     mram_read(
-                        (__mram_ptr void const *)(qweight_mram + (((row + 1) * words_per_row) + word_offset)),
+                        (__mram_ptr void const *)(qweight_mram + (qw_slot_base + ((row + 1) * words_per_row) + word_offset)),
                         qweight1_cache,
                         words_this_block * sizeof(uint32_t));
 
@@ -708,11 +741,11 @@ main(void)
             float acc1 = 0.0f;
 
             mram_read(
-                (__mram_ptr void const *)(scales_mram + (row * num_groups)),
+                (__mram_ptr void const *)(scales_mram + (scale_slot_base + row * num_groups)),
                 scales0_cache,
                 num_groups * sizeof(float));
             mram_read(
-                (__mram_ptr void const *)(scales_mram + ((row + 1) * num_groups)),
+                (__mram_ptr void const *)(scales_mram + (scale_slot_base + (row + 1) * num_groups)),
                 scales1_cache,
                 num_groups * sizeof(float));
 
@@ -733,11 +766,11 @@ main(void)
                     input_cache,
                     BLOCK_FLOATS * sizeof(float));
                 mram_read(
-                    (__mram_ptr void const *)(qweight_mram + ((row * words_per_row) + word_offset)),
+                    (__mram_ptr void const *)(qweight_mram + (qw_slot_base + (row * words_per_row) + word_offset)),
                     qweight0_cache,
                     words_this_block * sizeof(uint32_t));
                 mram_read(
-                    (__mram_ptr void const *)(qweight_mram + (((row + 1) * words_per_row) + word_offset)),
+                    (__mram_ptr void const *)(qweight_mram + (qw_slot_base + ((row + 1) * words_per_row) + word_offset)),
                     qweight1_cache,
                     words_this_block * sizeof(uint32_t));
 
