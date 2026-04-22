@@ -7,6 +7,28 @@ tags: [changelog]
 
 ## 2026-04-22
 
+### 2026-04-22 11:25 - ADR-002 M-1：打通 e2e GPTQ + sweep 脚本 + mode=6 审计
+
+落地 ADR-002 M-1 的三个子任务：
+
+- **M1-T1 修复 e2e GPTQ 阻塞 bug**（`nano_ktrans/models/config.py`）
+  - 症状：`benchmark_inference.py --backend cuda_pim --model-path .../Qwen3-30B-A3B-GPTQ-Int4` 从未跑通，都 abort 在 `Weight key '...gate_up_proj.weight' not found`
+  - 根因：`adapt_config_to_checkpoint` 只认 `.weight` 后缀来探测 unpacked layout；GPTQ checkpoint 里根本没有 `.weight`，只有 `.qweight`，所以两个条件都 miss，配置保留 packed spec → 下游请求 `gate_up_proj.weight` → 失败
+  - 修复：`packed_keys` / `unpacked_keys` 元组里同时包含 `.weight` 和 `.qweight` 两种后缀
+  - 新增单测 `test_qwen3_gptq_checkpoint_layout_adaptation` 锁定此路径
+- **M1-T2 新增 `benchmarks/benchmark_pim_shape_sweep.py`**
+  - Qwen3 真实专家形状（gate/up/down）× batches ∈ {1,2,4,8} × ranks ∈ {1,4,8,16,32} × kernel_modes ∈ {3,4,6}
+  - 每 cell 记录 `seconds_{avg,min,max}` + `launch/transfer` breakdown + `max_abs_error_vs_cpu_grouped` + `pim_vs_cpu_grouped_ratio`
+  - 每 (shape, batch) 汇总 `best_kernel_mode` / `best_rank_count`
+  - 默认用真实 GPTQ-Int4 checkpoint，可以 `--synthetic` 用随机权重做 smoke
+  - 失败隔离：PIM cell 失败时记录 `{"status":"pim_error", "pim_error":...}`，不会让整个 sweep 崩溃
+- **M1-T3 代码审计锁定"kernel_mode=6 ≠ 真 T-MAC"**（`tests/test_core.py::TestQuantizedKernelAudit`）
+  - 3 条静态断言证明 mode=6 内循环仍然 `lut0_i16[q0]` 键权重 + 7 条 `abs_x & 0xNN` activation 侧 shift-add
+  - 真正的 T-MAC 必须 `T[pack(x_bits)]`（权重被编码进表索引）
+  - 这组审计锁定直到 M-2 落 `kernel_mode=7` 后再替换为 mode=7 正确性测试
+
+测试结果：`160 passed` （较 156 新增 4 条）。`benchmark_pim_shape_sweep.py` 仅在宿主机（`/dev/dpu_rank*` 可见）执行，当前环境只通过 `--help` + 语法验证。
+
 ### 2026-04-22 11:10 - ADR-002：PIM 算子级超越 CPU 的优化路线
 
 - 新增 `.knowledge/architecture/decisions/002-pim-operator-parity-roadmap.md`，

@@ -210,3 +210,24 @@ tags: [pitfalls, debugging]
   1. 任何 AI 生成的测试必须至少在本地 `pytest -k <new_test>` 跑通一次再提交
   2. 同 PR 里如果新加了 production code（如 `notify_expert_evicted`），应该**同时**跑全量 pytest 确认新测试和旧测试都绿
   3. `Co-Authored-By: Claude Opus` 不等于免责声明，PR 作者仍需对可运行性负责
+
+<!-- updated: 2026-04-22 11:25 -->
+
+## Layout 自适应要同时识别量化变体后缀（.weight + .qweight）
+
+- 现象：`benchmark_inference.py --backend cuda_pim --model-path .../Qwen3-30B-A3B-GPTQ-Int4` 从入库起（2026-04-20 的 e2e JSON）就 abort 在 `Weight key 'model.layers.0.mlp.experts.0.gate_up_proj.weight' not found`；fp16 的 `Qwen3-30B-A3B-Base` 却可以正常跑。
+- 根因：`models/config.py::adapt_config_to_checkpoint` 只探测 `.weight` 后缀 — 对 fp16/bf16 checkpoint 足够，但 GPTQ checkpoint 里**根本没有 `.weight` tensor**，只有 `.qweight / .scales / .qzeros / .g_idx`；两个探测分支都 miss → 配置保留默认的 packed spec → 下游 loader 去找 `gate_up_proj.weight` → 在 74000-key safetensor 里失败。
+- 修复：`packed_keys` / `unpacked_keys` 同时包含 `.weight` 和 `.qweight` 两种后缀。单测 `test_qwen3_gptq_checkpoint_layout_adaptation` 锁定此路径。
+- 经验：任何**以 `.weight` 为锚点的 checkpoint adapter**都会在 GPTQ / AWQ / QLoRA 等量化 checkpoint 上 silent-fail。新增 checkpoint 适配代码时，**必须同时覆盖 fp16 后缀（.weight）和至少一个量化后缀（.qweight / .qzeros）**，且要有单测同时覆盖两条分支。
+
+<!-- updated: 2026-04-22 11:25 -->
+
+## "自称 T-MAC" 的 kernel 要用静态审计或真机 breakdown 钉住
+
+- 现象：`dpu_quantized_kernel.c::kernel_mode == 6` 的注释自称是 T-MAC bit-serial 实现，commit message 和 `2026-04-20` journal 也记作"P1: T-MAC bit-serial kernel 已实现"。但代码审查发现内循环还在做 `lut0_i16[q0]` + 7 条 `abs_x & 0xNN` 的 activation 侧 shift-add — 这是**朴素软件乘法器**，不是 T-MAC。
+- 根因：真正的 T-MAC 要求"**weight 被完全编码进 LUT 索引**，内循环只做 `acc += T[bit][row][group][pack(x_bits)] << bit`，零乘法零分支"。当前 mode=6 的 LUT 仍以 weight nibble `q` 做索引，所以"消除乘法"其实没发生，反而在外层包了 7 条件分支。这一误解直接让 ADR-002 需要全新一轮 M-2 来落真实现。
+- 修复：在 `tests/test_core.py::TestQuantizedKernelAudit` 里加 3 条静态断言固化当前"假 T-MAC"形状（`lut[q]` 查表 + `abs_x & 0xNN` 模式），作为 M-2 落 `kernel_mode=7` 时必须同步删除 / 替换的审计标记。
+- 经验：**一个性能优化是否真的落地，不能靠 commit message 和代码注释判断**。需要任取其一：
+  1. 静态代码审计（断言"不该出现的指令模式"真的不出现，如"内循环里不得有 `lut[q]`"）
+  2. 真机 kernel breakdown（能定量看到 `launch_seconds` 下降到符合算法复杂度的水位）
+  3. 与理论模型对照（DPU 无硬件乘法 → 真 T-MAC 的 cycle 数应接近 `MRAM_read_cycles × num_groups × output_dim`，不应随 activation bit-width 线性增长）

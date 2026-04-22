@@ -33,6 +33,7 @@ updated: 2026-04-21 19:45
 updated: 2026-04-21 20:05
 updated: 2026-04-22 10:50
 updated: 2026-04-22 11:10
+updated: 2026-04-22 11:25
 ---
 
 # 🔥 当前工作焦点
@@ -46,28 +47,61 @@ updated: 2026-04-22 11:10
 
 ### 已识别的关键差距
 
-| Gap | 描述 | 影响 | Milestone |
-|-----|------|------|-----------|
-| A | `kernel_mode=6` 不是真 T-MAC（activation bit-scan ≠ weight bit-slicing + LUT） | DPU 软件乘法仍在内循环 | **M-2** 重写 |
-| B | LUT 布局未考虑 `batch>1` 复用，activation 读取 B 倍放大 | `batch=4/8` 性能悬崖 | **M-2** 一起解决 |
-| C | 前台/后台 overlap 未真正形成，`runtime_evictions=0` | 即使算子加速也被串行依赖吃掉 | **M-3** |
-| D | e2e GPTQ benchmark 从未跑通（`gate_up_proj` key 适配问题） | 所有"PIM 打赢 CPU"证据仅限 operator-only | **M-1** 必须先修 |
-| E | `pim_prefill_token_threshold=8` 硬阈值，无 cost model | 大量错路由到 PIM | **M-3** |
+| Gap | 描述 | 影响 | Milestone | 状态 |
+|-----|------|------|-----------|------|
+| A | `kernel_mode=6` 不是真 T-MAC（activation bit-scan ≠ weight bit-slicing + LUT） | DPU 软件乘法仍在内循环 | **M-2** | 🟡 M1-T3 已静态证伪，M-2 开始重写 |
+| B | LUT 布局未考虑 `batch>1` 复用，activation 读取 B 倍放大 | `batch=4/8` 性能悬崖 | **M-2** | 🟡 等待 sweep 实测数据 |
+| C | 前台/后台 overlap 未真正形成，`runtime_evictions=0` | 即使算子加速也被串行依赖吃掉 | **M-3** | 🔵 未开始 |
+| D | e2e GPTQ benchmark 从未跑通（`gate_up_proj` key 适配问题） | 所有"PIM 打赢 CPU"证据仅限 operator-only | **M-1** ✅ | ✅ **2026-04-22 修复** |
+| E | `pim_prefill_token_threshold=8` 硬阈值，无 cost model | 大量错路由到 PIM | **M-3** | 🔵 未开始 |
 
 ### 四阶段路线
 
-| Milestone | 周期 | 交付物 | 退出标准 |
-|-----------|------|-------|---------|
-| **M-1** 基线建立 | 1-2 天 | e2e GPTQ 跑通 + 全 shape×batch×rank×mode sweep | 可信对照数据 + 量化 mode=6 是否 fake |
-| **M-2** 真 T-MAC kernel | 1 周 | `kernel_mode=7`（weight bit-sliced LUT） | ≥ mode=4 × 1.3，`batch=4/8` 不掉 0.9× 以下 |
-| **M-3** Cost model + 后台 overlap | 1 周 | `BackendCostModel` + 异步 PIM submit | e2e `cuda_pim` ≥ `cuda_cpu_offload` |
-| **M-4** 研究探索 | 2-3 周 | Mixed precision / LUT 共享 / sub-batch | 论文级增量 |
+| Milestone | 周期 | 交付物 | 退出标准 | 状态 |
+|-----------|------|-------|---------|------|
+| **M-1** 基线建立 | 1-2 天 | e2e GPTQ 跑通 + 全 shape×batch×rank×mode sweep | 可信对照数据 + 量化 mode=6 是否 fake | ✅ **代码 + 脚本就绪**；待宿主机跑 sweep |
+| **M-2** 真 T-MAC kernel | 1 周 | `kernel_mode=7`（weight bit-sliced LUT） | ≥ mode=4 × 1.3，`batch=4/8` 不掉 0.9× 以下 | 🟡 **下一步** |
+| **M-3** Cost model + 后台 overlap | 1 周 | `BackendCostModel` + 异步 PIM submit | e2e `cuda_pim` ≥ `cuda_cpu_offload` | 🔵 |
+| **M-4** 研究探索 | 2-3 周 | Mixed precision / LUT 共享 / sub-batch | 论文级增量 | 🔵 |
 
-### 立即开始的 M-1 任务
+### M-1 完成记录（2026-04-22）
 
-- [ ] **M1-T1** 修复 e2e `gate_up_proj` key 适配：让 `benchmark_inference.py --backend cuda_pim` 在 Qwen3 GPTQ checkpoint 上跑通
-- [ ] **M1-T2** 新增 `benchmarks/benchmark_pim_shape_sweep.py`，对 3 种 shape × {1,2,4,8} batch × {1,4,8,16,32} ranks × {3,4,6} kernel_mode 跑全 sweep
-- [ ] **M1-T3** 用 M1-T2 数据验证 `kernel_mode=6` 是否确实不如 `kernel_mode=4`，为 M-2 的替代实现提供对照
+- [x] **M1-T1** 修 `adapt_config_to_checkpoint` 对 GPTQ `.qweight` 后缀盲区 —
+      `nano_ktrans/models/config.py`；新增单测 `test_qwen3_gptq_checkpoint_layout_adaptation`
+- [x] **M1-T2** 新增 `benchmarks/benchmark_pim_shape_sweep.py`：3 shapes ×
+      {1,2,4,8} batch × {1,4,8,16,32} rank × {3,4,6} mode 的 cell 网格，每 cell
+      记录 PIM/CPU 速度比、误差、breakdown；PIM 失败不阻塞整表
+- [x] **M1-T3** 新增 `TestQuantizedKernelAudit`（3 条静态代码断言）—
+      锁定 `kernel_mode=6` 目前仍然是 "activation bit-scan + `lut[q]` 权重查表"，
+      不是真正的 T-MAC；M-2 落 mode=7 后替换这组审计
+
+**仍需在宿主机做的事**（当前会话 `/dev/dpu_rank*` 不可见，只能你在真机跑）：
+
+```
+python benchmarks/benchmark_pim_shape_sweep.py \
+    --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 \
+    --json-out benchmarks/results/pim_shape_sweep_M1_2026-04-22.json
+```
+
+并立刻确认 `cuda_pim` e2e 可跑通：
+
+```
+python benchmarks/benchmark_inference.py \
+    --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 \
+    --backends cuda_pim --offload-device-experts 2 \
+    --max-new-tokens 2 \
+    --json-out benchmarks/results/e2e_gptq_cuda_pim_M1_2026-04-22.json
+```
+
+### M-2 预备（等 M-1 sweep 结果回来后启动）
+
+1. 用 sweep 数据定 `kernel_mode=7` 先攻的 shape 优先级（哪组 shape × batch 最急需真 T-MAC）
+2. 在 `pim_quantized_runtime.py` 里新增 `_build_tmac_luts(qweight, scales, zero_points)` —
+   输出形状 `(num_bit_planes=4, output_dim, num_groups, 2^g=16)` 的 int16 LUT，preload 进 MRAM
+3. 在 `dpu_quantized_kernel.c` 里新增 `kernel_mode=7`，内循环只做
+   `acc += T[bit][row][group][idx] << bit`，完全不带乘法
+4. 保留 mode=4 作 honest baseline
+5. 落完后把 `TestQuantizedKernelAudit` 替换为 mode=7 的数值正确性测试
 
 ## 本轮新增（2026-04-22）
 
@@ -79,13 +113,15 @@ updated: 2026-04-22 11:10
         原测试（`04dfbda` 引入）用了一堆不存在的 API（`InferenceContext`、
         `HybridMoE(expert_hidden_size=...)`、`moe.update_residency_plan(...)`），AI
         生成但从未实跑。改为参照相邻真实测试的模式用 `queue_migration_plan` 触发 demotion
-- [x] 测试套件从 `153 passed / 3 failed` 恢复到 `156 passed`
+- [x] 测试套件从 `153 passed / 3 failed` → `156 passed` → `160 passed`（M-1 增 4 条）
 - [x] 4 条新 gotchas 写入 `.knowledge/context/gotchas.md`：`LLM.__new__` 绕过
       `__init__` 的字段容错模式、`ExpertWeightLoader` 不应在构造期校验 weight 文件、
       AI 生成测试必须实跑、smoke test 要进 CI 必跑集
-- [x] **制定 ADR-002 PIM 算子级超越 CPU 的优化路线**（本次更新）
+- [x] **制定 ADR-002 PIM 算子级超越 CPU 的优化路线**
       - 核心发现：当前 `kernel_mode=6` 不是真正的 T-MAC，只是 activation 侧的朴素 shift-add 乘法模拟
       - 4 阶段路线：M-1 建立基线 → M-2 真 T-MAC → M-3 cost model + overlap → M-4 研究探索
+- [x] **ADR-002 M-1 代码层完成**：修 GPTQ layout 适配 + sweep 脚本 + mode=6 静态审计
+
 
 ## 本轮新增（2026-04-21）
 

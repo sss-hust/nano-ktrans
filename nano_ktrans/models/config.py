@@ -225,12 +225,26 @@ def adapt_config_to_checkpoint(config: GenericMoeConfig, checkpoint_path: str) -
     Some Qwen3-MoE checkpoints store expert projections as separate gate/up/down weights
     instead of a packed gate_up tensor. Detect the real layout from safetensor keys so the
     Python model and the offload loader agree on parameter names.
+
+    This also handles GPTQ-quantized checkpoints (e.g. ``Qwen3-30B-A3B-GPTQ-Int4``) where
+    the tensors use the ``.qweight`` / ``.scales`` / ``.qzeros`` / ``.g_idx`` suffixes
+    instead of ``.weight`` — otherwise end-to-end ``cuda_pim`` runs on GPTQ checkpoints
+    would abort with ``Weight key '...gate_up_proj.weight' not found``.
     """
     if config.arch.name != "qwen3_moe":
         return config
 
-    packed_key = "model.layers.0.mlp.experts.0.gate_up_proj.weight"
-    unpacked_key = "model.layers.0.mlp.experts.0.gate_proj.weight"
+    # Possible expert-0 / layer-0 keys we use to probe the layout.
+    # For fp16/bf16 checkpoints the suffix is ``.weight``;
+    # for GPTQ checkpoints it is ``.qweight``.
+    packed_keys = (
+        "model.layers.0.mlp.experts.0.gate_up_proj.weight",
+        "model.layers.0.mlp.experts.0.gate_up_proj.qweight",
+    )
+    unpacked_keys = (
+        "model.layers.0.mlp.experts.0.gate_proj.weight",
+        "model.layers.0.mlp.experts.0.gate_proj.qweight",
+    )
 
     try:
         from safetensors import safe_open
@@ -240,9 +254,9 @@ def adapt_config_to_checkpoint(config: GenericMoeConfig, checkpoint_path: str) -
     for file_path in sorted(glob(os.path.join(checkpoint_path, "*.safetensors"))):
         with safe_open(file_path, "pt", "cpu") as handle:
             keys = handle.keys()
-            if packed_key in keys:
+            if any(k in keys for k in packed_keys):
                 return config
-            if unpacked_key in keys:
+            if any(k in keys for k in unpacked_keys):
                 config.arch = QWEN3_MOE_UNPACKED_SPEC
                 return config
 

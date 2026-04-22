@@ -375,6 +375,63 @@ class TestArchitectureConfig:
             "down": "down_proj",
         }
 
+    def test_qwen3_gptq_checkpoint_layout_adaptation(self, tmp_path):
+        """GPTQ checkpoints expose `.qweight` instead of `.weight`; adapter must
+        still detect the unpacked layout, otherwise end-to-end cuda_pim on
+        Qwen3-30B-A3B-GPTQ-Int4 aborts with `Weight key '...gate_up_proj.weight' not found`.
+        """
+        from types import SimpleNamespace
+        from safetensors.torch import save_file
+        from nano_ktrans.models.config import GenericMoeConfig, adapt_config_to_checkpoint
+
+        hf_config = SimpleNamespace(
+            model_type="qwen3_moe",
+            architectures=["Qwen3MoeForCausalLM"],
+            vocab_size=151936,
+            hidden_size=128,
+            intermediate_size=256,
+            moe_intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_experts=8,
+            num_experts_per_tok=2,
+            rms_norm_eps=1e-6,
+            max_position_embeddings=1024,
+            rope_parameters={"rope_theta": 10000.0},
+            hidden_act="silu",
+            decoder_sparse_step=1,
+            mlp_only_layers=[],
+            attention_bias=False,
+            head_dim=32,
+        )
+
+        # GPTQ layout: only .qweight / .scales / .qzeros / .g_idx, no .weight.
+        save_file(
+            {
+                "model.layers.0.mlp.experts.0.gate_proj.qweight": torch.zeros(16, 32, dtype=torch.int32),
+                "model.layers.0.mlp.experts.0.gate_proj.scales": torch.zeros(64, 1),
+                "model.layers.0.mlp.experts.0.up_proj.qweight": torch.zeros(16, 32, dtype=torch.int32),
+                "model.layers.0.mlp.experts.0.up_proj.scales": torch.zeros(64, 1),
+                "model.layers.0.mlp.experts.0.down_proj.qweight": torch.zeros(8, 64, dtype=torch.int32),
+                "model.layers.0.mlp.experts.0.down_proj.scales": torch.zeros(128, 1),
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+
+        config = GenericMoeConfig.from_hf_config(hf_config)
+        assert config.arch.experts_are_packed is True  # default qwen3_moe spec
+
+        config = adapt_config_to_checkpoint(config, str(tmp_path))
+        assert config.arch.experts_are_packed is False, (
+            "GPTQ layout detection failed: .qweight should trigger unpacked spec"
+        )
+        assert config.arch.expert_proj_names == {
+            "gate": "gate_proj",
+            "up": "up_proj",
+            "down": "down_proj",
+        }
+
 
 # ============================================================
 # Test 5: MoE Routing Logic (CPU-side, no kt-kernel needed)
@@ -7124,3 +7181,85 @@ class TestExpertMapStore:
         ):
             assert key in diag
 
+
+# ============================================================
+# ADR-002 M1-T3: static audit of the quantized DPU kernel file.
+#
+# The current `kernel_mode=6` code path is *labelled* as T-MAC but is
+# really an activation-side shift-add multiplier that still dereferences
+# `lut0_i16[q]` / `lut1_i16[q]` in the inner loop, which means the weight
+# has NOT been encoded into the LUT index (genuine T-MAC precondition).
+#
+# These tests freeze that observation so nobody accidentally "fixes" the
+# labelling without fixing the algorithm, and so when `kernel_mode=7`
+# lands in M-2 we can delete these asserts as the same audit.
+# ============================================================
+class TestQuantizedKernelAudit:
+    def _kernel_source(self) -> str:
+        import pathlib
+        here = pathlib.Path(__file__).resolve()
+        src = here.parent.parent / "nano_ktrans" / "kernels" / "pim_native" / "dpu_quantized_kernel.c"
+        assert src.exists(), f"DPU quantized kernel source missing: {src}"
+        return src.read_text(encoding="utf-8")
+
+    def _isolate_mode_block(self, source: str, mode: int) -> str:
+        """Return the body of the `if (kernel_mode == N)` block.
+
+        Greedy, brace-balanced. Good enough for the small set of braces in
+        this file; breaks the moment the block stops being a straight block
+        (which is exactly when M-2 lands and this test should be replaced).
+        """
+        marker = f"if (kernel_mode == {mode})"
+        start = source.find(marker)
+        assert start != -1, f"kernel_mode=={mode} block not found in DPU source"
+        brace_start = source.find("{", start)
+        assert brace_start != -1
+        depth = 0
+        for idx in range(brace_start, len(source)):
+            ch = source[idx]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[brace_start : idx + 1]
+        raise AssertionError("unbalanced braces in kernel_mode block")
+
+    def test_mode_6_still_reads_lut_by_weight_nibble_not_by_activation_pack(self):
+        """Genuine T-MAC's inner loop must be `T[pack(x_bits)]`, not `lut[q_weight]`.
+
+        `kernel_mode=6` today still does the latter, which is exactly why it
+        cannot save the DPU software multiply. Locking this in so the M-2
+        replacement is a deliberate, reviewed change.
+        """
+        source = self._kernel_source()
+        block = self._isolate_mode_block(source, 6)
+        # These two patterns prove that the current implementation still
+        # keys the LUT by 4-bit quantized weight — i.e. the activation has
+        # NOT been bit-packed into the LUT index as genuine T-MAC requires.
+        assert "lut0_i16[q0]" in block, (
+            "kernel_mode=6 no longer dereferences lut0_i16[q0]; if M-2 already "
+            "landed, delete TestQuantizedKernelAudit and replace with a "
+            "mode=7 correctness test."
+        )
+        assert "lut1_i16[q1]" in block
+
+    def test_mode_6_uses_activation_bit_scan_multiplier(self):
+        """The tell-tale signature of the fake-T-MAC: 7 conditional adds on
+        abs(x) bits. Lock it in so any rewrite has to remove these marks.
+        """
+        source = self._kernel_source()
+        block = self._isolate_mode_block(source, 6)
+        for bit_mask in ("0x01u", "0x02u", "0x04u", "0x08u", "0x10u", "0x20u", "0x40u"):
+            assert f"abs_x & {bit_mask}" in block, (
+                f"kernel_mode=6 no longer shift-adds abs_x bit {bit_mask}; "
+                f"this is expected if M-2 has landed — update the audit test."
+            )
+
+    def test_mode_4_is_the_single_multiplication_baseline(self):
+        """mode=4 must keep the single `x * lut[q]` form so it can serve as
+        the honest baseline that mode=7 has to beat."""
+        source = self._kernel_source()
+        block = self._isolate_mode_block(source, 4)
+        # mode=4 is the "int8 × int16 software multiply" baseline.
+        assert "x * (int32_t)lut0_i16[q0]" in block or "x * (int32_t)lut0_i16[ q0 ]" in block
