@@ -234,7 +234,13 @@ class PIMMoEBackend(CPUMoEBackend):
         states: torch.Tensor,
         cpu_slot: int,
     ) -> torch.Tensor:
-        """Run expert MLP on DPU using quantized (GPTQ) weights with preload caching."""
+        """Run expert MLP on DPU using quantized (GPTQ) weights with preload caching.
+
+        ADR-002 M-4.1: fuse gate+up into one DPU launch via
+        ``preload_and_infer_concat``.  Three DPU launches per expert
+        become two, and host->DPU weight transfer per expert drops by
+        one third.
+        """
         if self.quantized_runtime is None:
             raise RuntimeError("PIM quantized runtime is not available.")
 
@@ -244,30 +250,31 @@ class PIMMoEBackend(CPUMoEBackend):
 
         kernel_mode = 4  # int8 fixed-point (best for batch=1 decode)
 
-        # Each projection gets its own expert_id namespace to avoid collisions
-        # since the quantized runtime can only hold one set of weights at a time.
-        # We use 3 sequential calls: gate, up, down — each preloads its own weights.
+        # Each fused call gets its own expert_id namespace so the
+        # single-slot residency tracker in PIMQuantizedRuntime can
+        # distinguish it from the down projection's bundle.
         base_eid = self._expert_id(cpu_slot)
+        gate_up_eid = base_eid ^ 0x1212121212121212
 
-        # Gate projection
-        gate_eid = base_eid ^ 0x1111111111111111
-        self.quantized_runtime.preload(gate_eid, gptq["gate"], kernel_mode)
-        gate = self.quantized_runtime.infer(states)
+        # Fused gate+up: one DPU launch instead of two.
+        gate, up = self.quantized_runtime.preload_and_infer_concat(
+            gate_up_eid,
+            gptq["gate"],
+            gptq["up"],
+            states,
+            kernel_mode=kernel_mode,
+        )
 
-        # Up projection
-        up_eid = base_eid ^ 0x2222222222222222
-        self.quantized_runtime.preload(up_eid, gptq["up"], kernel_mode)
-        up = self.quantized_runtime.infer(states)
-
-        # SiLU activation on host
+        # SiLU activation on host.
         hidden = F.silu(gate) * up
 
-        # Down projection
+        # Down projection — still its own DPU call.
         down_eid = base_eid ^ 0x3333333333333333
         self.quantized_runtime.preload(down_eid, gptq["down"], kernel_mode)
         output = self.quantized_runtime.infer(hidden)
 
-        self.real_dpu_quantized_calls += 3
+        # Counters — 2 quantized calls per expert now (fused gate/up + down).
+        self.real_dpu_quantized_calls += 2
         self.real_dpu_expert_calls += 1
         self.last_kernel_cycles = self.quantized_runtime.last_cycles()
         return output
@@ -537,10 +544,16 @@ class PIMMoEBackend(CPUMoEBackend):
             except Exception:
                 pass
 
-        # Clean up quantized runtime (all 3 projection IDs)
+        # Clean up quantized runtime (all projection bundle IDs:
+        # legacy gate/up/down + ADR-002 M-4.1 fused gate+up).
         if self.quantized_runtime is not None:
             try:
-                for xor_mask in (0x1111111111111111, 0x2222222222222222, 0x3333333333333333):
+                for xor_mask in (
+                    0x1111111111111111,
+                    0x2222222222222222,
+                    0x3333333333333333,
+                    0x1212121212121212,  # M-4.1 fused gate+up bundle
+                ):
                     proj_eid = eid ^ xor_mask
                     self.quantized_runtime.evict_cached_weights(proj_eid)
             except Exception:
