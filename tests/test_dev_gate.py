@@ -195,23 +195,48 @@ class TestMilestoneEvaluation:
         assert v.verdict == "BLOCKED" and "no acceptance_checks" in v.reason
 
     def test_freshness_prevents_replaying_previous_pass(self, sandbox):
+        """A *non-PASS* previous verdict must require fresh data to be
+        re-judged — otherwise WAIT / PARTIAL could be laundered by a
+        gate rerun that was never backed by new evidence.
+        """
         _write_spec(
             sandbox, "M-A", required=["data.json"], primary="data.json",
             checks=[{"path": "x", "op": ">=", "value": 1.0}],
         )
-        artifact = _write_json(sandbox, "data.json", {"x": 2.0})
+        _write_json(sandbox, "data.json", {"x": 0.5})  # fails the rule
         state = {"milestones": {}}
-        # First evaluation: PASS, snapshot the mtime.
+        v1 = dev_gate.evaluate_milestone("M-A", state=state)
+        assert v1.verdict == "BLOCKED"
+        state["milestones"]["M-A"] = {
+            "verdict": "BLOCKED",
+            "artifact_snapshots": v1.artifact_snapshots,
+        }
+        # Second eval with SAME mtime: must WAIT (no new evidence).
+        v2 = dev_gate.evaluate_milestone("M-A", state=state)
+        assert v2.verdict == "WAIT"
+        assert "unchanged since last PASS" in v2.reason
+
+    def test_pass_is_preserved_across_repeat_checks_without_new_data(self, sandbox):
+        """Once a milestone PASSES with a given artifact snapshot, every
+        subsequent ``check`` must keep returning PASS until the artifact
+        changes or the spec changes.  Otherwise downstream milestones
+        whose prerequisites point at this one would flip to HALT on the
+        very next gate run, even though nothing regressed.
+        """
+        _write_spec(
+            sandbox, "M-A", required=["data.json"], primary="data.json",
+            checks=[{"path": "x", "op": ">=", "value": 1.0}],
+        )
+        _write_json(sandbox, "data.json", {"x": 2.0})
+        state = {"milestones": {}}
         v1 = dev_gate.evaluate_milestone("M-A", state=state)
         assert v1.verdict == "PASS"
         state["milestones"]["M-A"] = {
             "verdict": "PASS",
             "artifact_snapshots": v1.artifact_snapshots,
         }
-        # Second evaluation with the SAME file mtime -> must WAIT, not replay PASS.
         v2 = dev_gate.evaluate_milestone("M-A", state=state)
-        assert v2.verdict == "WAIT"
-        assert "unchanged since last PASS" in v2.reason
+        assert v2.verdict == "PASS"  # stable — no new data is not a regression
 
     def test_fresh_rerun_after_artifact_update_allows_reevaluation(self, sandbox):
         _write_spec(

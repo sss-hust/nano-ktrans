@@ -223,6 +223,35 @@ class CPUMoEBackend(ExpertOffloadBackend):
             expert_key_template, expert_proj_names,
         )
 
+        # GPTQ path: per-expert quantized weights already loaded into
+        # ``self._gptq_experts`` and consumed downstream by the PIM
+        # quantized runtime.  The fp16 stacked tensors below do NOT exist
+        # on disk for GPTQ checkpoints (only ``.qweight / .scales`` do),
+        # so calling ``load_layer_experts_stacked`` in that mode aborts
+        # with ``Weight key '...gate_proj.weight' not found``.  Skip the
+        # stacked fp16 load for GPTQ layers; the C++ AMX path and the
+        # torch-fallback path below are also GPTQ-unaware so we take the
+        # same early return and let downstream PIM routing handle decode.
+        if self.is_gptq:
+            self._gate_proj = None
+            self._up_proj = None
+            self._down_proj = None
+            self.use_fallback = False  # dispatched by PIM quantized path
+            # Downstream PIM routing uses cpu_expert_lookup to map
+            # expert_idx → per-expert GPTQ weight slot in
+            # self._gptq_experts, so it must be populated even though no
+            # stacked fp16 tensors exist.
+            _cpu_expert_indices = torch.where(~gpu_experts_mask.bool())[0].to(torch.long).cpu()
+            self.cpu_expert_lookup = {
+                int(expert_idx): slot
+                for slot, expert_idx in enumerate(_cpu_expert_indices.tolist())
+            }
+            logger.info(
+                "Layer %s: CPU stacked fp16 load skipped (GPTQ mode, %s CPU experts, handled by quantized DPU path)",
+                layer_idx, len(self.cpu_expert_lookup),
+            )
+            return
+
         stacked = loader.load_layer_experts_stacked(
             layer_idx,
             num_experts,
@@ -364,6 +393,11 @@ class CPUMoEBackend(ExpertOffloadBackend):
         cpu_slot = self.cpu_expert_lookup.get(int(expert_idx))
         if cpu_slot is None:
             return None
+        # GPTQ path never materializes fp16 stacked tensors; promotion
+        # back to GPU goes through per-expert safetensor reload via
+        # ExpertMaterializationManager, not through this fast path.
+        if self.is_gptq or self._gate_proj is None:
+            return None
         return {
             "gate": self._gate_proj[cpu_slot].to(dtype=self.fallback_dtype).contiguous().cpu(),
             "up": self._up_proj[cpu_slot].to(dtype=self.fallback_dtype).contiguous().cpu(),
@@ -371,6 +405,11 @@ class CPUMoEBackend(ExpertOffloadBackend):
         }
 
     def _compute_expert_output_cpu(self, states: torch.Tensor, cpu_slot: int) -> torch.Tensor:
+        if self.is_gptq or self._gate_proj is None:
+            raise RuntimeError(
+                "CPUMoEBackend fp16 expert compute is unavailable in GPTQ mode; "
+                "this layer must be routed through the quantized DPU path."
+            )
         states = states.to(dtype=self.fallback_dtype)
         gate = F.linear(states, self._gate_proj[cpu_slot])
         up = F.linear(states, self._up_proj[cpu_slot])
@@ -402,6 +441,21 @@ class CPUMoEBackend(ExpertOffloadBackend):
             self._fallback_output = torch.zeros_like(hidden_states)
             return
 
+        # In GPTQ mode the CPU backend's fp16 stacked weights were never
+        # loaded and the C++ AMX engine was never initialised, so neither
+        # the ``use_fallback`` F.linear path nor the ``cpu_infer`` path
+        # below can run.  A subclass (e.g. PIMMoEBackend) is expected to
+        # have already filled ``self._fallback_output`` via its own
+        # ``_submit_forward_real``; if we still get here it means the
+        # subclass bailed out (prefill_force_cpu, batch_too_large, ...)
+        # and there is no honest fp16 fallback available — emit zeros so
+        # downstream sync_forward returns a well-shaped tensor instead of
+        # dereferencing None pointers.
+        if self.is_gptq and self.cpu_infer is None:
+            if self._fallback_output is None or self._fallback_output.shape != hidden_states.shape:
+                self._fallback_output = torch.zeros_like(hidden_states)
+            return
+
         if self.use_fallback:
             cpu_mask = ~self.gpu_experts_mask.bool()
             flat_cpu = flat.to("cpu", dtype=self.fallback_dtype)
@@ -422,7 +476,6 @@ class CPUMoEBackend(ExpertOffloadBackend):
                 token_indices = torch.where(match.any(dim=1))[0]
                 if len(token_indices) == 0:
                     continue
-
                 expert_output = self._compute_expert_output_cpu(flat_cpu[token_indices], cpu_slot)
 
                 row_idx, col_idx = torch.where(match[token_indices])
@@ -472,6 +525,14 @@ class CPUMoEBackend(ExpertOffloadBackend):
             if self._fallback_output is None:
                 return torch.zeros_like(hidden_states)
             return self._fallback_output
+
+        # GPTQ-with-no-cpu_infer path: PIMMoEBackend (or subclass) has
+        # already populated self._fallback_output from its quantized
+        # submit; the C++ AMX path below is not available here.
+        if self.is_gptq and self.cpu_infer is None:
+            if self._fallback_output is None:
+                return torch.zeros_like(hidden_states)
+            return self._fallback_output.to(device=device)
 
         (_input_cpu, _expert_ids_cpu, _weights_cpu, output_cpu, _bsz_cpu, output_gpu) = \
             _buffer_pool.get_buffers(batch_size, self.hidden_size, self.top_k, device)

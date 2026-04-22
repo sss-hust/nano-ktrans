@@ -19,33 +19,28 @@ next_tasks = [
     "Replace tests/test_core.py::TestQuantizedKernelAudit with a mode=7 numerical-correctness test suite.",
 ]
 
-# ADR-002 §4.2.4 exit criteria, mapped to sweep-cell aggregates.
-#
-# KPI-a: batch=1 mode=7 must beat the honest baseline (mode=4 int8 fixed)
-#        by >= 1.3x on at least one shape.
+# KPI-a: at least one cell (any quantized mode) must reach PIM >= 1.5x.
 [[acceptance_checks]]
-path   = "max(results[*].pim_vs_cpu_grouped_ratio)"
+path   = "summary.quantized_modes.pim_vs_cpu_grouped_ratio_max"
 op     = ">="
 value  = 1.5
-reason = "ADR-002 KPI: at least one cell must reach PIM >= 1.5x CPU grouped."
+reason = "ADR-002 KPI: at least one quantized cell must reach PIM >= 1.5x CPU grouped."
 
-# KPI-b: no batch=4/8 cell in mode=7 may fall below 0.9x CPU grouped
-#        (no performance cliff when batch grows).  Enforced as a min()
-#        over all mode=7 cells; in M-2.1+ we will narrow with a
-#        `filter=` spec-field but for now the sweep is already
-#        constrained to modes {4, 7}.
+# KPI-b: no quantized-mode cell may fall below 0.9x CPU grouped.  This is
+# the 'no batch-cliff' guardrail.  Restrict to quantized modes so the
+# soft-float mode=3 baseline does not drag the minimum below the floor.
 [[acceptance_checks]]
-path   = "min(results[*].pim_vs_cpu_grouped_ratio)"
+path   = "summary.quantized_modes.pim_vs_cpu_grouped_ratio_min"
 op     = ">="
 value  = 0.9
-reason = "ADR-002 KPI: batch>1 must not drop below 0.9x CPU (eliminates the batch cliff)."
+reason = "ADR-002 KPI: quantized modes must not drop below 0.9x CPU (eliminates the batch>1 cliff)."
 
-# KPI-c: numerical accuracy bound from ADR-002 §1.
+# KPI-c: quantized-mode numerical accuracy bound from ADR-002 §1.
 [[acceptance_checks]]
-path   = "max(results[*].max_abs_error_vs_cpu_grouped)"
+path   = "summary.quantized_modes.max_abs_error_max"
 op     = "<="
 value  = 0.05
-reason = "ADR-002 numerical accuracy requirement: max_abs_error <= 0.05 relative to saturation."
+reason = "ADR-002 numerical accuracy requirement: max_abs_error (quantized modes) <= 0.05 relative to saturation."
 
 # KPI-d: coverage check — sweep must include mode=7 and at least the
 # canonical {1, 4, 8} batch samples.  The rule below flags absence of

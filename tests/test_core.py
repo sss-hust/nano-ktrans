@@ -7263,3 +7263,62 @@ class TestQuantizedKernelAudit:
         block = self._isolate_mode_block(source, 4)
         # mode=4 is the "int8 × int16 software multiply" baseline.
         assert "x * (int32_t)lut0_i16[q0]" in block or "x * (int32_t)lut0_i16[ q0 ]" in block
+
+# ============================================================
+# ADR-002 M-1 follow-up: ExpertWeightLoader process-wide key-index cache.
+#
+# The cache eliminates per-layer O(num_keys) re-scans; without it,
+# Qwen3-30B-GPTQ-Int4 e2e load exceeds 25 minutes before prefill
+# even starts (see journal 2026-04-22 §8).
+# ============================================================
+class TestExpertWeightLoaderCache:
+    def test_second_construction_hits_cache_and_reuses_index(self, tmp_path):
+        from safetensors.torch import save_file
+        from nano_ktrans.kernels.weight_loader import ExpertWeightLoader
+
+        save_file(
+            {"model.layers.0.mlp.experts.0.gate_proj.weight": torch.zeros(4, 4)},
+            str(tmp_path / "model.safetensors"),
+        )
+
+        # Clear any cached entries from previous tests.
+        ExpertWeightLoader._index_cache.clear()
+
+        first = ExpertWeightLoader(str(tmp_path))
+        assert "model.layers.0.mlp.experts.0.gate_proj.weight" in first._key_to_file
+        assert len(ExpertWeightLoader._index_cache) == 1
+
+        # Second construction must reuse the cached objects (identity check:
+        # same dict object, not merely a dict with the same contents, because
+        # any rebuild of the dict would re-open the safetensor files).
+        second = ExpertWeightLoader(str(tmp_path))
+        assert second._key_to_file is first._key_to_file
+        assert second._files is first._files
+
+    def test_cache_invalidated_when_safetensor_mtime_changes(self, tmp_path):
+        from safetensors.torch import save_file
+        from nano_ktrans.kernels.weight_loader import ExpertWeightLoader
+        import os
+        import time
+
+        save_file(
+            {"old_key": torch.zeros(4, 4)},
+            str(tmp_path / "model.safetensors"),
+        )
+        ExpertWeightLoader._index_cache.clear()
+        first = ExpertWeightLoader(str(tmp_path))
+        assert "old_key" in first._key_to_file
+
+        # Rewrite the safetensor with a different key, bump mtime, and re-load.
+        save_file(
+            {"new_key": torch.zeros(4, 4)},
+            str(tmp_path / "model.safetensors"),
+        )
+        future = time.time() + 5
+        os.utime(str(tmp_path / "model.safetensors"), (future, future))
+
+        second = ExpertWeightLoader(str(tmp_path))
+        assert "new_key" in second._key_to_file
+        assert "old_key" not in second._key_to_file
+        # Must have produced a distinct index dict, not reused the stale one.
+        assert second._key_to_file is not first._key_to_file

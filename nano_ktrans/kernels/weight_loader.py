@@ -77,7 +77,24 @@ class ExpertWeightLoader:
         loader = ExpertWeightLoader("/path/to/model")
         weights = loader.load_layer_experts(layer_idx=0, num_experts=8)
         # weights["gate"] = [tensor_expert_0, tensor_expert_1, ...]
+
+    Process-wide key-index cache:
+        Building ``_key_to_file`` requires opening every ``.safetensors`` file
+        in the directory and reading its full key table — for a Qwen3-30B GPTQ
+        checkpoint (74k keys) this costs multiple minutes per construction.
+        ``HybridMoE`` and ``CPUMoEBackend`` both construct a loader per layer,
+        so without this cache the e2e cold-load time scales as
+        ``O(num_layers × num_keys)`` and was observed to exceed 25 minutes
+        for Qwen3-30B-GPTQ-Int4 (see 2026-04-22 journal).  The cache keys on
+        ``(abs_path, sorted((file_path, mtime_ns)))`` so it is invalidated
+        whenever any safetensor file changes.
     """
+
+    # (abs_path, files_fingerprint) -> (files_list, key_to_file, quantize_config)
+    _index_cache: Dict[
+        tuple[str, tuple[tuple[str, int], ...]],
+        tuple[List[str], Dict[str, str], Dict[str, object]],
+    ] = {}
 
     def __init__(self, weight_path: str):
         self.weight_path = weight_path
@@ -92,17 +109,35 @@ class ExpertWeightLoader:
             self._key_to_file: Dict[str, str] = {}
             self._quantize_config: Dict[str, object] = {}
             return
-        self._files = sorted(glob(os.path.join(weight_path, "*.safetensors")))
-        if not self._files:
+
+        files = sorted(glob(os.path.join(weight_path, "*.safetensors")))
+        if not files:
             raise FileNotFoundError(f"No .safetensors files found in {weight_path}")
 
-        # 建立 key → file 的索引, 避免每次加载都扫描所有文件
-        self._key_to_file = {}
-        for f in self._files:
+        # Build a cheap fingerprint so we can reuse the key index across
+        # per-layer ExpertWeightLoader constructions without risking a stale
+        # cache after the user swaps checkpoints or re-downloads files.
+        abs_path = os.path.abspath(weight_path)
+        fingerprint = tuple(
+            (f, os.stat(f).st_mtime_ns) for f in files
+        )
+        cache_key = (abs_path, fingerprint)
+        cached = ExpertWeightLoader._index_cache.get(cache_key)
+        if cached is not None:
+            self._files, self._key_to_file, self._quantize_config = cached
+            return
+
+        key_to_file: Dict[str, str] = {}
+        for f in files:
             with safe_open(f, "pt", "cpu") as sf:
                 for key in sf.keys():
-                    self._key_to_file[key] = f
+                    key_to_file[key] = f
+        self._files = files
+        self._key_to_file = key_to_file
         self._quantize_config = self._load_quantize_config()
+        ExpertWeightLoader._index_cache[cache_key] = (
+            self._files, self._key_to_file, self._quantize_config,
+        )
 
     def _load_quantize_config(self) -> Dict[str, object]:
         import json
@@ -123,6 +158,28 @@ class ExpertWeightLoader:
                 return quant
         return {}
 
+    # Process-wide cache of open safetensors handles, keyed on file path.
+    # Opening/closing via ``with safe_open(...)`` on every _load_tensor() call
+    # turns each per-expert projection read into a fresh mmap of a 17 GB
+    # checkpoint.  For Qwen3-30B-GPTQ-Int4 the _detect_and_load_gptq path
+    # alone would do 48 layers × 126 experts × 3 projections × 4 tensors
+    # ≈ 73k re-opens; measured cost on real hardware was ~192 s per layer
+    # on layer 0.  A single handle per file, reused for the lifetime of the
+    # process, brings that down to a single mmap per file.
+    _open_handle_cache: Dict[str, object] = {}
+
+    @classmethod
+    def _get_open_handle(cls, file_path: str):
+        handle = cls._open_handle_cache.get(file_path)
+        if handle is None:
+            handle = safe_open(file_path, "pt", "cpu")
+            # safe_open returns a context manager; call __enter__ so we
+            # keep the underlying file mmapped without having to exit the
+            # context on every access.
+            handle = handle.__enter__()
+            cls._open_handle_cache[file_path] = handle
+        return handle
+
     def _load_tensor(self, key: str) -> torch.Tensor:
         file_path = self._key_to_file.get(key)
         if file_path is None:
@@ -130,8 +187,8 @@ class ExpertWeightLoader:
                 f"Weight key '{key}' not found in safetensors files. "
                 f"Available keys can be listed with the safetensors CLI."
             )
-        with safe_open(file_path, "pt", "cpu") as sf:
-            return sf.get_tensor(key).contiguous()
+        handle = self._get_open_handle(file_path)
+        return handle.get_tensor(key).contiguous()
 
     @staticmethod
     def _normalize_scale_layout(
@@ -203,14 +260,14 @@ class ExpertWeightLoader:
                         f"Available keys can be listed with the safetensors CLI."
                     )
                 file_path = self._key_to_file[key]
-                with safe_open(file_path, "pt", "cpu") as sf:
-                    tensor = sf.get_tensor(key)
-                    if proj_name == "gate_up":
-                        gate, up = tensor.chunk(2, dim=0)
-                        result["gate"].append(gate.contiguous())
-                        result["up"].append(up.contiguous())
-                    else:
-                        result[proj_name].append(tensor.contiguous())
+                sf = self._get_open_handle(file_path)
+                tensor = sf.get_tensor(key)
+                if proj_name == "gate_up":
+                    gate, up = tensor.chunk(2, dim=0)
+                    result["gate"].append(gate.contiguous())
+                    result["up"].append(up.contiguous())
+                else:
+                    result[proj_name].append(tensor.contiguous())
 
         if uses_gate_up:
             assert len(result["gate"]) == num_experts
@@ -323,14 +380,14 @@ class ExpertWeightLoader:
                     f"Available keys can be listed with the safetensors CLI."
                 )
             file_path = self._key_to_file[key]
-            with safe_open(file_path, "pt", "cpu") as sf:
-                tensor = sf.get_tensor(key)
-                if proj_name == "gate_up":
-                    gate, up = tensor.chunk(2, dim=0)
-                    result["gate"] = gate.contiguous()
-                    result["up"] = up.contiguous()
-                else:
-                    result[proj_name] = tensor.contiguous()
+            sf = self._get_open_handle(file_path)
+            tensor = sf.get_tensor(key)
+            if proj_name == "gate_up":
+                gate, up = tensor.chunk(2, dim=0)
+                result["gate"] = gate.contiguous()
+                result["up"] = up.contiguous()
+            else:
+                result[proj_name] = tensor.contiguous()
 
         return result
 

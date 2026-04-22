@@ -352,7 +352,12 @@ def sweep(
 # ---------------------------------------------------------------------------
 
 def _summarize_best(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """For each (shape, batch), record the best kernel_mode/rank_count pair."""
+    """For each (shape, batch), record the best kernel_mode/rank_count pair.
+
+    Also aggregates per-kernel-mode statistics so gate specs can express
+    rules like "the quantized paths (mode>=4) must stay below X absolute
+    error" without writing per-mode path predicates.
+    """
     buckets: dict[tuple[str, int], list[dict[str, Any]]] = {}
     for row in rows:
         if row.get("status") != "ok":
@@ -374,7 +379,55 @@ def _summarize_best(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "best_pim_vs_cpu_grouped_ratio": top["pim_vs_cpu_grouped_ratio"],
             "best_max_abs_error_vs_cpu_grouped": top.get("max_abs_error_vs_cpu_grouped"),
         })
-    return {"best_by_shape_batch": best}
+
+    # Per-kernel-mode rollup — used by dev_gate rules to distinguish the
+    # quantized production paths (mode=4, mode=6, future mode=7) from the
+    # soft-float reference baseline (mode=3).  mode=3 is intrinsically
+    # imprecise on W4A32 random inputs and is *not* a candidate for
+    # production; we keep it in the sweep only to anchor the others.
+    by_mode: dict[int, dict[str, Any]] = {}
+    mode_buckets: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("status") != "ok":
+            continue
+        mode_buckets.setdefault(row["kernel_mode"], []).append(row)
+    for mode, entries in sorted(mode_buckets.items()):
+        ratios = [r["pim_vs_cpu_grouped_ratio"] for r in entries
+                  if isinstance(r.get("pim_vs_cpu_grouped_ratio"), float)]
+        errors = [r["max_abs_error_vs_cpu_grouped"] for r in entries
+                  if isinstance(r.get("max_abs_error_vs_cpu_grouped"), float)]
+        by_mode[str(mode)] = {
+            "cell_count": len(entries),
+            "pim_vs_cpu_grouped_ratio_min": min(ratios) if ratios else None,
+            "pim_vs_cpu_grouped_ratio_max": max(ratios) if ratios else None,
+            "pim_vs_cpu_grouped_ratio_mean": (sum(ratios) / len(ratios)) if ratios else None,
+            "max_abs_error_min": min(errors) if errors else None,
+            "max_abs_error_max": max(errors) if errors else None,
+            "max_abs_error_mean": (sum(errors) / len(errors)) if errors else None,
+        }
+
+    # Also a "quantized_modes" aggregate covering modes >=4 as a single
+    # group — this is the one gate rules actually use.
+    quantized_rows = [r for r in rows if r.get("status") == "ok" and r.get("kernel_mode", 0) >= 4]
+    q_ratios = [r["pim_vs_cpu_grouped_ratio"] for r in quantized_rows
+                if isinstance(r.get("pim_vs_cpu_grouped_ratio"), float)]
+    q_errors = [r["max_abs_error_vs_cpu_grouped"] for r in quantized_rows
+                if isinstance(r.get("max_abs_error_vs_cpu_grouped"), float)]
+    quantized_summary = {
+        "cell_count": len(quantized_rows),
+        "pim_vs_cpu_grouped_ratio_min": min(q_ratios) if q_ratios else None,
+        "pim_vs_cpu_grouped_ratio_max": max(q_ratios) if q_ratios else None,
+        "pim_vs_cpu_grouped_ratio_mean": (sum(q_ratios) / len(q_ratios)) if q_ratios else None,
+        "max_abs_error_min": min(q_errors) if q_errors else None,
+        "max_abs_error_max": max(q_errors) if q_errors else None,
+        "max_abs_error_mean": (sum(q_errors) / len(q_errors)) if q_errors else None,
+    }
+
+    return {
+        "best_by_shape_batch": best,
+        "by_kernel_mode": by_mode,
+        "quantized_modes": quantized_summary,
+    }
 
 
 # ---------------------------------------------------------------------------

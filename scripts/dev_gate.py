@@ -408,6 +408,9 @@ def _stage_artifact_check(
     prev_snapshots: dict[str, float] = (
         (state.get("milestones", {}).get(spec.milestone_id) or {}).get("artifact_snapshots") or {}
     )
+    prev_verdict: str = (
+        (state.get("milestones", {}).get(spec.milestone_id) or {}).get("verdict") or ""
+    )
 
     for artifact in spec.required_artifacts:
         abs_path = REPO_ROOT / artifact
@@ -416,10 +419,20 @@ def _stage_artifact_check(
             continue
         mtime = abs_path.stat().st_mtime
         snapshots[artifact] = mtime
-        # Freshness: strictly newer than the snapshot we evaluated last PASS,
-        # otherwise we'd be re-judging the same data forever.
+        # Freshness: strictly newer than the snapshot we evaluated last
+        # time *if the last verdict was not a PASS*.  Once a milestone
+        # has PASSED with a given snapshot, re-running the gate without
+        # new data must keep the PASS intact (otherwise every downstream
+        # milestone would flip to HALT on every subsequent check).
+        # A non-PASS previous verdict is a different story: for WAIT /
+        # PARTIAL / BLOCKED the only way to change the outcome is new
+        # data, so identical mtimes mean we still have no new evidence.
         prev_mtime = prev_snapshots.get(artifact)
-        if prev_mtime is not None and mtime <= prev_mtime:
+        if (
+            prev_verdict != "PASS"
+            and prev_mtime is not None
+            and mtime <= prev_mtime
+        ):
             stale.append(artifact)
         try:
             loaded[artifact] = json.loads(abs_path.read_text(encoding="utf-8"))

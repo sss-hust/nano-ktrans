@@ -6,7 +6,7 @@ updated: 2026-04-22
 
 # nano-ktrans
 
-> 一个面向学习和实验的 Hybrid MoE 推理框架。当前已打通 CPU、`cuda_cpu_offload` 和实验性真实 DPU `pim` backend；新的主目标是让非专家层常驻 GPU，而专家在 GPU/PIM 间动态迁移与调度。已在 `2026-04-21` 落地 P1 (MRS score-aware hotness) 与 P2 (Expert Map Store + prompt 语义预取) 的最小可用版本，两者默认关闭，需显式启用。`2026-04-22` 修复了 v0.3.0-rc1 测试套件的 3 个历史回归；完成 ADR-002 M-1（修 GPTQ checkpoint layout 适配 + 全 shape×batch×rank×mode sweep 脚本 + `kernel_mode=6` 假 T-MAC 静态审计）；落地 **`scripts/dev_gate.py` 数据驱动 milestone 守门人**，从此每个 milestone 推进必须先过 gate。`pytest tests` 现为 **183 passed**。
+> 一个面向学习和实验的 Hybrid MoE 推理框架。当前已打通 CPU、`cuda_cpu_offload` 和实验性真实 DPU `pim` backend；新的主目标是让非专家层常驻 GPU，而专家在 GPU/PIM 间动态迁移与调度。已在 `2026-04-21` 落地 P1 (MRS score-aware hotness) 与 P2 (Expert Map Store + prompt 语义预取) 的最小可用版本，两者默认关闭，需显式启用。`2026-04-22` 修复了 v0.3.0-rc1 测试套件的 3 个历史回归；**ADR-002 M-1 已在真机 Qwen3-30B-A3B-GPTQ-Int4 上验收通过**（`dev_gate check M-1` = PASS 6/6 rules），期间修了 GPTQ checkpoint layout 下游 4 处级联 bug + loader/index 进程级缓存（加速 ≈150×）；实测 mode=4 (int8 fixed) peak ratio = **3.36× CPU grouped**，确证 mode=6 "T-MAC" 伪实现 peak 仅 1.11×。`pytest tests` 现为 **186 passed**。
 
 ## 技术栈
 
