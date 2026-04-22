@@ -7,6 +7,24 @@ tags: [changelog]
 
 ## 2026-04-22
 
+### 2026-04-22 11:10 - ADR-002：PIM 算子级超越 CPU 的优化路线
+
+- 新增 `.knowledge/architecture/decisions/002-pim-operator-parity-roadmap.md`，
+  系统分析当前 quantized PIM 路径的 5 个关键差距并制定 4 阶段路线：
+  - **Gap A**：`kernel_mode=6` 当前实现不是真正的 T-MAC（只是 activation 侧
+    朴素 shift-add 乘法模拟），没有消除 DPU 软件乘法
+  - **Gap B**：LUT 布局未考虑 `batch>1` 复用，导致 `batch=4/8` 性能悬崖
+  - **Gap C**：前台/后台 overlap 未形成（e2e benchmark 显示 `runtime_evictions=0`）
+  - **Gap D**：e2e GPTQ benchmark 至今未跑通（`gate_up_proj` checkpoint layout 适配 bug）
+  - **Gap E**：`pim_prefill_token_threshold=8` 硬阈值，缺 cost model
+- 路线分 4 个里程碑：
+  - **M-1**（1-2 天）：修 e2e 阻塞 bug + 全 shape×batch×rank×mode sweep 基线
+  - **M-2**（1 周）：重写 `kernel_mode=7` 为真正的 T-MAC（weight bit-sliced + activation bit-pack LUT）
+  - **M-3**（1 周）：`BackendCostModel`（ADR-001 P3+P6）+ 异步 PIM submit，真正形成 overlap
+  - **M-4**（2-3 周）：Mixed precision / LUT 共享 / sub-batch interleaving，论文级增量
+- 同步更新 `development/current-focus.md` 把路线挂到"下一阶段目标"顶部
+- `architecture/_INDEX.md` 加入 ADR-002 行
+
 ### 2026-04-22 10:50 - 修复 v0.3.0-rc1 测试回归
 
 `fix/v0.3.0-rc1-test-regressions` 分支，3 文件改动：

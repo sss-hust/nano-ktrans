@@ -32,9 +32,42 @@ updated: 2026-04-19 12:40
 updated: 2026-04-21 19:45
 updated: 2026-04-21 20:05
 updated: 2026-04-22 10:50
+updated: 2026-04-22 11:10
 ---
 
 # 🔥 当前工作焦点
+
+## 下一阶段目标（2026-04-22 起）
+
+> **核心 KPI**：PIM 算子在 Qwen3-GPTQ-Int4 full shape × {batch=1,4,8} × {1/4/8/16/32 ranks}
+> 组合下稳定超过 CPU grouped baseline **≥ 1.5×**，误差 `max_abs_error ≤ 0.05` 相对满量程。
+>
+> 详见 [ADR-002](../architecture/decisions/002-pim-operator-parity-roadmap.md)。
+
+### 已识别的关键差距
+
+| Gap | 描述 | 影响 | Milestone |
+|-----|------|------|-----------|
+| A | `kernel_mode=6` 不是真 T-MAC（activation bit-scan ≠ weight bit-slicing + LUT） | DPU 软件乘法仍在内循环 | **M-2** 重写 |
+| B | LUT 布局未考虑 `batch>1` 复用，activation 读取 B 倍放大 | `batch=4/8` 性能悬崖 | **M-2** 一起解决 |
+| C | 前台/后台 overlap 未真正形成，`runtime_evictions=0` | 即使算子加速也被串行依赖吃掉 | **M-3** |
+| D | e2e GPTQ benchmark 从未跑通（`gate_up_proj` key 适配问题） | 所有"PIM 打赢 CPU"证据仅限 operator-only | **M-1** 必须先修 |
+| E | `pim_prefill_token_threshold=8` 硬阈值，无 cost model | 大量错路由到 PIM | **M-3** |
+
+### 四阶段路线
+
+| Milestone | 周期 | 交付物 | 退出标准 |
+|-----------|------|-------|---------|
+| **M-1** 基线建立 | 1-2 天 | e2e GPTQ 跑通 + 全 shape×batch×rank×mode sweep | 可信对照数据 + 量化 mode=6 是否 fake |
+| **M-2** 真 T-MAC kernel | 1 周 | `kernel_mode=7`（weight bit-sliced LUT） | ≥ mode=4 × 1.3，`batch=4/8` 不掉 0.9× 以下 |
+| **M-3** Cost model + 后台 overlap | 1 周 | `BackendCostModel` + 异步 PIM submit | e2e `cuda_pim` ≥ `cuda_cpu_offload` |
+| **M-4** 研究探索 | 2-3 周 | Mixed precision / LUT 共享 / sub-batch | 论文级增量 |
+
+### 立即开始的 M-1 任务
+
+- [ ] **M1-T1** 修复 e2e `gate_up_proj` key 适配：让 `benchmark_inference.py --backend cuda_pim` 在 Qwen3 GPTQ checkpoint 上跑通
+- [ ] **M1-T2** 新增 `benchmarks/benchmark_pim_shape_sweep.py`，对 3 种 shape × {1,2,4,8} batch × {1,4,8,16,32} ranks × {3,4,6} kernel_mode 跑全 sweep
+- [ ] **M1-T3** 用 M1-T2 数据验证 `kernel_mode=6` 是否确实不如 `kernel_mode=4`，为 M-2 的替代实现提供对照
 
 ## 本轮新增（2026-04-22）
 
@@ -50,6 +83,9 @@ updated: 2026-04-22 10:50
 - [x] 4 条新 gotchas 写入 `.knowledge/context/gotchas.md`：`LLM.__new__` 绕过
       `__init__` 的字段容错模式、`ExpertWeightLoader` 不应在构造期校验 weight 文件、
       AI 生成测试必须实跑、smoke test 要进 CI 必跑集
+- [x] **制定 ADR-002 PIM 算子级超越 CPU 的优化路线**（本次更新）
+      - 核心发现：当前 `kernel_mode=6` 不是真正的 T-MAC，只是 activation 侧的朴素 shift-add 乘法模拟
+      - 4 阶段路线：M-1 建立基线 → M-2 真 T-MAC → M-3 cost model + overlap → M-4 研究探索
 
 ## 本轮新增（2026-04-21）
 
