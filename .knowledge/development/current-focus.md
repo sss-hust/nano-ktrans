@@ -35,9 +35,19 @@ updated: 2026-04-22 10:50
 updated: 2026-04-22 11:10
 updated: 2026-04-22 11:25
 updated: 2026-04-22 11:50
+updated: 2026-04-22 16:40
 ---
 
 # 🔥 当前工作焦点
+
+## ADR-002 Milestone 状态（2026-04-22 当前快照）
+
+| Milestone | dev_gate | 说明 |
+|-----------|----------|------|
+| M-1 | ✅ PASS (6/6) | baseline 建立：e2e GPTQ cuda_pim 跑通 + 120-cell operator sweep 归档 |
+| **M-2** | ✅ **PASS (6/6)** | **kernel_mode=7 bit-serial T-MAC 落地；correctness bit-exact，但 perf 在 0/60 cell 上跑赢 mode=4 → publishable 负结果**（ADR-002 §10）|
+| M-3 | 🚧 下一个 | BackendCostModel + 路由规则，初值从 M-2 sweep 直接读出：batch=1 gate/up/down → PIM mode=4，batch>=4 → CPU。`kernel_mode=7` 不再作为默认路径。 |
+| M-4 | 未启动 | 研究向（mixed precision experts / sub-batch interleaving / shared LUT）|
 
 ## 开发流程（2026-04-22 起强制执行）
 

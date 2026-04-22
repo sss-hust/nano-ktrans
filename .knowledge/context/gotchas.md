@@ -231,3 +231,20 @@ tags: [pitfalls, debugging]
   1. 静态代码审计（断言"不该出现的指令模式"真的不出现，如"内循环里不得有 `lut[q]`"）
   2. 真机 kernel breakdown（能定量看到 `launch_seconds` 下降到符合算法复杂度的水位）
   3. 与理论模型对照（DPU 无硬件乘法 → 真 T-MAC 的 cycle 数应接近 `MRAM_read_cycles × num_groups × output_dim`，不应随 activation bit-width 线性增长）
+
+<!-- updated: 2026-04-22 16:40 -->
+
+## bit-plane T-MAC 在 UPMEM DPU 上**比 int8 软件乘法慢**（负结果）
+
+- 现象：`kernel_mode=7` 完全消除了 DPU 内循环的软件乘法（bit-plane bitmask + 条件加法，weight LUT 只查一次），数值与 mode=4 **bit-exact**。但 120-cell 真机 sweep（`benchmarks/results/pim_shape_sweep_M2_tmac.json`）显示 mode=7 **在 0/60 个 cell 跑赢 mode=4**（mode=7 peak 1.15× vs mode=4 peak 3.32×，mean 0.48× vs 1.45×）。
+- 根因（决定性的算术）：
+  - UPMEM DPU 的 `int8 × int16` 软件乘法 ≈ 10 cycles（SDK 编译器非常到位）
+  - DPU **没有硬件 ctz/popcnt/SIMD**；`__builtin_ctz` 在 32-bit 半字上能被 lower 到 ~4-6 cycle 软件序列，但 7 个 bit-plane 即使仅 sparse 扫过一半 set bits 也要 ~200 次条件加 + 7 次 ctz ≈ 504 cycles
+  - 64 次 int8×int16 软件乘法 ≈ 640 cycles — 和 mode=7 持平
+  - 额外再加 mode=7 的 per-block 64B bit-plane DMA + 128 次 weight unpack（shift+mask），净成本反而高于 mode=4
+- 经验：
+  1. **T-MAC 论文的 2-5× 收益是在有 SIMD + 硬件 ctz 的 ARM/x86 上取得**，**不能平移到 UPMEM**。先估 cycle 再写 kernel。
+  2. **"消除硬件不擅长的操作" ≠ "更快"**：要看替代方案的总 cycle 数。UPMEM 的乘法虽然是软件实现但已深度优化，不是真正的"不擅长"。
+  3. **负结果也要完整落地并 benchmark**，不是只写个伪代码就下结论。这次 M-2 的 120 cell 真机数据 + bit-exact correctness 验证本身就是论文素材。
+  4. **DPU kernel 新增大 stack 局部变量（>= ~512B）前务必先算 `STACK_SIZE_DEFAULT`**。本次 mode=7 加 `w0_block[64]+w1_block[64]+bp_cache[8]` ≈ 592B 直接把栈顶爆，全部 DPU `in fault`。修复是改用 `mem_alloc` 从 WRAM heap 分配。
+- 参考：`ADR-002 §10`、`dpu_quantized_kernel.c::kernel_mode == 7` 的长注释块、`.codebuddy/dev_gate/M-2.toml` 的 KPI rationale。

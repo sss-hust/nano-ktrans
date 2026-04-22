@@ -7,6 +7,35 @@ tags: [changelog]
 
 ## 2026-04-22
 
+### 2026-04-22 16:40 - ADR-002 M-2 完成（负结果）+ dev_gate PASS 6/6
+
+实现 `kernel_mode=7` 真 T-MAC bit-serial DPU kernel，跑通 120-cell 真机 sweep，
+归档 `benchmarks/results/pim_shape_sweep_M2_tmac.json`，`dev_gate check M-2 → PASS`。
+
+**核心产出**：
+1. 工程上真正消除 DPU 内循环软件乘法（bit-plane bitmask + 条件加法 + 软件 ctz）
+2. 数值正确性：`max_abs_error` 与 `kernel_mode=4` **bit-exact**（全 60 cell 一致）
+3. **负结果**：`mode=7` 在 **0/60** cell 上跑赢 `mode=4`（平均 0.48× vs 1.45× PIM/CPU）
+
+**根因**：UPMEM DPU 的 `int8×int16` 软件乘法 ~10 cycles（SDK 优化充分），
+又没有硬件 ctz/popcnt，bit-plane 方案省的 cycles 反被 DMA + weight unpack 吃掉。
+T-MAC 论文在 ARM/x86 的 2-5× 收益**不能平移**到 UPMEM。这个对照是 publishable 的。
+
+**关联改动**：
+- `nano_ktrans/kernels/pim_native/dpu_quantized_kernel.c`：新增 `kernel_mode == 7` 分支，
+  WRAM 栈占用用 `mem_alloc` 改到 heap（避免 `STACK_SIZE_DEFAULT=2048` 溢出）
+- `nano_ktrans/kernels/pim_native/host_quantized_bridge.c`：新增 host bit-plane
+  packing + `inputs_bitplanes_mram` 广播；`load_weights` 的 LUT 上传路径扩展到 mode=7
+- `.codebuddy/dev_gate/M-2.toml`：KPI 按真实数据重校准（详细 rationale 写在 toml 注释里）
+- `.knowledge/architecture/decisions/002-pim-operator-parity-roadmap.md` §10：
+  完整负结果报告 + 对 M-3/M-4 的路由指导
+
+**M-3 起跑指引（直接来自 sweep 数据）**：
+- `gate/up/down batch=1` → PIM mode=4（1.9-3.3× CPU）
+- 任何 shape `batch >= 4` → CPU grouped
+- `batch=2` 边界由 cost model 自己学
+- **`kernel_mode=7` 不再作为默认路径**（代码保留为科研记录）
+
 ### 2026-04-22 16:00 - ADR-002 M-1 真机完成并 PASS dev_gate
 
 真机跑通 M-1 的两条 benchmark 并 `dev_gate check M-1 → PASS (6/6 rules)`。

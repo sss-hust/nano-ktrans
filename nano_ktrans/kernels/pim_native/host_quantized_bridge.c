@@ -54,6 +54,12 @@
 #define WEIGHTS_PER_WORD (32 / BITS_PER_WEIGHT)
 #endif
 
+/* kernel_mode=7 bit-plane packing: 8 planes per BLOCK_FLOATS-wide block.
+ * Host allocates (batch_size * blocks_per_batch * 8) uint64_t entries. */
+#ifndef MAX_INPUT_BITPLANES_U64
+#define MAX_INPUT_BITPLANES_U64 ((MAX_INPUT_FLOATS / 64) * 8)
+#endif
+
 static struct dpu_set_t g_set;
 static bool g_initialized = false;
 static bool g_weights_loaded = false;
@@ -329,7 +335,7 @@ pim_quantized_load_weights(
         goto cleanup;
     }
 
-    if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6) {
+    if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6 || g_kernel_mode == 7) {
         dpu_index = 0;
         DPU_FOREACH(g_set, dpu, dpu_index)
         {
@@ -414,6 +420,7 @@ pim_quantized_run(
     int32_t *output_i32_shards = NULL;
     int16_t *runtime_lut_i16_shards = NULL;
     float *input_scales = NULL;
+    uint64_t *input_bitplanes = NULL;
     struct timespec total_start;
     struct timespec total_end;
     struct timespec input_start;
@@ -429,6 +436,7 @@ pim_quantized_run(
     const size_t blocks_per_batch = (size_t)g_input_dim / BLOCK_FLOATS;
     const size_t runtime_lut_i16_count =
         (size_t)batch_size * (size_t)g_output_dim * blocks_per_batch * (1u << BITS_PER_WEIGHT);
+    const size_t bitplane_u64_count = (size_t)batch_size * blocks_per_batch * 8u;
 
     if (!g_initialized || !g_weights_loaded) {
         set_error(error_buffer, error_buffer_len, "weights must be loaded before pim_quantized_run");
@@ -442,7 +450,7 @@ pim_quantized_run(
         set_error(error_buffer, error_buffer_len, "input/output shape too large");
         return -1;
     }
-    if ((g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6)
+    if ((g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6 || g_kernel_mode == 7)
         && (input_i8_count > MAX_INPUT_INT8 || shard_output_i32 > MAX_OUTPUT_INT32)) {
         set_error(error_buffer, error_buffer_len, "int8/int32 input/output shape too large");
         return -1;
@@ -451,25 +459,38 @@ pim_quantized_run(
         set_error(error_buffer, error_buffer_len, "runtime int16 lut too large");
         return -1;
     }
+    if (g_kernel_mode == 7 && bitplane_u64_count > MAX_INPUT_BITPLANES_U64) {
+        set_error(error_buffer, error_buffer_len, "bitplane buffer too large");
+        return -1;
+    }
+    if (g_kernel_mode == 7 && ((size_t)g_input_dim % 64u != 0)) {
+        set_error(error_buffer, error_buffer_len,
+                  "kernel_mode=7 requires input_dim divisible by 64 (BLOCK_FLOATS)");
+        return -1;
+    }
 
     kernel_cycles = calloc(g_nr_dpus, sizeof(*kernel_cycles));
     output_shards = calloc((size_t)g_nr_dpus * shard_output_floats, sizeof(*output_shards));
-    if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6) {
+    if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6 || g_kernel_mode == 7) {
         input_i8_shards = calloc(input_i8_count, sizeof(*input_i8_shards));
         output_i32_shards = calloc((size_t)g_nr_dpus * shard_output_i32, sizeof(*output_i32_shards));
         if (g_kernel_mode == 5) {
             runtime_lut_i16_shards = calloc(runtime_lut_i16_count, sizeof(*runtime_lut_i16_shards));
         }
-        if (g_kernel_mode == 4 || g_kernel_mode == 6) {
+        if (g_kernel_mode == 4 || g_kernel_mode == 6 || g_kernel_mode == 7) {
             input_scales = calloc(batch_size, sizeof(*input_scales));
+        }
+        if (g_kernel_mode == 7) {
+            input_bitplanes = calloc(bitplane_u64_count, sizeof(*input_bitplanes));
         }
     }
     if (
         kernel_cycles == NULL || output_shards == NULL
-        || ((g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6)
+        || ((g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6 || g_kernel_mode == 7)
             && (input_i8_shards == NULL || output_i32_shards == NULL))
-        || ((g_kernel_mode == 4 || g_kernel_mode == 6) && input_scales == NULL)
+        || ((g_kernel_mode == 4 || g_kernel_mode == 6 || g_kernel_mode == 7) && input_scales == NULL)
         || (g_kernel_mode == 5 && runtime_lut_i16_shards == NULL)
+        || (g_kernel_mode == 7 && input_bitplanes == NULL)
     ) {
         set_error(error_buffer, error_buffer_len, "failed to allocate run buffers");
         goto cleanup;
@@ -483,7 +504,7 @@ pim_quantized_run(
         goto cleanup;
     }
     clock_gettime(CLOCK_MONOTONIC, &input_start);
-    if (g_kernel_mode == 4 || g_kernel_mode == 6) {
+    if (g_kernel_mode == 4 || g_kernel_mode == 6 || g_kernel_mode == 7) {
         const float *inputs_f32 = (const float *)inputs;
         for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
             const size_t batch_offset = (size_t)batch_idx * (size_t)g_input_dim;
@@ -508,10 +529,66 @@ pim_quantized_run(
             }
         }
         g_input_scale = batch_size > 0 ? input_scales[0] : 1.0f;
-        if (check_dpu_error(
-                dpu_broadcast_to(g_set, "inputs_i8_mram", 0, input_i8_shards, input_i8_count * sizeof(int8_t), DPU_XFER_DEFAULT),
-                error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_i8_mram)") != 0) {
-            goto cleanup;
+
+        if (g_kernel_mode == 7) {
+            /* Bit-plane pack each BLOCK_FLOATS=64 block into 8 uint64_t
+             * (7 magnitude planes + 1 sign plane).  Host does this once
+             * per inference; DPU's inner loop is then pure add/lookup. */
+            memset(input_bitplanes, 0, bitplane_u64_count * sizeof(*input_bitplanes));
+            for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+                for (size_t block_idx = 0; block_idx < blocks_per_batch; ++block_idx) {
+                    const size_t block_offset =
+                        ((size_t)batch_idx * (size_t)g_input_dim) + (block_idx * BLOCK_FLOATS);
+                    const size_t bp_base =
+                        (((size_t)batch_idx * blocks_per_batch) + block_idx) * 8u;
+                    uint64_t planes[8] = {0};
+                    for (size_t lane = 0; lane < BLOCK_FLOATS; ++lane) {
+                        const int8_t v = input_i8_shards[block_offset + lane];
+                        uint32_t mag;
+                        uint64_t sign_bit;
+                        if (v < 0) {
+                            /* int8 minimum is -128; clamp magnitude to 127. */
+                            const int32_t nv = -(int32_t)v;
+                            mag = (nv > 127) ? 127u : (uint32_t)nv;
+                            sign_bit = 1ULL;
+                        } else {
+                            mag = (uint32_t)v;
+                            sign_bit = 0ULL;
+                        }
+                        const uint64_t lane_bit = (1ULL << lane);
+                        for (uint32_t b = 0; b < 7; ++b) {
+                            if ((mag >> b) & 1u) {
+                                planes[b] |= lane_bit;
+                            }
+                        }
+                        if (sign_bit) {
+                            planes[7] |= lane_bit;
+                        }
+                    }
+                    for (size_t p = 0; p < 8; ++p) {
+                        input_bitplanes[bp_base + p] = planes[p];
+                    }
+                }
+            }
+            if (check_dpu_error(
+                    dpu_broadcast_to(
+                        g_set,
+                        "inputs_bitplanes_mram",
+                        0,
+                        input_bitplanes,
+                        bitplane_u64_count * sizeof(uint64_t),
+                        DPU_XFER_DEFAULT),
+                    error_buffer,
+                    error_buffer_len,
+                    "dpu_broadcast_to(inputs_bitplanes_mram)") != 0) {
+                goto cleanup;
+            }
+        } else {
+            if (check_dpu_error(
+                    dpu_broadcast_to(g_set, "inputs_i8_mram", 0, input_i8_shards, input_i8_count * sizeof(int8_t), DPU_XFER_DEFAULT),
+                    error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_i8_mram)") != 0) {
+                goto cleanup;
+            }
         }
     } else if (g_kernel_mode == 5) {
         const float *inputs_f32 = (const float *)inputs;
@@ -591,7 +668,7 @@ pim_quantized_run(
 
     dpu_index = 0;
     clock_gettime(CLOCK_MONOTONIC, &output_start);
-    if (g_kernel_mode == 4 || g_kernel_mode == 6) {
+    if (g_kernel_mode == 4 || g_kernel_mode == 6 || g_kernel_mode == 7) {
         DPU_FOREACH(g_set, dpu, dpu_index)
         {
             if (check_dpu_error(
@@ -645,14 +722,14 @@ pim_quantized_run(
             max_cycles = kernel_cycles[dpu_index];
         }
         for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
-            if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6) {
+            if (g_kernel_mode == 4 || g_kernel_mode == 5 || g_kernel_mode == 6 || g_kernel_mode == 7) {
                 const int32_t *shard_ptr_i32 =
                     output_i32_shards + ((size_t)dpu_index * shard_output_i32) + ((size_t)batch_idx * g_shard_output_dim);
                 for (uint32_t local_row = 0; local_row < local_rows; ++local_row) {
                     if (g_kernel_mode == 5) {
                         output_dst[((size_t)batch_idx * (size_t)g_output_dim) + row_start + local_row] =
                             ((float)shard_ptr_i32[local_row]) / 256.0f;
-                    } else if (g_kernel_mode == 4 || g_kernel_mode == 6) {
+                    } else if (g_kernel_mode == 4 || g_kernel_mode == 6 || g_kernel_mode == 7) {
                         output_dst[((size_t)batch_idx * (size_t)g_output_dim) + row_start + local_row] =
                             ((float)shard_ptr_i32[local_row]) * (input_scales[batch_idx] / 256.0f);
                     }
@@ -679,6 +756,7 @@ pim_quantized_run(
 cleanup:
     free(runtime_lut_i16_shards);
     free(input_scales);
+    free(input_bitplanes);
     free(output_i32_shards);
     free(input_i8_shards);
     free(output_shards);

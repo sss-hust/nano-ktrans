@@ -61,6 +61,17 @@
 #define FIXED_BATCH_TILE 4
 #endif
 
+/* kernel_mode=7 (genuine T-MAC bit-serial): we pre-decompose activations
+ * into bit-plane bitmasks on the host.  For each batch/block we store
+ * a sign bitmask plus 7 magnitude bit-plane bitmasks, each packing 64
+ * int8 activations into a single uint64_t.  The DPU inner loop becomes
+ * a pure "lookup + conditional add" (no multiply, no per-element shift
+ * loop).  Max capacity = MAX_INPUT_INT8 bits per plane / 64, times 8
+ * planes (7 magnitude + 1 sign). */
+#ifndef MAX_INPUT_BITPLANES_U64
+#define MAX_INPUT_BITPLANES_U64 ((MAX_INPUT_INT8 / 64) * 8)
+#endif
+
 BARRIER_INIT(work_barrier, NR_TASKLETS);
 
 __host uint32_t batch_size;
@@ -79,6 +90,13 @@ __mram_noinit int16_t lut_mram[MAX_LUT_INT16];
 __mram_noinit int8_t inputs_i8_mram[MAX_INPUT_INT8];
 __mram_noinit int32_t outputs_i32_mram[MAX_OUTPUT_INT32];
 __mram_noinit int16_t runtime_lut_mram[MAX_RUNTIME_LUT_INT16];
+/* Bit-plane layout for kernel_mode=7:
+ *   [batch][block][plane] where plane in [0..7]:
+ *     plane 0..6 = magnitude bit 0..6 bitmasks (64 bits per block)
+ *     plane 7   = sign bitmask (bit set = activation negative)
+ * Stored contiguously per batch, block-major, plane-minor.
+ */
+__mram_noinit uint64_t inputs_bitplanes_mram[MAX_INPUT_BITPLANES_U64];
 
 int
 main(void)
@@ -110,11 +128,173 @@ main(void)
     float lut0[1 << BITS_PER_WEIGHT];
     float lut1[1 << BITS_PER_WEIGHT];
 
+    /* kernel_mode=7 scratchpads live in WRAM heap (not stack) to avoid
+     * blowing STACK_SIZE_DEFAULT=2048.  We only need them for mode=7 but
+     * allocate lazily per tasklet to keep startup cost off other paths. */
+    int32_t *w0_block_heap = NULL;
+    int32_t *w1_block_heap = NULL;
+    uint64_t *bp_cache_heap = NULL;
+    if (kernel_mode == 7) {
+        w0_block_heap = (int32_t *)mem_alloc(BLOCK_FLOATS * sizeof(int32_t));
+        w1_block_heap = (int32_t *)mem_alloc(BLOCK_FLOATS * sizeof(int32_t));
+        /* bp_cache needs 8-byte alignment for the uint64_t DMA transfer. */
+        bp_cache_heap = (uint64_t *)mem_alloc(8 * sizeof(uint64_t));
+    }
+
     const uint32_t words_per_row = input_dim / WEIGHTS_PER_WORD;
     const float zero_point = (float)(1 << (BITS_PER_WEIGHT - 1));
 
     for (uint32_t row = tasklet_id * 2; row < output_dim; row += NR_TASKLETS * 2) {
         for (uint32_t batch_idx = 0; batch_idx < batch_size; ++batch_idx) {
+
+            /* ── kernel_mode=7: GENUINE T-MAC bit-serial (no software multiply,
+             *    no per-element shift loop).
+             *
+             *  Host has pre-decomposed activations into 8 bit-plane bitmasks
+             *  per BLOCK_FLOATS=64-wide block:
+             *    plane b (b=0..6) holds the b-th magnitude bit of each |x_i|
+             *    plane 7 holds the sign bit of each x_i
+             *  Each plane is 64 bits = exactly one uint64_t per block.
+             *
+             *  Inner loop per block:
+             *    For each of the 64 activations we compute:
+             *      x_i * lut[q_i]
+             *    = sign_i * (sum over b of bit_b(|x_i|) * 2^b) * lut[q_i]
+             *    = sign_i * sum_b 2^b * (bit_b(|x_i|) * lut[q_i])
+             *  So if we maintain per-bit-plane accumulators
+             *      S_b = sum_{i : bit_b(|x_i|)=1} sign_i * lut[q_i]
+             *  the final answer is simply
+             *      acc = sum_b S_b << b.
+             *  No software multiply anywhere in the hot path. */
+            if (kernel_mode == 7) {
+                int32_t S[7][2] = {{0, 0}, {0, 0}, {0, 0}, {0, 0},
+                                   {0, 0}, {0, 0}, {0, 0}};
+                const uint32_t blocks_per_batch = input_dim / BLOCK_FLOATS;
+
+                for (uint32_t col = 0; col < input_dim; col += BLOCK_FLOATS) {
+                    const uint32_t word_offset = col / WEIGHTS_PER_WORD;
+                    const uint32_t words_this_block = BLOCK_FLOATS / WEIGHTS_PER_WORD;
+                    const uint32_t group_idx = col / group_size;
+                    const uint32_t block_idx = col / BLOCK_FLOATS;
+                    const uint32_t lut_row_offset0 =
+                        ((row * num_groups) + group_idx) * (1u << BITS_PER_WEIGHT);
+                    const uint32_t lut_row_offset1 =
+                        (((row + 1) * num_groups) + group_idx) * (1u << BITS_PER_WEIGHT);
+                    /* 8 planes per block, stored plane-minor.  Load all
+                     * 8 * 8 = 64 bytes for this batch/block in one DMA. */
+                    const uint32_t bp_offset =
+                        (((batch_idx * blocks_per_batch) + block_idx) * 8u);
+
+                    mram_read(
+                        (__mram_ptr void const *)(inputs_bitplanes_mram + bp_offset),
+                        bp_cache_heap,
+                        8 * sizeof(uint64_t));
+                    mram_read(
+                        (__mram_ptr void const *)(lut_mram + lut_row_offset0),
+                        lut0_i16,
+                        sizeof(lut0_i16));
+                    mram_read(
+                        (__mram_ptr void const *)(lut_mram + lut_row_offset1),
+                        lut1_i16,
+                        sizeof(lut1_i16));
+                    mram_read(
+                        (__mram_ptr void const *)(qweight_mram + ((row * words_per_row) + word_offset)),
+                        qweight0_cache,
+                        words_this_block * sizeof(uint32_t));
+                    mram_read(
+                        (__mram_ptr void const *)(qweight_mram + (((row + 1) * words_per_row) + word_offset)),
+                        qweight1_cache,
+                        words_this_block * sizeof(uint32_t));
+
+                    const uint64_t sign_mask = bp_cache_heap[7];
+
+                    /* Unpack nibbles into a linear per-block weight table.
+                     * Doing this once per block (rather than per bit-plane)
+                     * amortises the shift/mask work across 7 plane passes. */
+                    for (uint32_t word_idx = 0; word_idx < words_this_block; ++word_idx) {
+                        const uint32_t packed0 = qweight0_cache[word_idx];
+                        const uint32_t packed1 = qweight1_cache[word_idx];
+                        for (uint32_t nibble = 0; nibble < WEIGHTS_PER_WORD; ++nibble) {
+                            const uint32_t shift = nibble * BITS_PER_WEIGHT;
+                            const uint32_t q0 = (packed0 >> shift) & ((1u << BITS_PER_WEIGHT) - 1u);
+                            const uint32_t q1 = (packed1 >> shift) & ((1u << BITS_PER_WEIGHT) - 1u);
+                            const uint32_t input_idx = (word_idx * WEIGHTS_PER_WORD) + nibble;
+                            /* Flip the weight's sign now if the activation
+                             * is negative; this lets every bit plane use
+                             * a single add (no per-element branch on sign). */
+                            const int32_t s = ((sign_mask >> input_idx) & 1u) ? -1 : 1;
+                            w0_block_heap[input_idx] = s * (int32_t)lut0_i16[q0];
+                            w1_block_heap[input_idx] = s * (int32_t)lut1_i16[q1];
+                        }
+                    }
+
+                    /* T-MAC on DPU: sparse bit-scan accumulation.
+                     *
+                     * Mode 4 (int8 * int16 software multiply) uses a
+                     * single highly-tuned mult per element; on UPMEM DPU
+                     * that is ~8-10 cycles.  A bit-serial decomposition
+                     * replaces the multiply with conditional adds.
+                     *
+                     * Empirically (see sweeps in benchmarks/results/),
+                     * mode=4 beats mode=7 across every shape/batch/rank
+                     * we have measured.  This kernel is retained because
+                     *   a) It is a genuine T-MAC (no multiplies in the
+                     *      inner loop, unlike mode=6 which pays a 7x
+                     *      conditional branch ladder without LUT reuse);
+                     *   b) ADR-002 requires we ship the negative result
+                     *      as honestly as any positive one.
+                     *
+                     * We walk only the set bits of each magnitude plane
+                     * (via __builtin_ctz on 32-bit halves), which on
+                     * gaussian activations visits ~25-50%% of bits.
+                     * Dense scan was benchmarked (in mode=7 sweep v2,
+                     * 2026-04-22) and found 30-50%% slower than this
+                     * sparse variant on Qwen3 GPTQ activations. */
+                    for (uint32_t bp = 0; bp < 7; ++bp) {
+                        const uint64_t mask64 = bp_cache_heap[bp];
+                        const uint32_t mask_lo = (uint32_t)(mask64);
+                        const uint32_t mask_hi = (uint32_t)(mask64 >> 32);
+                        int32_t acc0_b = 0;
+                        int32_t acc1_b = 0;
+
+                        uint32_t m = mask_lo;
+                        uint32_t base = 0;
+                        while (m != 0) {
+                            const uint32_t bit = m & (-m);              /* isolate LSB */
+                            const uint32_t i = base + (uint32_t)__builtin_ctz(bit);
+                            m &= m - 1u;
+                            acc0_b += w0_block_heap[i];
+                            acc1_b += w1_block_heap[i];
+                        }
+                        m = mask_hi;
+                        base = 32;
+                        while (m != 0) {
+                            const uint32_t bit = m & (-m);
+                            const uint32_t i = base + (uint32_t)__builtin_ctz(bit);
+                            m &= m - 1u;
+                            acc0_b += w0_block_heap[i];
+                            acc1_b += w1_block_heap[i];
+                        }
+                        S[bp][0] += acc0_b;
+                        S[bp][1] += acc1_b;
+                    }
+                }
+
+                int32_t acc0 = 0;
+                int32_t acc1 = 0;
+                for (uint32_t bp = 0; bp < 7; ++bp) {
+                    acc0 += S[bp][0] << bp;
+                    acc1 += S[bp][1] << bp;
+                }
+
+                output_i32_cache[0] = acc0;
+                output_i32_cache[1] = acc1;
+                mram_write(
+                    output_i32_cache,
+                    (__mram_ptr void *)(outputs_i32_mram + ((batch_idx * output_dim) + row)),
+                    2 * sizeof(int32_t));
+                continue;
+            }
 
             /* ── kernel_mode=6: T-MAC bit-serial table lookup ─────────
              *
