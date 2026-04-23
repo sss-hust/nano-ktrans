@@ -69,7 +69,7 @@ class PIMMoEBackend(CPUMoEBackend):
         cost_model: Optional[object] = None,
         enable_cost_model_routing: bool = True,
         pim_layer_group_size: int = 3,
-        enable_speculative_preload_gptq: bool = False,
+        enable_speculative_preload_gptq: bool = True,
     ):
         self.pim_rank_count = pim_rank_count
         self.pim_bytes_per_dpu = pim_bytes_per_dpu
@@ -246,13 +246,18 @@ class PIMMoEBackend(CPUMoEBackend):
         # M-7: per-layer-group scoping of the slot table.
         group_size = max(1, int(self.pim_layer_group_size))
         group_id = self.layer_idx // group_size
-        profile_suffix = f"g{group_id}" if group_size > 1 else ""
-        gate_up_profile = (
+        profile_suffix = f"g{group_id}" if group_size > 1 else f"l{self.layer_idx}"
+        # ADR-002 M-8: ``instance_key`` is Python-cache-only; it must NOT
+        # be passed through to UPMEM's dpu_alloc_ranks (M-7's original
+        # code was fine only because the .so early-returned on the
+        # second init).  Keep ``profile`` as what the user configured
+        # (usually empty string) and use ``instance_key`` for the key.
+        gate_up_key = (
             f"{self.pim_profile}|gate_up|{profile_suffix}"
             if profile_suffix
             else f"{self.pim_profile}|gate_up"
         )
-        down_profile = (
+        down_key = (
             f"{self.pim_profile}|down|{profile_suffix}"
             if profile_suffix
             else f"{self.pim_profile}|down"
@@ -260,7 +265,8 @@ class PIMMoEBackend(CPUMoEBackend):
 
         try:
             gate_up_rt = PIMQuantizedRuntime.get_shared(
-                profile=gate_up_profile,
+                profile=self.pim_profile,
+                instance_key=gate_up_key,
                 rank_count=max(1, self.pim_rank_count),
             )
         except Exception:
@@ -269,7 +275,8 @@ class PIMMoEBackend(CPUMoEBackend):
 
         try:
             down_rt = PIMQuantizedRuntime.get_shared(
-                profile=down_profile,
+                profile=self.pim_profile,
+                instance_key=down_key,
                 rank_count=max(1, self.pim_rank_count),
             )
         except Exception:
@@ -525,6 +532,7 @@ class PIMMoEBackend(CPUMoEBackend):
                     import ctypes as _c
                     err = _c.create_string_buffer(rt_gate_up.ERROR_BUFFER_SIZE)
                     rc = rt_gate_up._lib.pim_quantized_load_weights(
+                        rt_gate_up._handle,
                         _c.c_uint32(padded_in),
                         _c.c_uint32(concat_rows),
                         _c.c_uint32(gsize),
