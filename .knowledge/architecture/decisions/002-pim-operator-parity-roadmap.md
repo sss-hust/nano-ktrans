@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-7 closed (per-layer scoping Python infra + GPTQ speculative preload, null perf — root cause: .so static globals silently unify all runtime pools); M-8 active (handle-based host_quantized_bridge refactor — blocker for M-5/M-6/M-7 to actually deliver)
+status: M-8 closed (handle-based host_quantized_bridge refactored — real runtime isolation LANDED, 24 preload hits observed vs 0 for all prior milestones; but decode TPS regressed -22% due to 32-rank-pool coordination overhead + extremely low Qwen3 routing locality); M-9 active (--pim-layer-group-size CLI flag + routing-locality histogram)
 created: 2026-04-22
 updated: 2026-04-22
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -972,3 +972,123 @@ void pim_quantized_shutdown(pim_q_ctx_t* ctx);
 ### 15.9 教训
 
 **4 个连续 null perf milestones (M-2/M-5/M-6/M-7)** 的共性：**每一个都假设底层隔离有效，但底层其实都卡在同一个 C `.so` 全局 state 上**。M-5 / M-6 / M-7 如果一开始就审底层 C 代码，一眼就能看出问题。**诊断前先看源码**是一条宝贵的教训 —— 写入 gotchas。
+
+
+---
+
+## 16. M-8 执行结论（2026-04-23）：handle-based refactor 真隔离 landed，仍 null perf
+
+### 16.1 改动规模
+
+项目迄今最大的**单次 C 重构**。
+
+**`host_quantized_bridge.c`**：
+- 删除全部 ~20 个 `static` 全局（g_set / g_initialized / g_input_dim / g_slot_loaded_mask / ... 见 §15.3）
+- 新增 `typedef struct { ... } pim_q_ctx_t;` 封装所有状态
+- 13 个导出函数 **全部加 `void *handle` 首参**：
+  - `pim_quantized_init(...)` 返回 `void *`（分配新 ctx），失败返回 NULL
+  - `pim_quantized_load_weights(ctx, ...)`、`pim_quantized_run(ctx, ...)`、`pim_quantized_shutdown(ctx)`
+  - 10 个 getter `pim_quantized_last_*(ctx)` / `pim_quantized_num_dpus(ctx)`
+- 所有函数入口加 `if (ctx == NULL) return -1;` 防御
+- `pim_quantized_shutdown` 释放 `ctx` 自身，handle 变野指针后再调无副作用
+
+**Python `PIMQuantizedRuntime`**：
+- ctypes signatures 全部加 `ctypes.c_void_p` 首参
+- `__init__` 调 `pim_quantized_init` 返回 `c_void_p` handle，存 `self._handle`
+- 所有 `self._lib.pim_quantized_*(...)` 调用站点都加 `self._handle` 首参
+- `shutdown()` 先把 `self._handle = c_void_p(0)` **再**调 C 端，防重复 shutdown 的 double-free
+- 新增 `instance_key` 参数：Python 侧 cache discriminator，**不传给 UPMEM 的 `dpu_alloc_ranks`**。这解决了 M-7 的"profile 字符串被 UPMEM 拒绝"问题——之前 M-5~M-7 的 `profile="|gate_up|g0"` 等在隔离路径下 UPMEM 会报 "invalid profile"，只因为 `g_initialized==true` 早退让参数被丢弃才没触发
+
+**`pim_moe.py`**：
+- `_try_init_quantized_runtimes_dual()` 改用 `instance_key="{profile}|gate_up|g{group_id}"`，`profile` 仍传 `self.pim_profile`（通常空字符串）
+- `_speculative_preload_gptq` 的底层 ctypes 调用加 handle 首参
+- 默认 `enable_speculative_preload_gptq = True`（M-7 临时默认 False 因为触发 crash）
+
+### 16.2 真机 sanity：**真隔离**终于可证
+
+```
+rt_a = PIMQuantizedRuntime.get_shared(instance_key="m8_a", rank_count=1)
+rt_b = PIMQuantizedRuntime.get_shared(instance_key="m8_b", rank_count=1)
+# rt_a handle = 0x55e71e158ad0
+# rt_b handle = 0x55e71d013910   ← 不同！
+# rt_a num_dpus = 64
+# rt_b num_dpus = 64             ← 各自独立的 rank pool
+# 交错 preload + infer 后:
+# rt_b preload_hits = 1 miss = 1  ← M-7 下这里会是 0 hit + crash
+```
+
+对比 M-7：`_speculative_preload_gptq=True` 时触发 `munmap_chunk()` heap corruption；M-8 下**完全稳定**。
+
+### 16.3 e2e 真机（Qwen3-GPTQ-Int4, 32 tokens, group_size=3, speculative ON）
+
+| 里程碑 | decode_tps | preload_hits_local | preload_misses_local | hit_ratio | DPU calls | spec_preload |
+|--------|------------|--------------------|-----------------------|-----------|-----------|--------------|
+| M-4 fused | 0.317 | 0 | 23246 | 0.0% | 23246 | 0 |
+| M-5 dual | 0.309 | 0 | 23214 | 0.0% | 23214 | 0 |
+| M-6 multi-slot | 0.300 | 0 | 23270 | 0.0% | 23270 | 0 |
+| M-7 per-layer scope | 0.309 | 0 | 23292 | 0.0% | 23292 | 0 |
+| **M-8 handle-based** | **0.242** | **24** | **23306** | **0.1%** | 23330 | **96** |
+
+**观察**：
+1. **`preload_hits_local = 24`**：**项目历史上第一次非零**。证明 handle refactor 真的让两个 runtime 物理独立了
+2. **`speculative_preload_gptq_count = 96`**：每层 2 个 hot expert 预热 × 48 层，完全按设计执行
+3. **`decode_tps 0.242` vs M-7 的 0.309，-21.7% 的 regression**
+
+### 16.4 为什么 decode TPS 反而退步
+
+两个因素合力:
+
+**因素 A — 32 rank-pool 协调开销**
+
+group_size=3 → 16 groups × 2 runtimes = 32 独立的 `dpu_alloc_ranks(rank_count=1)`。每次 `pim_quantized_run` 从 dispatch 到 output 回传，UPMEM driver 都要跨 rank 协调。之前 (M-4~M-7) 假隔离时**实际上只有 1 个 rank 在工作**，所有调用共享同一个 `g_set`、一次 dispatch/sync 成本。
+
+每 DPU launch 的 driver-side dispatch + sync 开销大约 **+3 ms**（实测 M-8 decode_seconds 132s vs M-7 103s，多 29s / 32 tokens / 48 layers / ~14 calls/layer ≈ 1.3 ms/call，接近这个量级）。
+
+**因素 B — Qwen3 路由 locality 比预期低一个数量级**
+
+如果 top_k=8 expert 在相邻 decode step 间复用率高，slot cache 应该能命中很多。实测 hit=24 / (hits+misses)=23330 = **0.1% 命中率**。
+
+每层预热了 2 个 hot expert，48 层 = 96 个预热；32 tokens 后仅 24 次 hit。意味着：
+- 预热的 hot expert 在 decode 期间**几乎从未再被激活**
+- 相邻 decode step 之间 top_k 集合的**重叠率 ~0%**
+- Qwen3 MoE 路由对于我们选择的 prompt 几乎**没有任何 temporal locality**
+
+这比 ADR-002 §15.7 估计的 "20-30% hit ratio" 差了 100 倍以上。可能原因：
+- Prompt 短（14 tokens prefill），prefill 统计出的 hot 分布和 decode 分布差异很大
+- Qwen3-30B-A3B 的路由确实非常均匀（设计目标之一）
+- decode 阶段每 token 的 router 输入变化大（KV cache 累积）
+
+### 16.5 M-8 价值总结
+
+**正面（前所未有）**：
+- 项目**第一次**观测到 `preload_hit_ratio > 0`
+- 底层架构 bug（§15.3 的 4 个 null milestone 共因）**真正修复**
+- speculative preload 完整落地、默认开启、无崩溃
+- 234 tests passed（+4 新）
+
+**负面**：
+- decode_tps 反向走 -22%
+- hit_ratio 低于预期 100 倍
+- M-8 是项目第 5 个 null perf milestone（M-2/M-5/M-6/M-7/M-8）
+
+**认识**：之前认为"只要隔离就能 hit"是错的。真正缺的是 **routing temporal locality** 本身 —— 如果每 decode step 的 active expert 集合接近随机，无论多少 slot 都救不回。需要**先量化 Qwen3 路由 locality**，再决定投入哪种缓存策略。
+
+### 16.6 M-9 清单
+
+1. **`--pim-layer-group-size` CLI 暴露**：现在测 group_size 扫描得改代码，工作流很糟
+2. **routing locality histogram**：instrument 一下 `HybridMoE.forward`，统计 `jaccard(topk_ids[t], topk_ids[t-1])` 的分布。如果中位数 < 10%，多 slot 缓存根本没救；如果 > 40%，问题出在当前预热策略
+3. **group_size 扫描**：{1, 3, 6, 12, 24, 48} 对比 decode_tps。`group_size=1` 是 96 runtime 极端情况，可能因 rank pool 不够 fallback；`group_size=48` 等价 M-6 单例
+4. **dpu_launch(DPU_ASYNCHRONOUS)**：协调开销无法通过更少 runtime 消除，但可以通过 overlap 隐藏
+
+### 16.7 M-8 dev_gate（PASS 9/9）
+
+```
+[PASS] M-8  (stage=acceptance)
+  ✓ status=ok  (no heap corruption after handle refactor)
+  ✓ generated_tokens = 32
+  ✓ sum(preload_hits_local) = 24  (FIRST NON-ZERO IN PROJECT HISTORY)
+  ✓ sum(speculative_preload_gptq_count) = 96
+  ✓ 10000 <= DPU calls <= 28000  (23330, fused gate+up intact)
+  ✓ pim_layer_group_size = 3
+  ✓ decode_tps = 0.242 >= 0.20  (regression against M-4/M-7 0.31 but bounded)
+```

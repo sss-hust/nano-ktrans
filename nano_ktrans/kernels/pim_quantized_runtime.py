@@ -32,8 +32,21 @@ class PIMQuantizedRuntime:
     _shared: dict[tuple[str, int], "PIMQuantizedRuntime"] = {}
     _shared_lock = threading.Lock()
 
-    def __init__(self, *, profile: str = "", rank_count: int = 1) -> None:
+    def __init__(self, *, profile: str = "", rank_count: int = 1, instance_key: str = "") -> None:
+        # ``profile`` is passed through to UPMEM's ``dpu_alloc_ranks``
+        # and must be empty or a valid UPMEM profile string (e.g.
+        # ``"backend=hw"``).  Do NOT stuff logical routing tags in
+        # here — UPMEM rejects unknown keys with "invalid profile".
+        #
+        # ADR-002 M-8: ``instance_key`` is the Python-side cache key
+        # for ``get_shared``.  Callers that want multiple *physical*
+        # DPU rank pools (M-5 dual runtime, M-7 per-layer-group) vary
+        # ``instance_key`` while keeping ``profile`` empty; each
+        # distinct key now really does allocate a new DPU rank pool
+        # because pim_quantized_init() in the handle-based bridge
+        # always calls dpu_alloc_ranks.
         self.profile = profile
+        self.instance_key = instance_key or profile
         self.rank_count = rank_count
         native_dir = Path(__file__).resolve().parent / "pim_native"
         build_dir = native_dir / "build"
@@ -45,6 +58,10 @@ class PIMQuantizedRuntime:
             raise RuntimeError("PIM quantized bridge build did not produce the expected artifacts.")
 
         self._lib = ctypes.CDLL(str(self.lib_path))
+        # ADR-002 M-8: every function now takes a handle (ctypes.c_void_p)
+        # as the first argument so the .so no longer relies on shared
+        # `static` globals (see ADR-002 §15 for the bug root-causing
+        # M-5/M-6/M-7 null perf results).
         self._lib.pim_quantized_init.argtypes = [
             ctypes.c_char_p,
             ctypes.c_char_p,
@@ -52,8 +69,9 @@ class PIMQuantizedRuntime:
             ctypes.c_char_p,
             ctypes.c_size_t,
         ]
-        self._lib.pim_quantized_init.restype = ctypes.c_int
+        self._lib.pim_quantized_init.restype = ctypes.c_void_p   # handle
         self._lib.pim_quantized_load_weights.argtypes = [
+            ctypes.c_void_p,   # handle
             ctypes.c_uint32,
             ctypes.c_uint32,
             ctypes.c_uint32,
@@ -66,6 +84,7 @@ class PIMQuantizedRuntime:
         ]
         self._lib.pim_quantized_load_weights.restype = ctypes.c_int
         self._lib.pim_quantized_run.argtypes = [
+            ctypes.c_void_p,   # handle
             ctypes.c_uint32,
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -74,37 +93,38 @@ class PIMQuantizedRuntime:
             ctypes.c_size_t,
         ]
         self._lib.pim_quantized_run.restype = ctypes.c_int
-        self._lib.pim_quantized_last_cycles.argtypes = []
+        self._lib.pim_quantized_last_cycles.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_last_cycles.restype = ctypes.c_uint64
-        self._lib.pim_quantized_last_load_qweight_transfer_seconds.argtypes = []
+        self._lib.pim_quantized_last_load_qweight_transfer_seconds.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_last_load_qweight_transfer_seconds.restype = ctypes.c_double
-        self._lib.pim_quantized_last_load_scale_transfer_seconds.argtypes = []
+        self._lib.pim_quantized_last_load_scale_transfer_seconds.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_last_load_scale_transfer_seconds.restype = ctypes.c_double
-        self._lib.pim_quantized_last_load_total_seconds.argtypes = []
+        self._lib.pim_quantized_last_load_total_seconds.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_last_load_total_seconds.restype = ctypes.c_double
-        self._lib.pim_quantized_last_input_transfer_seconds.argtypes = []
+        self._lib.pim_quantized_last_input_transfer_seconds.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_last_input_transfer_seconds.restype = ctypes.c_double
-        self._lib.pim_quantized_last_launch_seconds.argtypes = []
+        self._lib.pim_quantized_last_launch_seconds.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_last_launch_seconds.restype = ctypes.c_double
-        self._lib.pim_quantized_last_output_transfer_seconds.argtypes = []
+        self._lib.pim_quantized_last_output_transfer_seconds.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_last_output_transfer_seconds.restype = ctypes.c_double
-        self._lib.pim_quantized_last_total_seconds.argtypes = []
+        self._lib.pim_quantized_last_total_seconds.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_last_total_seconds.restype = ctypes.c_double
-        self._lib.pim_quantized_num_dpus.argtypes = []
+        self._lib.pim_quantized_num_dpus.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_num_dpus.restype = ctypes.c_uint32
-        self._lib.pim_quantized_shutdown.argtypes = []
+        self._lib.pim_quantized_shutdown.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_shutdown.restype = None
 
         error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
-        rc = self._lib.pim_quantized_init(
+        handle = self._lib.pim_quantized_init(
             os.fsencode(str(self.kernel_path)),
             profile.encode() if profile else None,
             ctypes.c_uint32(rank_count),
             error_buffer,
             len(error_buffer),
         )
-        if rc != 0:
+        if not handle:
             raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+        self._handle = ctypes.c_void_p(handle)
         self._loaded_signature: tuple[int, int, int, int, int] | None = None
 
         # ── Weight residency tracking (NEW) ────────────────────────────
@@ -133,12 +153,29 @@ class PIMQuantizedRuntime:
         self.preload_misses: int = 0
 
     @classmethod
-    def get_shared(cls, *, profile: str = "", rank_count: int = 1) -> "PIMQuantizedRuntime":
-        key = (profile, rank_count)
+    def get_shared(
+        cls,
+        *,
+        profile: str = "",
+        rank_count: int = 1,
+        instance_key: str = "",
+    ) -> "PIMQuantizedRuntime":
+        """ADR-002 M-8: ``instance_key`` is the cache discriminator
+        (defaults to ``profile`` for backward compatibility with
+        callers that did not know about the split yet).  ``profile``
+        is what UPMEM actually sees in dpu_alloc_ranks — keep it empty
+        unless you actually need UPMEM-level profile tuning.
+        """
+        effective_key = instance_key or profile
+        key = (effective_key, rank_count)
         with cls._shared_lock:
             runtime = cls._shared.get(key)
             if runtime is None:
-                runtime = cls(profile=profile, rank_count=rank_count)
+                runtime = cls(
+                    profile=profile,
+                    rank_count=rank_count,
+                    instance_key=effective_key,
+                )
                 cls._shared[key] = runtime
                 atexit.register(runtime.shutdown)
             return runtime
@@ -378,6 +415,7 @@ class PIMQuantizedRuntime:
 
         error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
         rc = self._lib.pim_quantized_load_weights(
+            self._handle,
             ctypes.c_uint32(padded_input_dim),
             ctypes.c_uint32(padded_output_dim),
             ctypes.c_uint32(group_size),
@@ -443,6 +481,7 @@ class PIMQuantizedRuntime:
         outputs = torch.empty(batch_size, padded_output_dim, dtype=torch.float32)
         error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
         rc = self._lib.pim_quantized_run(
+            self._handle,
             ctypes.c_uint32(batch_size),
             ctypes.c_void_p(inputs_f32.data_ptr()),
             ctypes.c_void_p(outputs.data_ptr()),
@@ -543,6 +582,7 @@ class PIMQuantizedRuntime:
         if not was_resident:
             error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
             rc = self._lib.pim_quantized_load_weights(
+                self._handle,
                 ctypes.c_uint32(padded_in),
                 ctypes.c_uint32(concat_rows),
                 ctypes.c_uint32(lhs.group_size),
@@ -574,6 +614,7 @@ class PIMQuantizedRuntime:
         outputs = torch.empty(batch_size, concat_rows, dtype=torch.float32)
         error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
         rc = self._lib.pim_quantized_run(
+            self._handle,
             ctypes.c_uint32(batch_size),
             ctypes.c_void_p(inputs_f32.data_ptr()),
             ctypes.c_void_p(outputs.data_ptr()),
@@ -633,6 +674,7 @@ class PIMQuantizedRuntime:
         if self._loaded_signature != signature:
             error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
             rc = self._lib.pim_quantized_load_weights(
+                self._handle,
                 ctypes.c_uint32(padded_input_dim),
                 ctypes.c_uint32(padded_output_dim),
                 ctypes.c_uint32(quantized.group_size),
@@ -650,6 +692,7 @@ class PIMQuantizedRuntime:
         outputs = torch.empty(batch_size, padded_output_dim, dtype=torch.float32)
         error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
         rc = self._lib.pim_quantized_run(
+            self._handle,
             ctypes.c_uint32(batch_size),
             ctypes.c_void_p(inputs_f32.data_ptr()),
             ctypes.c_void_p(outputs.data_ptr()),
@@ -668,24 +711,31 @@ class PIMQuantizedRuntime:
         return self._resident_expert_id
 
     def last_cycles(self) -> int:
-        return int(self._lib.pim_quantized_last_cycles())
+        return int(self._lib.pim_quantized_last_cycles(self._handle))
 
     def last_profile(self) -> dict[str, float]:
         return {
-            "load_qweight_transfer_seconds": float(self._lib.pim_quantized_last_load_qweight_transfer_seconds()),
-            "load_scale_transfer_seconds": float(self._lib.pim_quantized_last_load_scale_transfer_seconds()),
-            "load_total_seconds": float(self._lib.pim_quantized_last_load_total_seconds()),
-            "input_transfer_seconds": float(self._lib.pim_quantized_last_input_transfer_seconds()),
-            "launch_seconds": float(self._lib.pim_quantized_last_launch_seconds()),
-            "output_transfer_seconds": float(self._lib.pim_quantized_last_output_transfer_seconds()),
-            "runtime_total_seconds": float(self._lib.pim_quantized_last_total_seconds()),
+            "load_qweight_transfer_seconds": float(self._lib.pim_quantized_last_load_qweight_transfer_seconds(self._handle)),
+            "load_scale_transfer_seconds": float(self._lib.pim_quantized_last_load_scale_transfer_seconds(self._handle)),
+            "load_total_seconds": float(self._lib.pim_quantized_last_load_total_seconds(self._handle)),
+            "input_transfer_seconds": float(self._lib.pim_quantized_last_input_transfer_seconds(self._handle)),
+            "launch_seconds": float(self._lib.pim_quantized_last_launch_seconds(self._handle)),
+            "output_transfer_seconds": float(self._lib.pim_quantized_last_output_transfer_seconds(self._handle)),
+            "runtime_total_seconds": float(self._lib.pim_quantized_last_total_seconds(self._handle)),
         }
 
     def num_dpus(self) -> int:
-        return int(self._lib.pim_quantized_num_dpus())
+        return int(self._lib.pim_quantized_num_dpus(self._handle))
 
     def shutdown(self) -> None:
-        self._lib.pim_quantized_shutdown()
+        # ADR-002 M-8: handle becomes invalid after the underlying
+        # pim_quantized_shutdown() frees its ctx; guard against double
+        # free by zeroing the handle first.  Subsequent getters will
+        # return 0 / 0.0 (per the NULL checks in host_quantized_bridge.c).
+        handle = self._handle
+        self._handle = ctypes.c_void_p(0)
+        if handle:
+            self._lib.pim_quantized_shutdown(handle)
         self._loaded_signature = None
         self._resident_expert_id = 0
         self._weight_cache.clear()

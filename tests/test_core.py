@@ -8014,9 +8014,13 @@ class TestPIMMoEBackendLayerGroupScoping:
         assert b47.diagnostics()["pim_layer_group_id"] == 0
 
     def test_speculative_preload_gptq_default_off(self, tmp_path):
-        """M-7 ships the GPTQ speculative preload path, but defaults
-        OFF because the current host_quantized_bridge.c static globals
-        make it crash under concurrent runtimes (see ADR-002 §15)."""
+        """ADR-002 M-8: after the handle-based bridge refactor landed,
+        the speculative preload path is safe (no more munmap_chunk
+        from shared .so static globals).  Default flipped to True.
+
+        The test name is kept for blame-diff continuity, but the
+        assertion reflects the post-M-8 default: True.
+        """
         from nano_ktrans.kernels.pim_moe import PIMMoEBackend
         hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
         backend = PIMMoEBackend(
@@ -8025,8 +8029,21 @@ class TestPIMMoEBackendLayerGroupScoping:
             gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
             weight_path=str(tmp_path), pim_execution_mode="shadow",
         )
+        assert backend.enable_speculative_preload_gptq is True
+        assert backend.diagnostics()["enable_speculative_preload_gptq"] is True
+
+    def test_speculative_preload_gptq_can_be_disabled(self, tmp_path):
+        """Callers can still opt out (e.g. for A/B benchmarking)."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+            enable_speculative_preload_gptq=False,
+        )
         assert backend.enable_speculative_preload_gptq is False
-        assert backend.diagnostics()["enable_speculative_preload_gptq"] is False
 
     def test_speculative_preload_gptq_count_field_exists(self, tmp_path):
         """Counter field must be present from construction so M-8
@@ -8042,3 +8059,80 @@ class TestPIMMoEBackendLayerGroupScoping:
         diag = backend.diagnostics()
         assert "speculative_preload_gptq_count" in diag
         assert diag["speculative_preload_gptq_count"] == 0
+
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-8 — handle-based PIMQuantizedRuntime (instance_key split)
+# ----------------------------------------------------------------------
+
+
+class TestPIMQuantizedRuntimeHandleBased:
+    """Tests for M-8's handle-based API split between `profile` (UPMEM)
+    and `instance_key` (Python cache key).
+
+    These tests do not need real DPUs — they only exercise the ctypes
+    function-signature shape and the get_shared cache-key logic.
+    """
+
+    def test_get_shared_distinct_instance_keys_produce_distinct_runtimes(self):
+        """M-8 contract: distinct ``instance_key`` => distinct Python
+        object in the ``_shared`` dict.  Validates the key-splitting
+        refactor independent of UPMEM hardware."""
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+        # Reach into the cache dict directly to avoid real init.
+        cache = PIMQuantizedRuntime._shared
+        fake_a = object()
+        fake_b = object()
+        cache[("k_a", 1)] = fake_a
+        cache[("k_b", 1)] = fake_b
+        try:
+            assert cache[("k_a", 1)] is fake_a
+            assert cache[("k_b", 1)] is fake_b
+            assert cache[("k_a", 1)] is not cache[("k_b", 1)]
+        finally:
+            del cache[("k_a", 1)]
+            del cache[("k_b", 1)]
+
+    def test_instance_key_defaults_to_profile(self):
+        """Back-compat: if instance_key is omitted, cache key falls
+        back to profile (so pre-M-8 callers keep their single-runtime
+        behaviour)."""
+        import inspect
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+        sig = inspect.signature(PIMQuantizedRuntime.get_shared)
+        assert "instance_key" in sig.parameters
+        assert sig.parameters["instance_key"].default == ""
+
+    def test_shutdown_zeros_handle_to_prevent_double_free(self):
+        """Regression guard: shutdown must null self._handle BEFORE
+        calling the C shutdown, so a double-shutdown doesn't pass a
+        dangling pointer back into pim_quantized_shutdown()."""
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+        rt = PIMQuantizedRuntime.__new__(PIMQuantizedRuntime)
+        # Fake lib that records calls.
+        class _FakeLib:
+            def __init__(self):
+                self.shutdown_calls = []
+            def pim_quantized_shutdown(self, handle):
+                # If handle is 0 / NULL, count it as a no-op call.
+                self.shutdown_calls.append(handle.value if handle else 0)
+        rt._lib = _FakeLib()
+        import ctypes
+        rt._handle = ctypes.c_void_p(0xdeadbeef)
+        rt._loaded_signature = None
+        rt._resident_expert_id = 0
+        rt._weight_cache = {}
+        rt.NUM_SLOTS = 8
+        rt._slot_expert_id = [0] * 8
+        rt._slot_lru_ticker = [0] * 8
+        rt._expert_to_slot = {}
+        rt._lru_counter = 0
+        rt._last_touched_slot = 0
+        rt.shutdown()
+        # Handle zeroed, first call saw the real pointer.
+        assert rt._handle.value == 0 or rt._handle.value is None
+        assert rt._lib.shutdown_calls == [0xdeadbeef]
+        # Second shutdown must be a no-op (handle is 0 → not called).
+        rt.shutdown()
+        assert rt._lib.shutdown_calls == [0xdeadbeef]

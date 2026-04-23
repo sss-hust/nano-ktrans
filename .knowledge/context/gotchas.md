@@ -383,3 +383,35 @@ tags: [pitfalls, debugging]
 - M-5 / M-6 / M-7 的 "isolation landed 47/48 layers" 诊断字段都建立在这个假设错上。
 - 正确的 idempotency：要么 return ERROR（let caller 知道要先 shutdown），要么**真的按新参数再分配一份 context**。前者简单，后者需要 handle-based API。
 - 提醒：任何 "第二次调用静默成功" 的系统级 init 函数都是**设计坑**。用 Python mock 测到 return 0 就以为成功，实际物理资源早就乱了。
+
+
+<!-- updated: 2026-04-23 11:00 -->
+
+## "profile" 参数在 Python cache key 和 UPMEM `dpu_alloc_ranks` 里**必须分开**
+
+- 现象：M-7 第一次 crash 是 `munmap_chunk`，修了 handle 以后再跑 raw ctypes 真实 alloc 两个 runtime → UPMEM 报 "`dpu_alloc_ranks failed: invalid profile`"。M-5~M-7 一直用类似 `profile="|gate_up|g0"` 的 Python 逻辑键当作 UPMEM profile 传进去，之前没 crash 只是因为 `g_initialized==true` 早退让那个非法字符串**从没真正送到 UPMEM** 过。
+- 修复（M-8）：`PIMQuantizedRuntime.get_shared(*, profile="", rank_count, instance_key="")`。`profile` 是真的传给 `dpu_alloc_ranks` 的 UPMEM profile 字符串（必须空或合法 UPMEM 字符串如 `"backend=hw"`）；`instance_key` 是 Python `_shared` dict 的键（可以是任意逻辑标签像 `"|gate_up|g7"`）。`instance_key=""` 时默认回退到 `profile` 保持向后兼容。
+- 经验：**任何用作 "key" 的字符串如果同时流到另一个系统当作配置，就是一个时间炸弹**。在设计接口时如果两种用途有任何可能分叉（哪怕最初都传同一个值），最好从第一天就拆成两个参数。
+
+<!-- updated: 2026-04-23 11:00 -->
+
+## MoE 路由 temporal locality 可能**远低于直觉**：Qwen3 实测 hit ratio = 0.1%
+
+- 现象：M-8 修完底层后，32 独立 runtime pool + 8-slot LRU + prefill-time 预热 96 个 hot expert，真机 32 token decode 测出 `preload_hits_local = 24 / misses = 23306 = 0.1%`。预期是 20-30%（ADR-002 §15.7）。
+- 分析：每层在 prefill 统计出 2 个 hot expert 预热到 slot，32 decode step 之后只有 24 次再次激活，即这 96 个预热 expert 在 decode 阶段平均只被 reuse 了 24/96 = 0.25 次。相邻 decode step 之间的 top_k=8 集合几乎零重叠。
+- 可能原因：
+  1. Prompt 太短（14 token prefill）→ prefill 统计到的 hot 不代表 decode 分布；
+  2. Qwen3-30B-A3B 的 routing 本来就追求分散（MoE 设计目标之一是 load balance）；
+  3. decode 阶段 KV cache 累积使得 router 输入空间移动得很快。
+- 后果：**slot-based LRU 无论多少 slot 都救不回** low locality。要真在 UPMEM 上赢 CPU 必须：
+  (a) 放弃"靠 cache 命中降 DMA 次数"的思路，改成 mixed-precision expert 让单次 DMA 更便宜；
+  (b) 或者 `dpu_launch(DPU_ASYNCHRONOUS)` 让 DMA 和 GPU 计算 overlap 掉。
+- 经验：**在做 caching / prefetching 投资之前先用直方图量化 temporal locality**。`jaccard(active_experts(t), active_experts(t-1))` 是一行代码能加上的 diagnostic，值得在 M-1 就做。
+
+<!-- updated: 2026-04-23 11:00 -->
+
+## `ctx->handle` API 的 `shutdown()` 必须先置 `self._handle = NULL`，再调 C 端
+
+- 现象：M-8 handle-based 实装里，如果直接 `self._lib.shutdown(self._handle)` 然后**不清零 self._handle**，第二次调 `shutdown()` 会把野指针再送给 C 端的 `free(ctx)` → double free → heap corruption。
+- 修复：Python 端 `def shutdown(self): handle = self._handle; self._handle = ctypes.c_void_p(0); if handle: self._lib.shutdown(handle)`。C 端 `pim_quantized_shutdown(NULL)` 早退。
+- 经验：**handle 语义的 API 任何时候都要在 free 前把 handle 置空**。这不是可选的防御性编程，这是正确性。

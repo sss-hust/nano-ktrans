@@ -5,6 +5,70 @@ tags: [changelog]
 
 # 📝 变更日志
 
+## 2026-04-23
+
+### 2026-04-23 11:00 - ADR-002 M-8 闭合：handle-based host_quantized_bridge 重构 — 真隔离 landed (24 preload hits 项目首次非零), dev_gate PASS 9/9, 但 decode_tps -22% 揭示 Qwen3 routing locality 远低于预期
+
+迄今最大单次 C 重构：把 `host_quantized_bridge.c` 的 20 个 `static`
+全局封进 `pim_q_ctx_t*`，13 个导出函数全部加 `void *handle` 首参。
+这是直接修 M-7 diagnose 出的"4 个 null perf milestone 共因"（ADR-002
+§15.3）。
+
+**真隔离证据**（真机 sanity 测试）：两个 `PIMQuantizedRuntime` 实例
+拿到不同 handle、各自 64 DPU，交错 preload/infer 时 hit/miss 计数
+独立记录。M-5 dual / M-6 multi-slot / M-7 per-layer 的"47/48 layers
+distinct"假象**终于变成真的物理分离**。
+
+**e2e 真机数据 (Qwen3-GPTQ-Int4, 32 tokens, group_size=3, speculative ON)**：
+
+| milestone              | decode_tps | hit_local | miss    | hit_ratio | spec_preload |
+|------------------------|-----------|-----------|---------|-----------|--------------|
+| M-4 fused              | 0.317     | 0         | 23246   | 0.0%      | 0            |
+| M-5 dual               | 0.309     | 0         | 23214   | 0.0%      | 0            |
+| M-6 multi-slot         | 0.300     | 0         | 23270   | 0.0%      | 0            |
+| M-7 per-layer scope    | 0.309     | 0         | 23292   | 0.0%      | 0            |
+| **M-8 handle-based**   | **0.242** | **24**    | **23306** | **0.1%** | **96**       |
+
+**项目第一次观测到 hit > 0**。但 decode_tps -22% 因为：
+(a) 32 独立 rank pool 的 UPMEM driver 协调开销 ~1.3 ms/call；
+(b) Qwen3 routing temporal locality 远低于 ADR-002 §15.7 估计的
+20-30%，实测只有 0.1% — 意味着相邻 decode step 的 top_k 集合**几乎
+不重叠**，这是 ADR 里没有预见的 MoE 路由特性。
+
+**项目现状**：M-2/M-5/M-6/M-7/M-8 五个 null perf milestone。M-8 的
+独特之处在于**真正修复了前 4 个的共同 root cause**（底层 .so 状态
+共享）并**首次拿到 hit > 0 的数据**，证明基础设施正确；同时**揭
+示了下一个瓶颈**（routing locality）。
+
+**默认配置变更**：`enable_speculative_preload_gptq = True`（M-7 时
+因底层 bug 临时关闭，M-8 修好后恢复默认开启）。
+
+**关联改动**：
+- `nano_ktrans/kernels/pim_native/host_quantized_bridge.c`：`pim_q_ctx_t`
+  结构体替换 static 全局；13 个导出函数加 handle 首参
+- `nano_ktrans/kernels/pim_quantized_runtime.py`：ctypes 全量更新；
+  新增 `instance_key` 参数（分离 Python 缓存键 vs UPMEM profile 字符串）；
+  `shutdown()` 先置 handle=0 防 double-free
+- `nano_ktrans/kernels/pim_moe.py`：`_try_init_quantized_runtimes_dual`
+  改用 `instance_key`，`_speculative_preload_gptq` 的 ctypes 调用加
+  handle，`enable_speculative_preload_gptq` 默认 True
+- `.codebuddy/dev_gate/M-8.toml`：9 条 acceptance，含正向 KPI
+  `sum(preload_hits_local) >= 1` — 项目史上第一次可达
+- `tests/test_core.py::TestPIMQuantizedRuntimeHandleBased`：3 条单测
+  （instance_key 产生不同 runtime / instance_key 默认回退到 profile /
+  shutdown 先 null handle 防 double-free）
+- 加 `test_speculative_preload_gptq_can_be_disabled` 替换 M-7 的
+  `_default_off` 测试（默认翻转 True）
+
+**测试**：230 → **234 passed** (+4)。
+
+**下一步 M-9**：
+1. `--pim-layer-group-size` CLI flag（现在测 group_size 扫描得改代码）
+2. routing locality histogram (`jaccard(topk_t, topk_t-1)`) — 先量化
+   再投入
+3. `dpu_launch(DPU_ASYNCHRONOUS)` — 协调开销用 overlap 隐藏
+
+
 ## 2026-04-22
 
 ### 2026-04-22 20:50 - ADR-002 M-7 闭合：per-layer scoping infra + 揭示 M-5~M-7 共性阻塞（.so static 全局）— dev_gate PASS 8/8
