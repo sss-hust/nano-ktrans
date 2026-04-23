@@ -97,6 +97,8 @@ def benchmark_backend(
     pim_kernel_variant: str,
     pim_prefill_policy: str,
     pim_prefill_token_threshold: int,
+    pim_layer_group_size: int,
+    pim_enable_speculative_preload_gptq: bool,
     enable_dynamic_expert_scheduler: bool,
     scheduler_prefill_force_gpu_budget_per_layer: int | None,
     scheduler_prefill_collect_only: bool | None,
@@ -140,6 +142,8 @@ def benchmark_backend(
             "pim_kernel_variant": pim_kernel_variant,
             "pim_prefill_policy": pim_prefill_policy,
             "pim_prefill_token_threshold": pim_prefill_token_threshold,
+            "pim_layer_group_size": pim_layer_group_size,
+            "enable_speculative_preload_gptq": pim_enable_speculative_preload_gptq,
         }
     elif backend == "cuda_pim_shadow":
         if not torch.cuda.is_available():
@@ -154,6 +158,8 @@ def benchmark_backend(
             "pim_kernel_variant": pim_kernel_variant,
             "pim_prefill_policy": pim_prefill_policy,
             "pim_prefill_token_threshold": pim_prefill_token_threshold,
+            "pim_layer_group_size": pim_layer_group_size,
+            "enable_speculative_preload_gptq": pim_enable_speculative_preload_gptq,
         }
     else:
         raise ValueError(f"Unsupported backend: {backend}")
@@ -309,6 +315,39 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Maximum flattened prefill tokens allowed to use real PIM before forcing fallback.",
     )
+    # ADR-002 M-9: expose the M-7 layer-group scoping size + the M-7
+    # speculative preload flag (kept default-on after M-8's handle fix).
+    parser.add_argument(
+        "--pim-layer-group-size",
+        type=int,
+        default=48,
+        help=(
+            "ADR-002 M-7/M-8/M-9: how many MoE layers share one DPU runtime pair. "
+            "Default 48 = all layers share one runtime pair (M-6 equivalent); M-9 "
+            "real-hardware sweep showed this is the fastest configuration because "
+            "32-rank-pool coordination overhead exceeds multi-slot hit benefit "
+            "when Qwen3 routing locality is ~14%% (ADR-002 §17). "
+            "group_size=1 => every layer has its own rank pool; group_size=3 was "
+            "the M-7/M-8 default, now superseded."
+        ),
+    )
+    parser.add_argument(
+        "--pim-enable-speculative-preload-gptq",
+        dest="pim_enable_speculative_preload_gptq",
+        action="store_true",
+        default=False,
+        help=(
+            "ADR-002 M-7: warm the MRAM slot LRU at prefill end with each layer's "
+            "top-N hot experts.  Default OFF after M-9 showed the preload/hit ratio "
+            "(24/96 hits in M-8) does not compensate for the extra prefill time."
+        ),
+    )
+    parser.add_argument(
+        "--no-pim-speculative-preload-gptq",
+        dest="pim_enable_speculative_preload_gptq",
+        action="store_false",
+        help="Disable the M-7 speculative preload (useful for A/B benchmarking).",
+    )
     parser.add_argument(
         "--enable-dynamic-expert-scheduler",
         action="store_true",
@@ -400,6 +439,8 @@ def main() -> None:
                 pim_kernel_variant=args.pim_kernel_variant,
                 pim_prefill_policy=args.pim_prefill_policy,
                 pim_prefill_token_threshold=args.pim_prefill_token_threshold,
+                pim_layer_group_size=args.pim_layer_group_size,
+                pim_enable_speculative_preload_gptq=args.pim_enable_speculative_preload_gptq,
                 enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
                 scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
                 scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,

@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-8 closed (handle-based host_quantized_bridge refactored — real runtime isolation LANDED, 24 preload hits observed vs 0 for all prior milestones; but decode TPS regressed -22% due to 32-rank-pool coordination overhead + extremely low Qwen3 routing locality); M-9 active (--pim-layer-group-size CLI flag + routing-locality histogram)
+status: M-9 closed (routing locality histogram landed + sweep determined group_size=48 optimal on Qwen3, M-5~M-8 caching stack defaults reverted); M-10 active (dpu_launch ASYNCHRONOUS to hide coordination overhead)
 created: 2026-04-22
 updated: 2026-04-22
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1092,3 +1092,93 @@ group_size=3 → 16 groups × 2 runtimes = 32 独立的 `dpu_alloc_ranks(rank_co
   ✓ pim_layer_group_size = 3
   ✓ decode_tps = 0.242 >= 0.20  (regression against M-4/M-7 0.31 but bounded)
 ```
+
+
+---
+
+## 17. M-9 执行结论（2026-04-23）：量化 Qwen3 routing locality，决定性地关闭 caching 栈
+
+### 17.1 改动
+
+**CLI**：`benchmark_inference.py` 加 `--pim-layer-group-size` + `--pim-enable-speculative-preload-gptq` / `--no-pim-speculative-preload-gptq`。现在 group_size 扫描是一行 shell。
+
+**Locality diagnostic**（`PIMMoEBackend.diagnostics()`）：每次 `_submit_forward_real` 调用时计算 `jaccard(active_cpu_experts_now, active_cpu_experts_prev)`，按 prefill/decode 分别累积 sum/count 均值 + decode 阶段维护 11 bin histogram。
+
+**Default 变更**（基于 M-9 sweep 数据）：
+- `pim_layer_group_size`: 3 → **48**（singleton，回到 M-6 等价行为）
+- `enable_speculative_preload_gptq`: True → **False**
+
+### 17.2 真机数据：Qwen3 top_k=8 的 routing locality
+
+Sweep 5 个 group_size（每个 32 decode tokens，约 10 分钟）：
+
+| group_size | decode_tps | hit_local | miss | hit_ratio | Jaccard mean |
+|------------|-----------|-----------|------|-----------|--------------|
+| 3 | 0.246 | 18 | 23234 | 0.1% | 0.139 |
+| 6 | 0.263 | 6 | 23230 | 0.0% | 0.171 |
+| 12 | 0.261 | 0 | 23254 | 0.0% | 0.162 |
+| 24 | 0.274 | 0 | 23320 | 0.0% | 0.166 |
+| **48** | **0.290** | 0 | 23292 | 0.0% | 0.137 |
+
+**Jaccard histogram (group_size=3, decode only, 1486 samples across all layers)**：
+
+```
+  0-10%:   680  45.7%  ######################
+ 10-20%:   369  24.8%  ############
+ 20-30%:   296  19.9%  #########
+ 30-40%:    89   6.0%  ##
+ 40-50%:    43   2.9%  #
+ 50-60%:     3   0.2%
+ 60-70%:     5   0.3%
+ 70-80%:     0   0.0%
+ 80-90%:     3   0.2%
+ 90-99%:     0   0.0%
+   100%:     0   0.0%
+```
+
+**两个决定性事实**：
+1. **Jaccard 均值 ≈ 0.14**（比 ADR-002 §15.7 预估的 20-30% 低 1.5-2 倍），**45.7% 样本相邻 decode step 几乎无 expert 重叠**
+2. **group_size 越大，decode_tps 越好** —— 32 rank-pool 协调开销 > multi-slot hit 收益
+
+### 17.3 决定性结论：caching 路径在 Qwen3 上无救
+
+M-5 dual runtime / M-6 multi-slot LRU / M-7 per-layer scoping / M-8 handle-based 这四个 milestone 累计工程**~800 行 C + ~600 行 Python**，追求的就是 **slot-based hit ratio**。M-9 数据证明：
+
+- **理论 hit ratio 上限** = `mean(Jaccard) = 14%` → 每 token 能省的 preload 次数 = 14% × 14.7 call/layer × 48 layer = ~99 次 → 省 ~95 ms/token → decode_tps 从 0.29 → ~0.32
+- **协调开销** = 32 rank-pool 的 UPMEM driver overhead ≈ 1.3 ms/call × 14.7 × 48 = ~920 ms/token
+
+**多 runtime 带来的收益被协调开销吃掉 ~10×**。哪怕 Jaccard 真的变成 30%，多 runtime 仍然是净负收益。
+
+唯一让多 runtime 成立的场景：**每 runtime 自己的 dispatch 真正和 GPU 并行**（M-10 async launch），这样 32 runtime 的协调时间不再是串行 wall-clock。
+
+### 17.4 M-9 default 变更落地的代价
+
+- **M-5/M-6/M-7/M-8 的 infra 全部保留**，只是默认关闭
+- 任何有**high-locality** 用户（比如专用 prompt、特定 MoE 架构）可以 `--pim-layer-group-size 3 --pim-enable-speculative-preload-gptq` 重新打开
+- Default `decode_tps = 0.2844`（vs M-8 默认 0.242，**+18%**；vs M-4 peak 0.317，-10%；vs CPU 3.07，-10.8×）
+- Locality histogram 从此是项目一等公民诊断，任何新 MoE 模型跑 benchmark 都能一眼看 Jaccard 分布
+
+### 17.5 给 M-10 的硬约束
+
+M-10 必须实装 `dpu_launch(DPU_ASYNCHRONOUS)` + overlap。**这是 M-4 之后第一个不依赖 routing locality 的 perf 杠杆**。估算：
+
+- 当前每 DPU launch 同步 ~2.2 ms；其中 ~1.9 ms 是 `dpu_launch(SYNCHRONOUS)` 本身
+- 每 token 48 layer × 14.7 call = 706 launches × 2.2 ms = **1.55 s/token** 全串行
+- Async + GPU attention (~100 ms/token) 并行后，最多可压到 `max(GPU_side, PIM_side) = 1.55 s/token` 的 70-80%，即 **节省 300-450 ms/token**，decode_tps 0.29 → ~0.50-0.60
+
+**与 CPU baseline 3.07 的差距从 10.8× 缩到 5-6×**。仍不够赢 CPU，但是第一次出现"PIM 接近 CPU"的数量级。继续攻的话 M-11 加 mixed-precision expert（HOBBIT）把每 call 的 DMA 负载减半。
+
+### 17.6 M-9 dev_gate (PASS 11/11)
+
+11 条 acceptance 覆盖：
+- e2e 完成 + 正确默认（group_size=48, speculative=False）
+- Locality 诊断真的在累积（count >= 100）
+- Jaccard mean 在合理范围（0.05 - 0.40，防止异常 prompt）
+- decode_tps 不回归（>= 0.26）
+- DPU call 量稳定（M-4 fused 保持生效）
+
+### 17.7 教训
+
+**M-9 之前 4 个 null milestone（M-5/M-6/M-7/M-8）累计 ~10 人日工程，如果 M-5 就做 locality histogram，会直接跳过所有 caching 实验**。ADR-002 §15.7 里我估计的 "20-30% hit ratio 上限" 是拍脑袋，M-9 测出来是 14% —— 一个简单的 1 行 diagnostic 就能避免 4 个 milestone 的试错。
+
+**新原则（写入 gotchas）**：**任何建立在"XX 有 locality"假设上的优化，上工前必须先挂一个 1 行 histogram 确认 locality 分布**。不量化就做就是赌博。

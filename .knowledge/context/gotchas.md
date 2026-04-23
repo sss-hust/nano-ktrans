@@ -415,3 +415,42 @@ tags: [pitfalls, debugging]
 - 现象：M-8 handle-based 实装里，如果直接 `self._lib.shutdown(self._handle)` 然后**不清零 self._handle**，第二次调 `shutdown()` 会把野指针再送给 C 端的 `free(ctx)` → double free → heap corruption。
 - 修复：Python 端 `def shutdown(self): handle = self._handle; self._handle = ctypes.c_void_p(0); if handle: self._lib.shutdown(handle)`。C 端 `pim_quantized_shutdown(NULL)` 早退。
 - 经验：**handle 语义的 API 任何时候都要在 free 前把 handle 置空**。这不是可选的防御性编程，这是正确性。
+
+
+<!-- updated: 2026-04-23 11:20 -->
+
+## 做 locality-based 优化前**必须**先挂 1 行 histogram 量化 locality
+
+- 背景：M-5 → M-6 → M-7 → M-8 这 4 个 milestone 累计 ~10 人日 + 大约 1500 行 C/Python 代码，目标全部是**提升 slot-based cache hit ratio**。M-9 的 1 行 `jaccard(active(t), active(t-1))` diagnostic 实测出 Qwen3 top_k=8 decode 的 Jaccard 均值 = 0.14，hit ratio 天花板就 14%，**整个 caching 路径从 M-5 起方向就不对**。
+- 原理：任何 "XX 有 temporal locality / spatial reuse / cache-friendliness" 的假设，都可以用 **`O(1)` 空间 + `O(1)` CPU 的 EMA 或 histogram** 实时量化。M-9 的实现是每次 forward 算一次 `jaccard(prev, curr)`、累积 sum/count + 11-bin histogram，整个 diagnostic 开销 < 0.1 ms/call，在 ADR-002 §15.7 估算 "20-30% locality" 之前 **本来应该先跑一次**。
+- 行动准则：**只要 milestone plan 里出现 "cache / prefetch / reuse / locality / working set" 这些词的**，上工前必须：
+  1. 加一个 1 行 diagnostic 量化**这条假设**的 locality signal（Jaccard、hit rate 预测器、相邻帧/step 重叠率 等等）
+  2. 在小样本上跑一次确认 locality >> 0
+  3. 如果 locality 很低就**直接否掉这个路径**，换方向
+- 反例（本项目的代价）：假设 MoE top_k routing 有 temporal locality → 4 个 milestone 的 null perf + 诊断出 M-7 `.so` static globals bug (是真实 bug, 单独价值) + 一次 heap corruption (M-7 crash) + M-8 一次大 C 重构。**如果 M-5 就量化就没有这条 4-milestone 绕路**。
+
+<!-- updated: 2026-04-23 11:20 -->
+
+## Qwen3-30B-A3B top_k=8 decode 的 routing Jaccard ≈ 0.14 — **MoE cache 的难度常数**
+
+- 实测：Qwen3-GPTQ-Int4, top_k=8, 128 experts, 32 decode tokens, batch=1：
+  - Jaccard(topk(t), topk(t-1)) 均值 = 0.137 (全 sweep); 中位数 bin = [0-10%), 45.7% 样本在该 bin
+  - 只有 0.7% 样本 Jaccard >= 50%
+- 意义：**slot-based cache 对这种 MoE 理论 hit ratio 上限就是 14%**。不管多少 slot、多少 runtime、多聪明的 LRU，都越不过这个线。要想让 MoE 享受 cache 收益，必须：
+  1. 缩小每 expert 的 footprint（混合精度让单 bundle 从 1.5 MB → 0.5 MB），一个 DMA 把多个备选 expert 都带上
+  2. 或者换一个 MoE 架构：smaller top_k (e.g. 2) + fewer total experts (e.g. 32)，locality 天然高
+  3. 或者放弃 cache、走 async + overlap 让 DMA 时间消失在 GPU 时间背后
+- 推广：未来评估任何 MoE 模型是否适合 PIM / weight-residency 优化前，**先跑这个 Jaccard histogram**。均值 < 0.2 就应该走 async/overlap；均值 > 0.4 才考虑多 slot。
+
+<!-- updated: 2026-04-23 11:20 -->
+
+## 默认配置变更要 test 显式锁定，不能只信 ctor 默认值
+
+- 本项目 milestone 路线上 `pim_layer_group_size` 的默认经历了
+  M-7:3 → M-8:3 → **M-9:48**，`enable_speculative_preload_gptq` 经历了
+  M-7:False → M-8:True → **M-9:False**。每次 ctor 默认翻转都要同步更新
+  对应的 `test_default_*` / `test_speculative_preload_gptq_default_*`
+  用例，**否则改默认时 blame-diff 读不懂为什么 assert 要改**。
+- 约定：每个默认值翻转的 PR/commit 里必须带**同步更新测试 + 注释**，
+  注释说明 "M-X: flipped from X to Y because <数据来源>"。
+- 最安全的做法：**测试不直接断言 True/False**，而是 assert `backend.enable_speculative_preload_gptq == <expected_for_this_milestone>` 然后 parametrize 每个 milestone 一个 expected。(本项目暂没走这一步，但值得在 M-11 开始做。)

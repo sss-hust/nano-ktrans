@@ -1,0 +1,142 @@
+milestone_id = "M-9"
+title = "Routing-locality quantification + group_size sweep: data-driven decision to revert caching stack to singleton baseline"
+
+prerequisites = ["M-8"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M9_final.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M9_gs3.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M9_gs6.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M9_gs12.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M9_gs24.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M9_gs48.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M9_final.json"
+
+suggested_commands = [
+    "# full sweep — takes ~10 minutes on real hardware:",
+    "for gs in 3 6 12 24 48; do python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 2 --max-new-tokens 32 --pim-layer-group-size $gs --json-out benchmarks/results/e2e_gptq_cuda_pim_M9_gs${gs}.json; done",
+    "# new default (group_size=48 + speculative off) final artifact:",
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 2 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M9_final.json",
+]
+
+next_tasks = [
+    "M-10: dpu_launch(DPU_ASYNCHRONOUS) + submit queue so GPU attention and PIM launches overlap.  This is the first lever that doesn't rely on routing locality.",
+    "M-10: (conditional on Jaccard histogram in M-9 artifact) if locality spikes for some prompts but not others, re-enable speculative preload behind a per-prompt heuristic.",
+    "M-11: mixed-precision expert bundles (ADR-001 P4 / HOBBIT) to shrink each bundle so more experts fit a single MRAM budget, compounding with the ASYNC win from M-10.",
+]
+
+# ---------------------------------------------------------------------
+# Acceptance rationale — M-9 is a measurement milestone.
+#
+# M-5 / M-6 / M-7 / M-8 collectively built a multi-runtime, multi-slot
+# LRU cache targeting decode-step-to-decode-step expert reuse.  M-9
+# finally measures the reuse signal directly (Jaccard of consecutive
+# forward calls' active CPU-side expert sets) and sweeps group_size ∈
+# {3, 6, 12, 24, 48} on real hardware:
+#
+#   group_size  decode_tps  hit_local  hit_ratio  Jaccard mean
+#   ----------  ----------  ---------  ---------  ------------
+#       3         0.246        18        0.1%         0.139
+#       6         0.263         6        0.0%         0.171
+#      12         0.261         0        0.0%         0.162
+#      24         0.274         0        0.0%         0.166
+#      48         0.290         0        0.0%         0.137
+#
+# Two data-driven conclusions:
+#
+#   (a) Jaccard(topk(t), topk(t-1)) mean ≈ 0.14 across all group
+#       configurations, with 45.7% of consecutive pairs having <10%
+#       overlap and only 0.7% having >=50%.  Qwen3 top_k=8 / 128
+#       experts is **essentially random-walk** routing from a
+#       caching perspective; no slot cache can beat ~14% hit ratio.
+#
+#   (b) group_size=48 (singleton, ~M-6 behaviour without the
+#       multi-slot LRU overhead) is *fastest* because the 32-rank-pool
+#       coordination cost of M-7/M-8 outweighs the tiny hit benefit.
+#
+# M-9's *output* is therefore a configuration change, not a new
+# feature: default `pim_layer_group_size=48` and
+# `enable_speculative_preload_gptq=False`.  The LRU/preload
+# infrastructure stays in place for optional A/B use (different MoE
+# architectures may have higher locality), but is off by default.
+#
+# Primary KPI is that the final run with the new defaults shows
+# measurable improvement over M-8 and that the sweep artifact
+# actually covers the planned group_size values.
+# ---------------------------------------------------------------------
+
+# KPI-1: the final run must complete on real hardware.
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-9 default config must run end-to-end."
+
+[[acceptance_checks]]
+path     = "results[0].error"
+op       = "not_exists"
+reason   = "no top-level error."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full decode budget."
+
+# KPI-2: the new defaults are actually in effect.
+[[acceptance_checks]]
+path     = "results[0].offload_diagnostics.layers[0].backend.pim_layer_group_size"
+op       = "=="
+value    = 48
+reason   = "M-9 flips the default group_size back to 48 (singleton).  The diagnostic must report the new default."
+
+[[acceptance_checks]]
+path     = "results[0].offload_diagnostics.layers[0].backend.enable_speculative_preload_gptq"
+op       = "=="
+value    = false
+reason   = "M-9 disables the speculative preload by default (hit/preload 24/96 in M-8 didn't pay off)."
+
+# KPI-3: the routing-locality diagnostic is wired up AND populated.
+# This is the whole point of the milestone.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.locality_decode_jaccard_count)"
+op       = ">="
+value    = 100
+reason   = "locality counter must actually accumulate during decode — confirms the Jaccard instrumentation is live."
+
+# KPI-4: the locality mean recorded in the artifact matches M-9's
+# real-hardware finding (Qwen3 top_k=8 ≈ 0.14).  Guard: ±0.10.
+[[acceptance_checks]]
+path     = "results[0].offload_diagnostics.layers[0].backend.locality_decode_jaccard_mean"
+op       = ">="
+value    = 0.05
+reason   = "layer-0 Jaccard mean must be in the low-but-nonzero range observed in M-9; the MoE is not pathologically ordered."
+
+[[acceptance_checks]]
+path     = "results[0].offload_diagnostics.layers[0].backend.locality_decode_jaccard_mean"
+op       = "<="
+value    = 0.40
+reason   = "layer-0 Jaccard mean must be bounded by the M-9 observation (mean ≈ 0.14); a sudden jump here would mean the prompt changed radically and the sweep data doesn't apply."
+
+# KPI-5: decode_tps must not regress below a reasonable floor.  M-4
+# was 0.317 (peak, before the caching experiments).  M-9 final is
+# 0.284.  Guard >= 0.26.
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.26
+reason   = "M-9 final must improve over M-8's 0.242 and approach M-6/M-7's ~0.30 (the M-4 peak 0.317 is the ceiling we can reach without async launch)."
+
+# KPI-6: basic infra guards carried forward from M-8.
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = ">="
+value    = 10000
+reason   = "PIM must still run real DPU work."
+
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = "<="
+value    = 28000
+reason   = "fused gate+up (M-4) still active (~23k, not 35k)."

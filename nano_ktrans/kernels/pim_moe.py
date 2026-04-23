@@ -68,8 +68,8 @@ class PIMMoEBackend(CPUMoEBackend):
         pim_prefill_token_threshold: int = 8,
         cost_model: Optional[object] = None,
         enable_cost_model_routing: bool = True,
-        pim_layer_group_size: int = 3,
-        enable_speculative_preload_gptq: bool = True,
+        pim_layer_group_size: int = 48,
+        enable_speculative_preload_gptq: bool = False,
     ):
         self.pim_rank_count = pim_rank_count
         self.pim_bytes_per_dpu = pim_bytes_per_dpu
@@ -111,6 +111,30 @@ class PIMMoEBackend(CPUMoEBackend):
         self.real_dpu_quantized_calls = 0
         self.last_kernel_cycles = 0
         self.fallback_counts: dict[str, int] = {}
+        # ADR-002 M-9: routing-locality diagnostic.
+        #
+        # Every call to `_submit_forward_real` sees the topk_ids that the
+        # router picked for this layer's CPU-side experts.  We keep the
+        # set of active (= any-token-routed-to-it) CPU-side experts from
+        # the previous call and compare via Jaccard similarity:
+        #
+        #     locality_t = |prev ∩ curr| / |prev ∪ curr|
+        #
+        # locality_t = 1 means the exact same expert set as last step
+        # (perfect slot-cache reuse).  locality_t = 0 means no overlap
+        # (MRAM slot cache cannot help).  Summed and counted separately
+        # for prefill vs decode because they have very different dynamics.
+        #
+        # Histogram bins cover [0, 1] in 10% increments so the aggregate
+        # distribution is visible in offload_diagnostics without per-step
+        # storage.
+        self._prev_active_cpu_experts_forward: frozenset[int] | None = None
+        self.locality_decode_jaccard_sum: float = 0.0
+        self.locality_decode_jaccard_count: int = 0
+        self.locality_prefill_jaccard_sum: float = 0.0
+        self.locality_prefill_jaccard_count: int = 0
+        # 11 bins: [0.0-0.1), [0.1-0.2), ..., [0.9-1.0), [1.0-1.0]
+        self.locality_decode_jaccard_histogram: list[int] = [0] * 11
         self.runtime = None
         self.expert_runtime = None
         self.quantized_runtime: Optional[PIMQuantizedRuntime] = None
@@ -578,6 +602,41 @@ class PIMMoEBackend(CPUMoEBackend):
         device = hidden_states.device
         context = get_context()
 
+        # ADR-002 M-9: routing-locality diagnostic.  Compute Jaccard
+        # similarity of this call's active CPU-side expert set vs the
+        # previous call.  Must run unconditionally (even if we route
+        # back to CPU) so decode-step locality is measured honestly.
+        try:
+            flat_ids_cpu = topk_ids.detach().to("cpu", dtype=torch.long).flatten()
+            cpu_mask_cpu = (~self.gpu_experts_mask.bool()).to("cpu")
+            # An expert is "active on CPU side" this call iff any token
+            # routed to it AND it lives on CPU (not GPU-resident).
+            active_cpu = {
+                int(eid) for eid in flat_ids_cpu.unique().tolist()
+                if 0 <= eid < self.num_experts and bool(cpu_mask_cpu[eid].item())
+            }
+            current = frozenset(active_cpu)
+            prev = self._prev_active_cpu_experts_forward
+            if prev is not None and (current or prev):
+                union = len(current | prev)
+                inter = len(current & prev)
+                j = (inter / union) if union > 0 else 0.0
+                if context.is_prefill:
+                    self.locality_prefill_jaccard_sum += j
+                    self.locality_prefill_jaccard_count += 1
+                else:
+                    self.locality_decode_jaccard_sum += j
+                    self.locality_decode_jaccard_count += 1
+                    # bucket into 11 bins, last bin = exactly 1.0
+                    if j >= 1.0:
+                        self.locality_decode_jaccard_histogram[10] += 1
+                    else:
+                        self.locality_decode_jaccard_histogram[int(j * 10)] += 1
+            self._prev_active_cpu_experts_forward = current
+        except Exception:
+            # locality accounting must never break a forward pass.
+            pass
+
         # ADR-002 M-3: cost-model-driven layer-level gate.
         #
         # The previous logic was a trio of hardcoded knobs
@@ -899,6 +958,24 @@ class PIMMoEBackend(CPUMoEBackend):
                 "enable_speculative_preload_gptq": self.enable_speculative_preload_gptq,
                 "speculative_preload_gptq_count": getattr(
                     self, "_speculative_preload_gptq_count", 0
+                ),
+                # ADR-002 M-9: routing-locality diagnostic (Jaccard of
+                # active CPU-side expert set between consecutive forward
+                # calls).  Aggregated here so dev_gate / reports can do
+                # cross-layer sums and means.
+                "locality_decode_jaccard_count": self.locality_decode_jaccard_count,
+                "locality_decode_jaccard_sum": self.locality_decode_jaccard_sum,
+                "locality_decode_jaccard_mean": (
+                    (self.locality_decode_jaccard_sum / self.locality_decode_jaccard_count)
+                    if self.locality_decode_jaccard_count > 0
+                    else None
+                ),
+                "locality_decode_jaccard_histogram": list(self.locality_decode_jaccard_histogram),
+                "locality_prefill_jaccard_count": self.locality_prefill_jaccard_count,
+                "locality_prefill_jaccard_mean": (
+                    (self.locality_prefill_jaccard_sum / self.locality_prefill_jaccard_count)
+                    if self.locality_prefill_jaccard_count > 0
+                    else None
                 ),
             }
         )
