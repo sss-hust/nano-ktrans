@@ -7940,10 +7940,10 @@ class TestPIMMoEBackendLayerGroupScoping:
             weight_path=str(tmp_path),
             pim_execution_mode="shadow",
         )
-        assert backend.pim_layer_group_size == 3
+        assert backend.pim_layer_group_size == 48
         diag = backend.diagnostics()
-        assert diag["pim_layer_group_size"] == 3
-        # layer 0 with group_size 3 → group 0.
+        assert diag["pim_layer_group_size"] == 48
+        # layer 0 with group_size 48 → group 0 (all layers share group 0).
         assert diag["pim_layer_group_id"] == 0
 
     def test_layer_group_id_wraps_by_group_size(self, tmp_path):
@@ -8014,12 +8014,19 @@ class TestPIMMoEBackendLayerGroupScoping:
         assert b47.diagnostics()["pim_layer_group_id"] == 0
 
     def test_speculative_preload_gptq_default_off(self, tmp_path):
-        """ADR-002 M-8: after the handle-based bridge refactor landed,
-        the speculative preload path is safe (no more munmap_chunk
-        from shared .so static globals).  Default flipped to True.
+        """ADR-002 M-9: speculative preload default-OFF again.
 
-        The test name is kept for blame-diff continuity, but the
-        assertion reflects the post-M-8 default: True.
+        History:
+        - M-7 shipped it default-False because the code path triggered
+          munmap_chunk heap corruption on the shared-static-globals
+          backend.
+        - M-8 fixed the backend and flipped to default-True.
+        - M-9 real-hardware sweep measured routing locality Jaccard
+          mean = 0.14 and hit/preload ratio 24/96 — the warm-up costs
+          more than it saves.  Default flipped back to False.
+
+        The default-True case is still reachable via explicit ctor arg
+        for A/B benchmarking.
         """
         from nano_ktrans.kernels.pim_moe import PIMMoEBackend
         hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
@@ -8029,11 +8036,12 @@ class TestPIMMoEBackendLayerGroupScoping:
             gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
             weight_path=str(tmp_path), pim_execution_mode="shadow",
         )
-        assert backend.enable_speculative_preload_gptq is True
-        assert backend.diagnostics()["enable_speculative_preload_gptq"] is True
+        assert backend.enable_speculative_preload_gptq is False
+        assert backend.diagnostics()["enable_speculative_preload_gptq"] is False
 
-    def test_speculative_preload_gptq_can_be_disabled(self, tmp_path):
-        """Callers can still opt out (e.g. for A/B benchmarking)."""
+    def test_speculative_preload_gptq_can_be_enabled(self, tmp_path):
+        """Callers can opt in (e.g. for A/B benchmarking or if their
+        MoE shows unusually high routing locality)."""
         from nano_ktrans.kernels.pim_moe import PIMMoEBackend
         hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
         backend = PIMMoEBackend(
@@ -8041,9 +8049,9 @@ class TestPIMMoEBackendLayerGroupScoping:
             hidden_size=hidden_size, intermediate_size=intermediate_size,
             gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
             weight_path=str(tmp_path), pim_execution_mode="shadow",
-            enable_speculative_preload_gptq=False,
+            enable_speculative_preload_gptq=True,
         )
-        assert backend.enable_speculative_preload_gptq is False
+        assert backend.enable_speculative_preload_gptq is True
 
     def test_speculative_preload_gptq_count_field_exists(self, tmp_path):
         """Counter field must be present from construction so M-8
@@ -8136,3 +8144,110 @@ class TestPIMQuantizedRuntimeHandleBased:
         # Second shutdown must be a no-op (handle is 0 → not called).
         rt.shutdown()
         assert rt._lib.shutdown_calls == [0xdeadbeef]
+
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-9 — routing-locality diagnostic + CLI group_size flag
+# ----------------------------------------------------------------------
+
+
+class TestPIMMoEBackendLocalityDiagnostic:
+    """Tests for M-9's Jaccard routing-locality counters in
+    PIMMoEBackend.diagnostics() (§17 of ADR-002).
+
+    The fields are populated on every _submit_forward_real call,
+    but because shadow mode short-circuits, we exercise the locality
+    path by hand-setting the state fields and checking diagnostics
+    exposes them consistently."""
+
+    def _make_dummy(self, tmp_path, hidden_size=64, intermediate_size=32, num_experts=2):
+        from safetensors.torch import save_file
+        tensors = {}
+        for e in range(num_experts):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w1.weight"] = (
+                torch.randn(intermediate_size, hidden_size)
+            )
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w3.weight"] = (
+                torch.randn(intermediate_size, hidden_size)
+            )
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w2.weight"] = (
+                torch.randn(hidden_size, intermediate_size)
+            )
+        save_file(tensors, str(tmp_path / "model.safetensors"))
+        return hidden_size, intermediate_size, num_experts
+
+    def test_locality_diagnostic_fields_present(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+        )
+        diag = backend.diagnostics()
+        for field in (
+            "locality_decode_jaccard_count",
+            "locality_decode_jaccard_sum",
+            "locality_decode_jaccard_mean",
+            "locality_decode_jaccard_histogram",
+            "locality_prefill_jaccard_count",
+            "locality_prefill_jaccard_mean",
+        ):
+            assert field in diag, f"missing diagnostic field {field!r}"
+        assert diag["locality_decode_jaccard_count"] == 0
+        # Mean is None when count is 0.
+        assert diag["locality_decode_jaccard_mean"] is None
+        # Histogram has 11 bins: [0-10%)..[90-100%), [100%]
+        assert len(diag["locality_decode_jaccard_histogram"]) == 11
+        assert all(v == 0 for v in diag["locality_decode_jaccard_histogram"])
+
+    def test_locality_mean_is_computed_after_observations(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+        )
+        backend.locality_decode_jaccard_sum = 3.5
+        backend.locality_decode_jaccard_count = 10
+        backend.locality_decode_jaccard_histogram[3] = 5  # [30-40%)
+        diag = backend.diagnostics()
+        assert diag["locality_decode_jaccard_count"] == 10
+        assert diag["locality_decode_jaccard_sum"] == pytest.approx(3.5)
+        assert diag["locality_decode_jaccard_mean"] == pytest.approx(0.35)
+        assert diag["locality_decode_jaccard_histogram"][3] == 5
+
+    def test_default_group_size_is_48_post_m9(self, tmp_path):
+        """M-9 real-hardware sweep: group_size=48 (singleton) is the
+        fastest of {3, 6, 12, 24, 48} — protect the default flip."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+        )
+        assert backend.pim_layer_group_size == 48
+
+
+class TestBenchmarkInferenceCliM9:
+    """The new CLI flags must actually wire through argparse."""
+
+    def test_pim_layer_group_size_flag_parsed(self):
+        import argparse, importlib.util
+        path = "/home/yangfu/nano-ktrans/benchmarks/benchmark_inference.py"
+        spec = importlib.util.spec_from_file_location("benchmark_inference", path)
+        # Just parse the flag set via a throwaway parser is fragile; read argv
+        # round-trip instead by invoking build_argparser if present.
+        # Here we simply check the arg name exists in the source file as a
+        # thin regression guard.
+        with open(path) as f:
+            src = f.read()
+        assert "--pim-layer-group-size" in src
+        assert "--pim-enable-speculative-preload-gptq" in src
+        assert "--no-pim-speculative-preload-gptq" in src

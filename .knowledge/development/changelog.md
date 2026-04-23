@@ -7,6 +7,55 @@ tags: [changelog]
 
 ## 2026-04-23
 
+### 2026-04-23 11:20 - ADR-002 M-9 闭合：量化 Qwen3 routing locality，决定性地关闭 caching 栈 (dev_gate PASS 11/11)
+
+**5 个真机 group_size sweep + 1 行 Jaccard diagnostic 把 M-5~M-8 的 4 个
+null perf milestone 一次性定性**：Qwen3 top_k=8 的相邻 decode step 之间
+active expert set 的 Jaccard similarity 均值 = **0.14**，45.7% 的样本 < 10%
+重叠。slot-based cache 理论 hit ratio 上限 14%，但 32-rank-pool 的协调开销
+1.3 ms/call 会吃掉 10× 这个收益。
+
+**sweep 数据**:
+
+| group_size | decode_tps | hit_ratio | Jaccard mean |
+|------------|-----------|-----------|--------------|
+| 3 | 0.246 | 0.1% | 0.139 |
+| 6 | 0.263 | 0.0% | 0.171 |
+| 12 | 0.261 | 0.0% | 0.162 |
+| 24 | 0.274 | 0.0% | 0.166 |
+| **48** | **0.290** | 0.0% | 0.137 |
+
+**默认变更** (M-5~M-8 infra 全保留，只翻默认)：
+- `pim_layer_group_size`: 3 → **48** (singleton，M-6 等价)
+- `enable_speculative_preload_gptq`: True → **False**
+
+**M-9 final 真机 (Qwen3-GPTQ-Int4, 32 tokens, 新默认)**:
+- `decode_tps = 0.2844` (vs M-8 默认 0.242 **+18%**; vs M-4 peak 0.317 -10%)
+- 和 CPU baseline 3.07 的差距从 10.8× 缩到 10.8× (没变，但至少不再 -22%)
+
+**关联改动**:
+- `benchmarks/benchmark_inference.py`: 加 `--pim-layer-group-size` +
+  `--pim-enable-speculative-preload-gptq` / `--no-pim-speculative-preload-gptq`
+- `nano_ktrans/kernels/pim_moe.py`: ctor 默认改为 group_size=48 + spec=False;
+  `_submit_forward_real` 加 Jaccard locality 统计 (count/sum/mean/11-bin histogram);
+  `diagnostics()` 暴露 6 个新 locality 字段
+- `.codebuddy/dev_gate/M-9.toml`: 11 条 KPI 含首次的 "routing locality
+  diagnostic is live and within measured bounds" 检查
+- `tests/test_core.py`: `TestPIMMoEBackendLocalityDiagnostic` (3 tests) +
+  `TestBenchmarkInferenceCliM9` (1 test); M-7/M-8 的 `test_default_*` 和
+  `test_speculative_preload_gptq_*` 系列按新默认调整
+
+**最大教训**: M-5/M-6/M-7/M-8 累计 ~10 人日工程都建立在 "routing 有
+locality" 的未经验证假设上。M-9 的 1 行 Jaccard diagnostic 如果在 M-5
+做就能直接跳过整个 caching 路径。**数据驱动 > 直觉驱动**这个 principle
+每次都要交学费。写入 gotchas。
+
+**测试**: 234 → **238 passed** (+4).
+
+**M-10 下一步**: `dpu_launch(DPU_ASYNCHRONOUS)` + submit queue 让 GPU
+attention 和 PIM 真正并行。估算 decode_tps 0.29 → 0.50-0.60，vs CPU
+差距从 10.8× 缩到 5-6×。
+
 ### 2026-04-23 11:00 - ADR-002 M-8 闭合：handle-based host_quantized_bridge 重构 — 真隔离 landed (24 preload hits 项目首次非零), dev_gate PASS 9/9, 但 decode_tps -22% 揭示 Qwen3 routing locality 远低于预期
 
 迄今最大单次 C 重构：把 `host_quantized_bridge.c` 的 20 个 `static`
