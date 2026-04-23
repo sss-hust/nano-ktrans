@@ -7,6 +7,65 @@ tags: [changelog]
 
 ## 2026-04-23
 
+### 2026-04-23 19:30 - ADR-002 M-10 闭合：Python threading async 无 overlap gain，意外发现 offload=32 赢 M-4 peak (dev_gate PASS 10/10)
+
+实装 `PIMMoEBackend.enable_async_pim_submit`: `submit_forward` 起
+`threading.Thread` 跑 `_submit_forward_real`, `sync_forward` 先 join
+再读 `_fallback_output`, 4 个 async telemetry 字段暴露在 diagnostics.
+CLI `--pim-enable-async-submit` / `--no-pim-async-submit` 方便 A/B.
+
+**真机 A/B (Qwen3-GPTQ-Int4, 32 tokens)**:
+
+| 配置 | decode_tps | sync_wait mean |
+|------|-----------|----------------|
+| offload=2, async OFF (≈M-9) | 0.284 | — |
+| offload=2, async ON | 0.271 (**-4.7%**) | 73 ms |
+| offload=32, async OFF | **0.3506** | — |
+| offload=32, async ON | 0.340 (-3.1%) | 54 ms |
+
+Python `threading.Thread` spawn + join + GIL 切换在 ctypes-heavy
+workload 下有 ~5 ms/call 开销 × 1488 call = ~7.4 s 损失，**完全吃
+掉 overlap 收益**. 所有 A/B 都显示 async OFF 更快. Default 翻回
+`enable_async_pim_submit=False`. Flag 保留给 M-11 做 C-level async
+对照.
+
+**意外发现**: `offload_device_experts=32 + async OFF` 测出
+`decode_tps = 0.3506`, **超过 M-4 历史 peak 0.317 (+10.6%)**. 这是
+weight residency 杠杆，不是 async 杠杆 (GPU 常驻 32 expert 让
+每层 PIM active expert 从 8 降到 5). 第一次在 M-4 之后看到
+decode_tps 真正前进.
+
+**项目累计 (M-1 ~ M-10)**:
+- 真 perf 胜利: 2 (M-3 prefill 13.3×, M-4 decode +39%) + 1 副产品
+  (M-10 offload=32 +10.6% vs M-4)
+- Null perf + 诊断: 6 (M-2, M-5, M-6, M-7, M-8, M-10)
+- Baseline: 2 (M-1, M-9)
+- dev_gate PASS rules 累计: **87**
+
+**关联改动**:
+- `pim_moe.py`: `enable_async_pim_submit` ctor 参数 (默认 False);
+  `submit_forward` spawn thread; `sync_forward` override join+delegate;
+  4 个新 diagnostic 字段
+- `benchmark_inference.py`: `--pim-enable-async-submit` / `--no-pim-async-submit`
+  CLI 对. `offload_backend_kwargs` 传 `enable_async_pim_submit`
+- `.codebuddy/dev_gate/M-10.toml`: 10 条 KPI, 含首次 `ratio_vs_artifact`
+  跨 A/B 文件的 "async OFF >= async ON" 检查
+- `tests/test_core.py::TestPIMMoEBackendAsyncPimSubmit` (4 tests):
+  default off / can enable / counters advance with stubbed
+  _submit_forward_real / exception propagation through thread
+
+**测试**: 238 → **242 passed** (+4).
+
+**M-11 攻击面**:
+- 选项 A: C-level `dpu_launch(DPU_ASYNCHRONOUS)` 消除 Python-C
+  1488 次 roundtrip (估 tps 0.29 → 0.40-0.50)
+- 选项 B: 系统扫 `offload_device_experts ∈ {2, 16, 32, 48, 64}` 的 OOM
+  边界, 如果 stable 就直接推 32 作为新推荐默认
+
+**教训** (已写入 gotchas): **做 async/overlap 优化前必须先 micro-bench
+Python 线程 overhead vs 预期 overlap 窗口**. M-9 "locality 要先量化"
+的 async 版本.
+
 ### 2026-04-23 11:20 - ADR-002 M-9 闭合：量化 Qwen3 routing locality，决定性地关闭 caching 栈 (dev_gate PASS 11/11)
 
 **5 个真机 group_size sweep + 1 行 Jaccard diagnostic 把 M-5~M-8 的 4 个

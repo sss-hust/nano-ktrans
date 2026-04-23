@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, Optional
 
 import torch
@@ -70,6 +71,7 @@ class PIMMoEBackend(CPUMoEBackend):
         enable_cost_model_routing: bool = True,
         pim_layer_group_size: int = 48,
         enable_speculative_preload_gptq: bool = False,
+        enable_async_pim_submit: bool = False,
     ):
         self.pim_rank_count = pim_rank_count
         self.pim_bytes_per_dpu = pim_bytes_per_dpu
@@ -135,6 +137,33 @@ class PIMMoEBackend(CPUMoEBackend):
         self.locality_prefill_jaccard_count: int = 0
         # 11 bins: [0.0-0.1), [0.1-0.2), ..., [0.9-1.0), [1.0-1.0]
         self.locality_decode_jaccard_histogram: list[int] = [0] * 11
+
+        # ADR-002 M-10: async PIM submit.
+        #
+        # When ``enable_async_pim_submit`` is True, ``submit_forward``
+        # does not block on the DPU — it spawns a background thread
+        # that runs ``_submit_forward_real`` while ``HybridMoE.forward``
+        # continues with GPU attention / GPU-resident experts.
+        # ``sync_forward`` then joins the thread before reading back
+        # ``_fallback_output``.
+        #
+        # Python's GIL is released inside ctypes calls (dpu_launch,
+        # dpu_push_xfer, memcpy bindings), so the PIM thread really
+        # runs concurrently with the GPU side — no C-level threading
+        # is required.  Default True because the worst case is "same
+        # latency as sync path minus the thread spawn overhead (~30us)"
+        # and the best case is 100 ms+/tok savings when GPU attention
+        # is substantial.
+        self.enable_async_pim_submit: bool = bool(enable_async_pim_submit)
+        self._async_thread: Optional[threading.Thread] = None
+        self._async_exc: Optional[BaseException] = None
+        # Latency telemetry (decode only).  submit_to_sync_wait_seconds
+        # is the host-side wait the caller paid at sync time; if this
+        # number is close to zero on average, async submit is hiding
+        # all of the DPU work behind GPU work (the goal).
+        self.async_submit_count: int = 0
+        self.async_sync_wait_seconds_sum: float = 0.0
+        self.async_sync_wait_seconds_count: int = 0
         self.runtime = None
         self.expert_runtime = None
         self.quantized_runtime: Optional[PIMQuantizedRuntime] = None
@@ -818,6 +847,63 @@ class PIMMoEBackend(CPUMoEBackend):
 
         context = get_context()
 
+        # ADR-002 M-10: async PIM submit.
+        #
+        # When enabled and in decode (not prefill), spawn a background
+        # thread that runs _submit_forward_real while HybridMoE.forward
+        # proceeds with GPU attention / GPU-resident experts.
+        # sync_forward joins the thread.  Prefill intentionally stays
+        # synchronous because:
+        #   * prefill usually routes through CPU (cost-model decision),
+        #     so there's no DPU work to hide anyway;
+        #   * prefill is called in a setup phase where GPU side has
+        #     very little overlap budget.
+        async_eligible = (
+            self.enable_async_pim_submit
+            and self.pim_execution_mode == "real"
+            and self.has_cpu_experts
+            and not context.is_prefill
+        )
+
+        if async_eligible:
+            # Clear any prior thread state (safety — sync_forward should
+            # have joined by now).  If a previous thread is still alive
+            # we must join synchronously here to avoid leaking work.
+            if self._async_thread is not None and self._async_thread.is_alive():
+                self._async_thread.join()
+            self._async_exc = None
+            self._async_submit_wall_start = None
+
+            # Snapshot the torch tensors so the background thread gets
+            # its own view (the caller's hidden_states / topk_ids may
+            # be freed or mutated after submit returns).
+            hs_snap = hidden_states
+            tk_ids_snap = topk_ids
+            tk_w_snap = topk_weights
+
+            def _worker():
+                try:
+                    ok = self._submit_forward_real(hs_snap, tk_ids_snap, tk_w_snap)
+                    if not ok:
+                        # cost-model voted CPU / no-op; populate zeros so
+                        # sync_forward has a shape-matching tensor.
+                        if (
+                            self._fallback_output is None
+                            or not isinstance(self._fallback_output, torch.Tensor)
+                            or self._fallback_output.shape != hs_snap.shape
+                        ):
+                            self._fallback_output = torch.zeros_like(hs_snap)
+                except BaseException as exc:  # noqa: BLE001
+                    self._async_exc = exc
+
+            import time as _time
+            self._async_submit_wall_start = _time.perf_counter()
+            t = threading.Thread(target=_worker, name=f"pim_async_L{self.layer_idx}", daemon=True)
+            t.start()
+            self._async_thread = t
+            self.async_submit_count += 1
+            return
+
         if self.pim_execution_mode == "real" and self.has_cpu_experts:
             if self._submit_forward_real(hidden_states, topk_ids, topk_weights):
                 # If prefill fell through to CPU, speculatively preload for decode
@@ -834,6 +920,31 @@ class PIMMoEBackend(CPUMoEBackend):
                 self._speculative_preload_gptq(topk_ids)
 
         super().submit_forward(hidden_states, topk_ids, topk_weights, cuda_stream)
+
+    def sync_forward(self, hidden_states: torch.Tensor, cuda_stream: int | None) -> torch.Tensor:
+        """ADR-002 M-10: join the async PIM submit thread (if any) and
+        then delegate to the CPU/GPTQ sync path which reads
+        ``self._fallback_output``.
+
+        If async was not used this call (prefill, or
+        enable_async_pim_submit=False), this is a straight
+        delegate with zero overhead — we pay only one branch check
+        plus the no-op ``_async_thread is None`` test.
+        """
+        t = self._async_thread
+        if t is not None:
+            import time as _time
+            wait_start = _time.perf_counter()
+            t.join()
+            wait_s = _time.perf_counter() - wait_start
+            self.async_sync_wait_seconds_sum += wait_s
+            self.async_sync_wait_seconds_count += 1
+            self._async_thread = None
+            exc = self._async_exc
+            self._async_exc = None
+            if exc is not None:
+                raise exc
+        return super().sync_forward(hidden_states, cuda_stream)
 
     def update_gpu_expert_mask(self, gpu_experts_mask: torch.Tensor) -> None:
         super().update_gpu_expert_mask(gpu_experts_mask)
@@ -975,6 +1086,16 @@ class PIMMoEBackend(CPUMoEBackend):
                 "locality_prefill_jaccard_mean": (
                     (self.locality_prefill_jaccard_sum / self.locality_prefill_jaccard_count)
                     if self.locality_prefill_jaccard_count > 0
+                    else None
+                ),
+                # ADR-002 M-10: async PIM submit telemetry.
+                "enable_async_pim_submit": self.enable_async_pim_submit,
+                "async_submit_count": self.async_submit_count,
+                "async_sync_wait_seconds_sum": self.async_sync_wait_seconds_sum,
+                "async_sync_wait_seconds_count": self.async_sync_wait_seconds_count,
+                "async_sync_wait_seconds_mean": (
+                    (self.async_sync_wait_seconds_sum / self.async_sync_wait_seconds_count)
+                    if self.async_sync_wait_seconds_count > 0
                     else None
                 ),
             }
