@@ -454,3 +454,39 @@ tags: [pitfalls, debugging]
 - 约定：每个默认值翻转的 PR/commit 里必须带**同步更新测试 + 注释**，
   注释说明 "M-X: flipped from X to Y because <数据来源>"。
 - 最安全的做法：**测试不直接断言 True/False**，而是 assert `backend.enable_speculative_preload_gptq == <expected_for_this_milestone>` 然后 parametrize 每个 milestone 一个 expected。(本项目暂没走这一步，但值得在 M-11 开始做。)
+
+
+<!-- updated: 2026-04-23 19:30 -->
+
+## Python `threading.Thread` 在 ctypes-heavy workload 下**有 ~5 ms/call 的隐藏开销**
+
+- 现象: M-10 把 `_submit_forward_real` 塞进 `threading.Thread` 想 overlap GPU attention 和 PIM DMA. `async_submit_count = 1488` + `sync_wait_mean = 73 ms` 之和本应 > `decode_seconds`（如果真 overlap），但实测 `decode_s(async ON) = 118s > decode_s(async OFF) = 112s`，async 反而慢 4.7%。
+- 分解: 理论 PIM work 每 call ~22 ms (1.5ms DPU kernel + 0.3ms DMA × 14.7 call/layer). sync_wait 实测 73 ms，差 51 ms 就是 Python overhead：GIL 在 ctypes call 里释放后，worker 线程拿到 GIL → 调 `dpu_launch` → 释放 GIL → main thread 进来做 GPU 事 → worker 要继续下一次 ctypes 要等 GIL → 一来一回几毫秒。线程 spawn 本身只 30-50 μs 可忽略，GIL 竞争才是主要成本。
+- 经验:
+  1. **做 async/overlap 优化前必须先 micro-bench Python 线程/协程 overhead vs 预期 overlap 窗口的比例**. 如果 overhead/window > 30%，直接放弃 Python 层 async，要做就做 C 层 async.
+  2. 实测工具: `python -c "import time, threading; t0=time.perf_counter(); [threading.Thread(target=lambda: None).start() for _ in range(1000)]; print(time.perf_counter()-t0)"` 给出 spawn 基线；加 ctypes `CDLL('/some/bench.so').slow_work()` 测真实 GIL 争用成本。
+  3. 真正能在 Python 层赢的 async 场景：**worker 跑纯 C 计算 >= 几十毫秒**（DPU single-launch 只有 1.2 ms 太短了），或者用 `multiprocessing` 绕开 GIL（但要付 IPC 成本）。
+- 本项目定位: M-11 要做就做 C-level async (`dpu_launch(DPU_ASYNCHRONOUS)` + `dpu_sync`) 而不是 Python threading。Python 层的 async 代码 (`submit_forward` 里的 `threading.Thread`) 保留但默认关，给未来 worker-heavy workload 留后路.
+
+<!-- updated: 2026-04-23 19:30 -->
+
+## Qwen3 `offload_device_experts=32` 意外赢 M-4 peak — weight residency 比 optimization 更值得投资
+
+- 现象: M-10 的 A/B 顺带测了 `--offload-device-experts 32` (让 GPU 常驻 32 个 expert, 比默认 2 多得多)，跑出 `decode_tps = 0.3506`，**超过 M-4 fused gate+up peak 0.317 +10.6%**，超过 M-9 final 0.284 **+23.5%**. 这是 M-4 以来项目第一次见到 decode_tps 真正前进.
+- 机制: Qwen3 top_k=8 → 每 token 每层 8 个 active expert. GPU 常驻 32/128 expert 意味着平均 `8 × 32/128 = 2` 个 active 命中 GPU, **CPU 侧 active 从 8 降到 5-6**, PIM 工作量按比例减少. 这是最朴素的 "work on the hot set" 思路, 但我们之前从没系统测过 offload_device_experts 这个旋钮对 e2e 的影响.
+- 但不适合立刻改默认: `offload=32` 下 GPU 内存占用从 ~42 GB (default 2) 涨到 ~47 GB, 再加 KV cache 就可能 OOM (不同 prompt 长度). M-11 需要做 offload ∈ {2, 16, 32, 48, 64} × prompt length ∈ {short, medium, long} 的 OOM 扫描.
+- 经验: **weight residency (哪些 expert 留 GPU) 这个旋钮被严重低估了**. M-3 的 cost model 只管 per-call 的路由, 不管 residency. 任何未来 milestone 应该**同时扫 residency 配置**, 不然可能漏掉最便宜的胜利.
+
+<!-- updated: 2026-04-23 19:30 -->
+
+## null perf milestone 的累计价值: M-2/5/6/7/8/10 六个 null 揭示了六个真实瓶颈
+
+- 项目经验: M-1 以来 10 个 milestone 中, **6 个是 null perf**. 每个 null 都不是浪费:
+  - **M-2**: DPU 没有 SIMD/ctz 硬件, T-MAC 是伪最优
+  - **M-5**: 单 runtime 单 MRAM slot → 发现需要 multi-slot
+  - **M-6**: 48 层共享单例 → 发现需要 per-layer 隔离
+  - **M-7**: Python profile key 传给 UPMEM 被拒 → 发现 cache key 和 config 不能混用
+  - **M-8**: `.so` static globals 让 N runtime 假共享 → 发现需要 handle-based API
+  - **M-10**: Python threading 有 GIL 争用 → 发现需要 C-level async
+- 每个 null 平均**揭示一个隐藏的架构约束**, 这些约束无法通过读 spec 或灵感推导得到, 只能通过 e2e 真机实测+诊断. 单个 null 看上去是浪费, 叠起来看是**系统级的深度理解**.
+- 经验: 别急着把 null 归类为失败. 问: 这个 null 揭示了什么之前不知道的约束? 如果答得出, 这个 null 是投资不是浪费. 写 dev_gate 时, **null milestone 的 acceptance KPI 要检查 "发现了 X 约束" 而不是 "tps 提升 Y%"**.

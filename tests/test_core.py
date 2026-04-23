@@ -8251,3 +8251,150 @@ class TestBenchmarkInferenceCliM9:
         assert "--pim-layer-group-size" in src
         assert "--pim-enable-speculative-preload-gptq" in src
         assert "--no-pim-speculative-preload-gptq" in src
+
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-10 — async PIM submit (Python threading pattern; default OFF)
+# ----------------------------------------------------------------------
+
+
+class TestPIMMoEBackendAsyncPimSubmit:
+    """M-10 ships `enable_async_pim_submit` infrastructure — a Python
+    threading.Thread-per-submit pattern that runs _submit_forward_real
+    while HybridMoE.forward proceeds with the GPU side.  Measured on
+    real hardware at offload-device-experts=2 and 32: the Python
+    overhead (spawn + join + GIL contention during ctypes calls) cost
+    more than it saved (ADR-002 §18), so the default is OFF.
+    The flag stays available behind `enable_async_pim_submit=True`
+    for A/B benchmarking and for use when GPU side becomes heavier
+    (e.g. bigger batch, larger GPU-resident expert count)."""
+
+    def _make_dummy(self, tmp_path, hidden_size=64, intermediate_size=32, num_experts=2):
+        from safetensors.torch import save_file
+        tensors = {}
+        for e in range(num_experts):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w1.weight"] = (
+                torch.randn(intermediate_size, hidden_size)
+            )
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w3.weight"] = (
+                torch.randn(intermediate_size, hidden_size)
+            )
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w2.weight"] = (
+                torch.randn(hidden_size, intermediate_size)
+            )
+        save_file(tensors, str(tmp_path / "model.safetensors"))
+        return hidden_size, intermediate_size, num_experts
+
+    def test_async_default_off_post_m10(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+        )
+        assert backend.enable_async_pim_submit is False
+        diag = backend.diagnostics()
+        assert diag["enable_async_pim_submit"] is False
+        # Telemetry fields must still be wired even when the flag is off.
+        for field in (
+            "async_submit_count",
+            "async_sync_wait_seconds_sum",
+            "async_sync_wait_seconds_count",
+            "async_sync_wait_seconds_mean",
+        ):
+            assert field in diag, f"missing async telemetry field {field!r}"
+        assert diag["async_submit_count"] == 0
+        assert diag["async_sync_wait_seconds_mean"] is None
+
+    def test_async_flag_can_be_enabled(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+            enable_async_pim_submit=True,
+        )
+        assert backend.enable_async_pim_submit is True
+
+    def test_async_counters_advance_on_submit(self, tmp_path):
+        """Drive submit_forward with a stub _submit_forward_real to
+        confirm the async path increments counters + completes via
+        sync_forward without blocking the test forever."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+            enable_async_pim_submit=True,
+        )
+
+        # Force the code path by pretending we're in decode + have cpu experts.
+        from nano_ktrans.utils.context import set_context, reset_context
+        set_context(is_prefill=False)
+        try:
+            # has_cpu_experts=True is needed for the async path.
+            backend.has_cpu_experts = True
+            backend.pim_execution_mode = "real"
+            # Patch _submit_forward_real so it pretends to do work.
+            import time as _time
+            def _fake(hs, ti, tw):
+                _time.sleep(0.01)  # simulate DPU work
+                backend._fallback_output = torch.zeros_like(hs)
+                return True
+            backend._submit_forward_real = _fake  # type: ignore
+
+            hs = torch.zeros(1, hidden_size)
+            ids = torch.zeros(1, 2, dtype=torch.long)
+            w = torch.zeros(1, 2)
+            backend.submit_forward(hs, ids, w, None)
+            # submit must have spawned a thread and returned quickly.
+            assert backend._async_thread is not None
+            # sync_forward joins.
+            _out = backend.sync_forward(hs, None)
+
+            diag = backend.diagnostics()
+            assert diag["async_submit_count"] == 1
+            assert diag["async_sync_wait_seconds_count"] == 1
+            assert diag["async_sync_wait_seconds_sum"] > 0
+        finally:
+            from nano_ktrans.utils.context import reset_context
+            reset_context()
+
+    def test_async_submit_propagates_exceptions(self, tmp_path):
+        """If _submit_forward_real raises in the worker thread, the
+        exception must surface at sync_forward time (not get swallowed)."""
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        hidden_size, intermediate_size, num_experts = self._make_dummy(tmp_path)
+        backend = PIMMoEBackend(
+            layer_idx=0, num_experts=num_experts, top_k=2,
+            hidden_size=hidden_size, intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path), pim_execution_mode="shadow",
+            enable_async_pim_submit=True,
+        )
+        from nano_ktrans.utils.context import set_context, reset_context
+        set_context(is_prefill=False)
+        try:
+            backend.has_cpu_experts = True
+            backend.pim_execution_mode = "real"
+            class _Boom(Exception):
+                pass
+            def _fake(hs, ti, tw):
+                raise _Boom("synthetic PIM crash")
+            backend._submit_forward_real = _fake  # type: ignore
+
+            hs = torch.zeros(1, hidden_size)
+            ids = torch.zeros(1, 2, dtype=torch.long)
+            w = torch.zeros(1, 2)
+            backend.submit_forward(hs, ids, w, None)
+            with pytest.raises(_Boom, match="synthetic PIM crash"):
+                backend.sync_forward(hs, None)
+        finally:
+            reset_context()

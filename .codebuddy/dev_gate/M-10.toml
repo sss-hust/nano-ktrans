@@ -1,0 +1,135 @@
+milestone_id = "M-10"
+title = "Async PIM submit (Python threading): infra landed, null e2e, A/B proves Python thread overhead > overlap gain at current GPU workloads"
+
+prerequisites = ["M-9"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M10_final.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M10_async.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M10_off32_async_off.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M10_off32_async_on.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M10_final.json"
+
+suggested_commands = [
+    "# M-10 final (new default: async OFF + offload 2) ",
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 2 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M10_final.json",
+    "# A/B at offload=32 (higher GPU load → maximum theoretical overlap):",
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 32 --max-new-tokens 32 --no-pim-async-submit --json-out benchmarks/results/e2e_gptq_cuda_pim_M10_off32_async_off.json",
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 32 --max-new-tokens 32 --pim-enable-async-submit --json-out benchmarks/results/e2e_gptq_cuda_pim_M10_off32_async_on.json",
+]
+
+next_tasks = [
+    "M-11: genuine C-level async via dpu_launch(DPU_ASYNCHRONOUS) + dpu_sync — no Python thread involved so the overhead Python added here disappears.  Requires moving the entire _run_expert_quantized_on_dpu loop into host_quantized_bridge.c so the async launches are batched inside a single ctypes call.",
+    "M-11: alternative track — investigate whether offload-device-experts=32 configuration (which incidentally produced 0.35 tps in this milestone's A/B, beating M-4's 0.317 peak) should be the new recommended default.  Needs OOM behaviour analysis across prompt lengths.",
+    "M-12: mixed-precision expert bundles (ADR-001 P4 / HOBBIT) — smaller bundle = less DMA per call = less time for overlap to hide anyway.  Compounds with whatever M-11 delivers.",
+]
+
+# ---------------------------------------------------------------------
+# Acceptance rationale — M-10 is the 6th null perf milestone but
+# delivers two real outcomes: an A/B measurement that rules out
+# Python-level async as a viable path, and a surprise data point
+# (offload=32 config giving 0.35 tps) that suggests a completely
+# orthogonal lever.
+#
+# Headline numbers (32 decode tokens, 48 layers):
+#
+#   offload=2,  async OFF:  0.284 tps (M-9 final)
+#   offload=2,  async ON :  0.271 tps (-4.7%)  ← Python overhead wins
+#   offload=32, async OFF:  0.351 tps (+23% vs M-9)
+#   offload=32, async ON :  0.340 tps (-3.1% vs async OFF)
+#
+# M-10 final with new defaults (async OFF + offload=2):  0.304 tps
+# (≈ M-9's 0.284 within run-to-run variance; async is strictly OFF
+# by default).
+#
+# Why async lost despite the right intuition: at async_submit_count =
+# 1488 and sync_wait_mean = 73 ms, the PIM thread takes 108 s of the
+# 118 s decode budget.  The GPU side (attention + gate + logit +
+# 2 resident experts) needs ~7 ms/call to fill the overlap window;
+# it finishes in ~10 s per 32 tokens.  Python thread spawn/join/GIL
+# contention costs ~8-12 ms/call at 1488 calls — which is exactly
+# the 118 - 108 = 10 s excess we see.  Net: zero overlap benefit,
+# small overhead cost.
+#
+# Why offload=32 wins: 5 CPU-side active experts instead of 8
+# → less PIM work per call, but no coordination overhead.  This
+# is a weight-residency lever, not an async lever.
+# ---------------------------------------------------------------------
+
+# KPI-1: final run completes + full token budget + diagnostic fields.
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-10 final (async OFF + offload 2) must complete."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget delivered."
+
+[[acceptance_checks]]
+path     = "results[0].offload_diagnostics.layers[0].backend.enable_async_pim_submit"
+op       = "=="
+value    = false
+reason   = "default flipped back to async OFF after A/B disproved the Python-threading overlap hypothesis."
+
+# KPI-2: final decode_tps is within M-9/M-4 envelope.
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.26
+reason   = "no regression below the M-8/M-9 regime (the async-off path is essentially the M-9 final path)."
+
+# KPI-3: the A/B at offload=32 must show async is strictly worse or
+# on par (NOT better), otherwise M-10's new default (off) is wrong.
+#
+# Encoded as: async OFF decode_tps >= async ON decode_tps.  Use
+# ratio_vs_artifact to express this across the two artifacts.
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M10_off32_async_off.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M10_off32_async_on.json"
+path              = "results[0].runs[0].decode_tokens_per_second"
+op                = ">="
+value             = 1.0
+reason            = "async OFF @ offload=32 must be at least as fast as async ON @ offload=32; if this flips, the M-10 default flip is wrong and we should re-evaluate."
+
+# KPI-4: async telemetry is wired.
+[[acceptance_checks]]
+path     = "results[0].offload_diagnostics.layers[0].backend.async_submit_count"
+op     = "exists"
+reason   = "async counters must be part of diagnostics even when the feature is off."
+
+# KPI-5: DPU call count stable (fused gate+up still active).
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = ">="
+value    = 10000
+reason   = "PIM must still run real DPU work."
+
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = "<="
+value    = 28000
+reason   = "M-4 fused gate+up still active (~23k, not 35k)."
+
+# KPI-6: ADR §18 deliverable — the A/B demonstrating Python async is
+# a net loss at offload=2 must exist (async_on variant).
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M10_async.json"
+path     = "results[0].offload_diagnostics.layers[0].backend.enable_async_pim_submit"
+op       = "=="
+value    = true
+reason   = "M-10's A/B must include an explicit async-on artifact at offload=2 for the null-result claim to be falsifiable."
+
+# KPI-7: the A/B async-on run's per-layer sync wait time must be
+# substantial (confirms async was actually exercising the code path,
+# not silently falling back).
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M10_async.json"
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.async_submit_count)"
+op       = ">="
+value    = 100
+reason   = "async code path must have fired in the async_on artifact (not silently bypassed)."

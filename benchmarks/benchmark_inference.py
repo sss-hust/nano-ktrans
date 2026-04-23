@@ -99,6 +99,7 @@ def benchmark_backend(
     pim_prefill_token_threshold: int,
     pim_layer_group_size: int,
     pim_enable_speculative_preload_gptq: bool,
+    pim_enable_async_submit: bool,
     enable_dynamic_expert_scheduler: bool,
     scheduler_prefill_force_gpu_budget_per_layer: int | None,
     scheduler_prefill_collect_only: bool | None,
@@ -144,6 +145,7 @@ def benchmark_backend(
             "pim_prefill_token_threshold": pim_prefill_token_threshold,
             "pim_layer_group_size": pim_layer_group_size,
             "enable_speculative_preload_gptq": pim_enable_speculative_preload_gptq,
+            "enable_async_pim_submit": pim_enable_async_submit,
         }
     elif backend == "cuda_pim_shadow":
         if not torch.cuda.is_available():
@@ -160,6 +162,7 @@ def benchmark_backend(
             "pim_prefill_token_threshold": pim_prefill_token_threshold,
             "pim_layer_group_size": pim_layer_group_size,
             "enable_speculative_preload_gptq": pim_enable_speculative_preload_gptq,
+            "enable_async_pim_submit": pim_enable_async_submit,
         }
     else:
         raise ValueError(f"Unsupported backend: {backend}")
@@ -348,6 +351,29 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable the M-7 speculative preload (useful for A/B benchmarking).",
     )
+    # ADR-002 M-10: async PIM submit flag.
+    parser.add_argument(
+        "--pim-enable-async-submit",
+        dest="pim_enable_async_submit",
+        action="store_true",
+        default=False,
+        help=(
+            "ADR-002 M-10: run each layer's PIM forward in a Python "
+            "background thread so GPU attention / gate / logit head "
+            "can overlap.  Default OFF post-M-10: both the "
+            "offload-device-experts=2 and =32 A/B runs showed Python "
+            "thread overhead + GIL contention outweighed the overlap "
+            "gain (see ADR-002 §18).  Kept available behind this flag "
+            "for A/B benchmarking; the real win is C-level DPU_ASYNC, "
+            "deferred to a future milestone."
+        ),
+    )
+    parser.add_argument(
+        "--no-pim-async-submit",
+        dest="pim_enable_async_submit",
+        action="store_false",
+        help="Force async PIM submit OFF (default is already OFF)."
+    )
     parser.add_argument(
         "--enable-dynamic-expert-scheduler",
         action="store_true",
@@ -441,6 +467,7 @@ def main() -> None:
                 pim_prefill_token_threshold=args.pim_prefill_token_threshold,
                 pim_layer_group_size=args.pim_layer_group_size,
                 pim_enable_speculative_preload_gptq=args.pim_enable_speculative_preload_gptq,
+                pim_enable_async_submit=args.pim_enable_async_submit,
                 enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
                 scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
                 scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,

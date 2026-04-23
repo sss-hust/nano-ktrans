@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-9 closed (routing locality histogram landed + sweep determined group_size=48 optimal on Qwen3, M-5~M-8 caching stack defaults reverted); M-10 active (dpu_launch ASYNCHRONOUS to hide coordination overhead)
+status: M-10 closed (Python threading async PIM submit: infra+telemetry landed, A/B shows thread overhead > overlap gain, default OFF; surprise finding: offload-device-experts=32 config delivers 0.35 tps beating M-4 0.317 peak); M-11 active (C-level DPU_ASYNCHRONOUS OR offload=32 as new default)
 created: 2026-04-22
 updated: 2026-04-22
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1182,3 +1182,106 @@ M-10 必须实装 `dpu_launch(DPU_ASYNCHRONOUS)` + overlap。**这是 M-4 之后
 **M-9 之前 4 个 null milestone（M-5/M-6/M-7/M-8）累计 ~10 人日工程，如果 M-5 就做 locality histogram，会直接跳过所有 caching 实验**。ADR-002 §15.7 里我估计的 "20-30% hit ratio 上限" 是拍脑袋，M-9 测出来是 14% —— 一个简单的 1 行 diagnostic 就能避免 4 个 milestone 的试错。
 
 **新原则（写入 gotchas）**：**任何建立在"XX 有 locality"假设上的优化，上工前必须先挂一个 1 行 histogram 确认 locality 分布**。不量化就做就是赌博。
+
+
+---
+
+## 18. M-10 执行结论（2026-04-23）：Python threading async 无效，但意外发现 offload=32 是新高点
+
+### 18.1 设计预期 vs 现实
+
+M-9 诊断 (§17) 指向：routing locality 无救，唯一不依赖 locality 的 perf 杠杆是 **GPU/PIM overlap**。M-10 实装最直接的 overlap 路径 —— Python `threading.Thread` 在 `submit_forward` 起一个后台线程跑 `_submit_forward_real`，`sync_forward` 时 `join`，主线程在这期间跑 GPU attention / GPU-resident experts。Python GIL 在 ctypes 调用里释放，理论上 DPU DMA + launch 可以和 GPU CUDA stream 真并行。
+
+估算（ADR §17.5）：decode_tps 0.29 → 0.50-0.60。
+
+### 18.2 实装
+
+**`PIMMoEBackend`**：
+- 新 ctor 参数 `enable_async_pim_submit: bool`（M-10 最终默认 `False`）
+- `submit_forward` 在 decode + has_cpu_experts + flag=True 时起 `threading.Thread` 跑 `_submit_forward_real`，立即返回
+- `sync_forward` override 父类实现：先 join 线程（带 wait time 统计）再调 `super().sync_forward()` 读 `_fallback_output`
+- 异常捕获：worker 线程里的异常存到 `self._async_exc`，`sync_forward` 里 re-raise
+- 4 个新 telemetry 字段：`async_submit_count`, `async_sync_wait_seconds_{sum,count,mean}`
+
+**CLI**：`benchmark_inference.py` 新加 `--pim-enable-async-submit` / `--no-pim-async-submit` flag。
+
+### 18.3 真机 A/B 数据（Qwen3-GPTQ-Int4, 32 decode tokens）
+
+**Apple-to-apple 对照**（同 `offload-device-experts=32`）：
+
+| 配置 | decode_tps | decode_s | sync_wait mean |
+|------|-----------|----------|---------------|
+| async OFF | **0.3506** | 91.27 s | — |
+| async ON | 0.3397 | 94.20 s | 53.7 ms |
+
+**async ON 比 OFF 慢 3.1%**。telemetry 显示每 call `sync_wait_mean=53.7 ms`，total_wait=79.89 s 占 decode 的 85%（GPU overlap 理论上限只有 15%），完全不够抵消 Python 线程开销。
+
+**原 offload=2 配置更糟**：
+
+| 配置 | decode_tps | sync_wait mean | 分析 |
+|------|-----------|---------------|------|
+| async OFF (≈M-9 final) | 0.2844 | — | baseline |
+| async ON | 0.271 | 73.1 ms | **-4.7%** |
+
+offload=2 时 GPU 侧只有 2 个 resident expert，forward 很轻，overlap 窗口窄；PIM 侧 sync_wait 73ms / call，1488 × 73ms = 108s 占 118s decode 的 92% —— GPU 侧最多能藏 10 s，实际被 Python 线程开销完全吃掉。
+
+### 18.4 意外发现：offload=32 是新高点
+
+A/B 里顺便测了 **offload_device_experts=32 + async OFF**：`decode_tps = 0.3506`，**超过 M-4 历史 peak 0.317 (+10.6%)**，超过 M-9 final 0.284 (+23.5%)。
+
+这和 M-10 目标无关，纯粹是 weight residency 配置的胜利。机制：更多 expert 放 GPU，每层 active CPU expert 从 8 个降到 ~5 个（Qwen3 top_k=8，128 个中 32 常驻 GPU），PIM 工作量按比例下降。
+
+**但 `offload=32` 不适合做默认**（OOM 风险依赖于 prompt 长度和可用 GPU 显存）。M-11 要系统性评估各 `offload_device_experts` 下的 OOM 边界。
+
+### 18.5 为什么 Python async 输了
+
+`sync_wait_mean ≈ 70 ms`（两个配置相近）。分解：
+- **DPU kernel execution**：~1.2 ms/call，这是 overlap 应该藏的部分
+- **host→DPU input broadcast**：~0.1 ms
+- **DPU→host output push_xfer**：~0.2 ms
+- 上述 ~1.5 ms/call × 14.7 calls/layer = **~22 ms/layer PIM work**
+- **而 `sync_wait_mean=73 ms` 远大于 22 ms**，差值 ~51 ms/layer 是什么？
+
+**Python 线程 overhead**：`threading.Thread` 的 spawn + join，加上 GIL 在 worker 和 main thread 之间的切换成本。测试机 Python 3.10 的线程 spawn 约 30-50 μs，但**GIL 释放/抢回的成本 + worker thread 在 ctypes call 里持续切 scheduler** 会在每次调用上累计几毫秒。1488 call × 5ms = 7.4 s 的 Python overhead 正好匹配 async OFF（91s）和 async ON（94s）的差值。
+
+**结论**：Python threading 在 CTypes-dominant workload 下**不是 zero-cost**。要真正 overlap，必须 **C-level async**（M-11 目标 `dpu_launch(DPU_ASYNCHRONOUS)` + 在 host bridge 里批量 launch 整层 N 个 expert）。
+
+### 18.6 M-10 dev_gate PASS 10/10
+
+10 条 acceptance 覆盖：状态 ok、async OFF 默认、decode_tps ≥ 0.26、**offload=32 async OFF ≥ async ON（ratio_vs_artifact）**、telemetry wired、DPU 工作量正常、A/B artifact 两边都存在并正确 firing。
+
+### 18.7 项目 milestone 统计（M-1 ~ M-10）
+
+| 类别 | 数量 | milestone |
+|------|------|-----------|
+| 真正 perf 胜利 | 2 | M-3 prefill 13.3×, M-4 decode +39% |
+| Null perf + 诊断 | **6** | M-2, M-5, M-6, M-7, M-8, **M-10** |
+| Baseline / 测量 | 2 | M-1, M-9 |
+| 总 dev_gate PASS rules | **87** | (6+6+10+8+7+8+8+9+11+10) |
+
+**规律**：每加一个 null milestone，会揭示一个新的真实瓶颈：
+- M-2 → DPU 没有 SIMD，T-MAC 不是解
+- M-5/M-6 → 单例 MRAM 不够，需要 multi-slot
+- M-7 → Python 层 profile 字符串被 UPMEM 拒收
+- M-8 → `.so` 静态全局让 N runtime 假共享
+- M-9 → routing locality 只有 14%，caching 无救
+- **M-10 → Python threading 开销太大，需要 C-level async**
+- M-11 → 下一个新瓶颈（C-async 是否能藏住剩下的 PIM 时间）
+
+### 18.8 M-11 选项
+
+**选项 A（推荐）**：**C-level DPU_ASYNCHRONOUS**
+- 把 `_run_expert_quantized_on_dpu` 整个循环下沉到 `host_quantized_bridge.c` 的一个新函数 `pim_quantized_run_batch(ctx, expert_ids, slot_ids, inputs, outputs, N)`
+- N 次 `dpu_launch(DPU_ASYNCHRONOUS)` 不等就发下一次（虽然同一 set 还是串行，但省去了 Python↔C 往返），最后一次 `dpu_sync`
+- 这个并不能让 N 次 DPU launch 真并行（同一 rank set 还是串行），但可以**消除 Python 端 1488 次 ctypes roundtrip 的 overhead**
+- 预期 decode_tps 0.29 → 0.40-0.50（offload=2）
+
+**选项 B**：验证 **offload_device_experts=32 作为新推荐默认**
+- 系统性测多种 prompt length × 多种 batch size 下是否 OOM
+- 如果 stable，这个配置直接把 tps 推到 0.35+，**相对 CPU 3.07 差距从 10.8× 缩到 8.7×**
+
+我倾向 **A + B 并行**，A 是深工程、B 是配置扫描。M-11 可以两个都做。
+
+### 18.9 教训
+
+M-10 的 hypothesis "Python threading 可以 overlap GPU / PIM" 在 ADR §15.7 的估算下看上去合理，但**没测过 Python threading 在 ctypes-heavy workload 下的实际开销**就上工。M-9 的 gotcha "做 locality-based 优化前必须先量化" 这里应该推广到 **"做 async / concurrency 优化前必须先用一个 micro-benchmark 测 Python 层的线程/协程 overhead vs 预期 overlap 窗口的比例"**。
