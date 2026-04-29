@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-14 closed (C-level run_many batching landed; e2e null/negative proves synchronous dpu_launch count, not ctypes crossing, is core bottleneck); M-15 active (true launch-count reduction / multi-slot single-launch kernel)
+status: M-15 closed (true single-launch request table landed; launch_seconds 11.2s→9.57s, decode TPS 0.595→0.640); M-16 active (reduce load/preload cost and combine with offload=92 envelope)
 created: 2026-04-22
 updated: 2026-04-29
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1550,3 +1550,68 @@ M-15 必须做 **true launch-count reduction**，而不是 ctypes batching：
 - 这样才能把 `launch_seconds_sum ≈ 11s` 降下来。
 
 备选低风险方向：继续扩大 `offload=92` 的 OOM envelope；但要超过 CPU，最终仍绕不开 launch-count reduction。
+
+---
+
+## 23. M-15 执行结论（2026-04-29）：request-table 单 launch 首次直接降低 launch time
+
+### 23.1 实装
+
+M-15 修正了 M-14 的关键缺陷：`run_many()` 不再只是在 C 里循环多次 `pim_quantized_run()`，而是为 `kernel_mode=4` 的 decode hot path 实现真正的 request-table 单 launch：
+
+- `dpu_quantized_kernel.c`
+  - 新增 `MAX_RUN_REQUESTS`。
+  - 新增 `__host run_request_count` 和 `request_active_slots[]`。
+  - 在 `kernel_mode=4` 非 tile 路径下，当 `run_request_count > 0` 时，按 `batch_idx` 读取对应 `request_active_slots[batch_idx]`，从不同 MRAM slot 读取 qweight/LUT。
+  - 复用现有 mode=4 计算循环，避免 M-15 初版重复整段 kernel 造成 IRAM overflow。
+
+- `host_quantized_bridge.c`
+  - `pim_quantized_run_many()` 在 `kernel_mode=4 && 每个 request batch_size=1` 时走 true batching：
+    1. 把所有 request input 量化后连续写入 `inputs_i8_mram`。
+    2. 广播 `run_request_count` 和 `request_active_slots[]`。
+    3. 一次 `dpu_launch()`。
+    4. 一次 readback packed `outputs_i32_mram`。
+    5. host 侧按 request/batch/row deinterleave 到各 output tensor。
+  - 非 hot path（非 mode4 或 batch_size != 1）保留 M-14 循环 fallback。
+
+### 23.2 真机数据
+
+| artifact | 策略 | status | decode_tps | decode_seconds | batched groups | batched experts | launch_seconds_sum | runtime_total_seconds_sum | input_sum | output_sum |
+|----------|------|--------|------------|----------------|----------------|-----------------|--------------------|---------------------------|-----------|------------|
+| `e2e_gptq_cuda_pim_M14_run_many.json` | C loop，多 launch | ok | 0.5947 | 53.81s | 1414 | 3667 | 11.205s | 13.623s | 0.571s | 1.551s |
+| `e2e_gptq_cuda_pim_M15_single_launch_request_table.json` | request table，单 launch | ok | **0.6402** | **49.98s** | 1423 | 3623 | **9.574s** | **10.982s** | 0.723s | 0.685s |
+
+### 23.3 结论
+
+M-15 是 M-11 之后第一个明确正收益的深工程 milestone：
+
+- decode_tps 从 M-14 的 0.5947 提到 0.6402，**+7.7%**。
+- 相对 M-13 baseline 0.6071，**+5.45%**。
+- 相对 M-11 default 0.6226，**+2.8%**。
+- `launch_seconds_sum` 从 11.205s 降到 9.574s，**-14.6%**。
+- `runtime_total_seconds_sum` 从 13.623s 降到 10.982s，**-19.4%**。
+
+这证明前面 M-13/M-14 的判断正确：核心不是 ctypes crossing，而是真正的 DPU launch count 和同步边界。
+
+### 23.4 遗留瓶颈
+
+M-15 仍没有接近 CPU 的 3.07 tps。原因：
+
+1. `load_count` 仍是 7246，`load/preload` 仍然高频；request-table 只减少 run launch，不减少 weight load 次数。
+2. Python 仍负责 routing/gather/hidden/down split/index_add，尤其 gate+up 和 down 之间还要回到 host 做 `silu(gate)*up`。
+3. 只支持 `kernel_mode=4 && batch_size=1` 的 hot path；这是 decode 主路径，但不是通用方案。
+
+### 23.5 M-15 验收
+
+- `M-15 dev_gate PASS 9/9`
+- 真机 run_many regression 通过。
+- 全量测试将在提交前跑通。
+
+### 23.6 M-16 方向
+
+两个更可能继续提升的方向：
+
+1. **减少 load/preload 次数或成本**：M-15 只减少 run launch；下一个大头是 `load_total_seconds` 和每 expert bundle 的 weight DMA/slot miss。
+2. **组合 offload=92 envelope**：M-15 + offload=92 可能稳定超过 0.7 tps；需要 long/medium/short × 32/128 tokens OOM envelope。
+
+若继续深工程：下一步可以考虑 gate+up/down 更深融合，让 DPU/host bridge 在一个 request group 内直接处理 gate+up 输出、host activation、down 输入，进一步减少 host/Python 往返。

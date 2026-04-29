@@ -61,6 +61,10 @@
 #define FIXED_BATCH_TILE 4
 #endif
 
+#ifndef MAX_RUN_REQUESTS
+#define MAX_RUN_REQUESTS 64
+#endif
+
 /* ADR-002 M-6.1: Multi-slot MRAM residency.
  *
  * Rather than a single qweight/scales/lut buffer per DPU, we carve the
@@ -106,6 +110,11 @@ __host uint32_t group_size;
 __host uint32_t num_groups;
 __host uint32_t kernel_mode;
 __host uint32_t active_slot;   /* ADR-002 M-6.1: which slot to compute from */
+__host uint32_t run_request_count;  /* ADR-002 M-15: >0 means request-table mode */
+__host uint32_t request_active_slots[MAX_RUN_REQUESTS];
+__host uint32_t request_batch_sizes[MAX_RUN_REQUESTS];
+__host uint32_t request_input_offsets[MAX_RUN_REQUESTS];
+__host uint32_t request_output_offsets[MAX_RUN_REQUESTS];
 __host uint64_t kernel_cycles;
 
 __mram_noinit uint32_t qweight_mram[MAX_QWEIGHT_WORDS];
@@ -526,7 +535,7 @@ main(void)
             }
 
             if (kernel_mode == 4) {
-                const bool use_batch_tile = (FIXED_BATCH_TILE > 1) && (batch_size > 1) && (input_dim >= 1024);
+                const bool use_batch_tile = (run_request_count == 0) && (FIXED_BATCH_TILE > 1) && (batch_size > 1) && (input_dim >= 1024);
                 if (use_batch_tile) {
                     const uint32_t tile_count =
                         ((batch_size - batch_idx) < FIXED_BATCH_TILE) ? (batch_size - batch_idx) : FIXED_BATCH_TILE;
@@ -596,6 +605,9 @@ main(void)
                 } else {
                     int32_t acc0 = 0;
                     int32_t acc1 = 0;
+                    const uint32_t mode4_slot = (run_request_count > 0) ? request_active_slots[batch_idx] : active_slot;
+                    const uint32_t mode4_qw_slot_base = mode4_slot * WORDS_PER_SLOT;
+                    const uint32_t mode4_lut_slot_base = mode4_slot * LUT_INT16_PER_SLOT;
 
                     for (uint32_t col = 0; col < input_dim; col += BLOCK_FLOATS) {
                         const uint32_t word_offset = col / WEIGHTS_PER_WORD;
@@ -611,19 +623,19 @@ main(void)
                             input_i8_cache,
                             BLOCK_FLOATS * sizeof(int8_t));
                         mram_read(
-                            (__mram_ptr void const *)(lut_mram + (lut_slot_base + lut_row_offset0)),
+                            (__mram_ptr void const *)(lut_mram + (mode4_lut_slot_base + lut_row_offset0)),
                             lut0_i16,
                             sizeof(lut0_i16));
                         mram_read(
-                            (__mram_ptr void const *)(lut_mram + (lut_slot_base + lut_row_offset1)),
+                            (__mram_ptr void const *)(lut_mram + (mode4_lut_slot_base + lut_row_offset1)),
                             lut1_i16,
                             sizeof(lut1_i16));
                         mram_read(
-                            (__mram_ptr void const *)(qweight_mram + (qw_slot_base + (row * words_per_row) + word_offset)),
+                            (__mram_ptr void const *)(qweight_mram + (mode4_qw_slot_base + (row * words_per_row) + word_offset)),
                             qweight0_cache,
                             words_this_block * sizeof(uint32_t));
                         mram_read(
-                            (__mram_ptr void const *)(qweight_mram + (qw_slot_base + ((row + 1) * words_per_row) + word_offset)),
+                            (__mram_ptr void const *)(qweight_mram + (mode4_qw_slot_base + ((row + 1) * words_per_row) + word_offset)),
                             qweight1_cache,
                             words_this_block * sizeof(uint32_t));
 

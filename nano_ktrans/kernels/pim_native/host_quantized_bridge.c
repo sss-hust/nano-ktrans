@@ -54,6 +54,10 @@
 #define WEIGHTS_PER_WORD (32 / BITS_PER_WEIGHT)
 #endif
 
+#ifndef MAX_RUN_REQUESTS
+#define MAX_RUN_REQUESTS 64
+#endif
+
 /* kernel_mode=7 bit-plane packing: 8 planes per BLOCK_FLOATS-wide block.
  * Host allocates (batch_size * blocks_per_batch * 8) uint64_t entries. */
 #ifndef MAX_INPUT_BITPLANES_U64
@@ -609,6 +613,12 @@ pim_quantized_run(
             error_buffer, error_buffer_len, "dpu_broadcast_to(batch_size)") != 0) {
         goto cleanup;
     }
+    const uint32_t request_count_zero = 0;
+    if (check_dpu_error(
+            dpu_broadcast_to(ctx->set, "run_request_count", 0, &request_count_zero, sizeof(request_count_zero), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(run_request_count=0)") != 0) {
+        goto cleanup;
+    }
 
     /* M-6.1: tell the kernel which slot to compute from this call. */
     if (check_dpu_error(
@@ -882,6 +892,22 @@ pim_quantized_run_many(
     size_t error_buffer_len)
 {
     pim_q_ctx_t *ctx = (pim_q_ctx_t *)handle;
+    struct dpu_set_t dpu;
+    uint32_t dpu_index = 0;
+    int rc = -1;
+    uint64_t max_cycles = 0;
+    struct timespec total_start;
+    struct timespec total_end;
+    struct timespec input_start;
+    struct timespec input_end;
+    struct timespec launch_start;
+    struct timespec launch_end;
+    struct timespec output_start;
+    struct timespec output_end;
+    uint32_t request_input_offsets[MAX_RUN_REQUESTS] = {0};
+    uint32_t request_output_offsets[MAX_RUN_REQUESTS] = {0};
+    uint32_t request_scale_offsets[MAX_RUN_REQUESTS] = {0};
+
     if (ctx == NULL) {
         set_error(error_buffer, error_buffer_len, "handle is NULL");
         return -1;
@@ -893,40 +919,230 @@ pim_quantized_run_many(
         set_error(error_buffer, error_buffer_len, "run_many arrays must be non-null");
         return -1;
     }
-
-    double input_sum = 0.0;
-    double launch_sum = 0.0;
-    double output_sum = 0.0;
-    double total_sum = 0.0;
-    uint64_t max_cycles = 0;
-
+    if (call_count > MAX_RUN_REQUESTS) {
+        set_error(error_buffer, error_buffer_len, "call_count too large: %u > %u", call_count, MAX_RUN_REQUESTS);
+        return -1;
+    }
+    bool all_batch_one = true;
     for (uint32_t i = 0; i < call_count; ++i) {
-        const int rc = pim_quantized_run(
-            handle,
-            batch_sizes[i],
-            inputs[i],
-            outputs[i],
-            slot_ids[i],
-            error_buffer,
-            error_buffer_len);
-        if (rc != 0) {
-            return rc;
+        if (batch_sizes[i] != 1) {
+            all_batch_one = false;
+            break;
         }
-        input_sum += ctx->last_input_transfer_seconds;
-        launch_sum += ctx->last_launch_seconds;
-        output_sum += ctx->last_output_transfer_seconds;
-        total_sum += ctx->last_total_seconds;
-        if (ctx->last_cycles > max_cycles) {
-            max_cycles = ctx->last_cycles;
+    }
+    if (ctx->kernel_mode != 4 || !all_batch_one) {
+        /* M-15 true batching is implemented for the GPTQ decode hot path only. */
+        double input_sum = 0.0;
+        double launch_sum = 0.0;
+        double output_sum = 0.0;
+        double total_sum = 0.0;
+        for (uint32_t i = 0; i < call_count; ++i) {
+            const int single_rc = pim_quantized_run(
+                handle,
+                batch_sizes[i],
+                inputs[i],
+                outputs[i],
+                slot_ids[i],
+                error_buffer,
+                error_buffer_len);
+            if (single_rc != 0) {
+                return single_rc;
+            }
+            input_sum += ctx->last_input_transfer_seconds;
+            launch_sum += ctx->last_launch_seconds;
+            output_sum += ctx->last_output_transfer_seconds;
+            total_sum += ctx->last_total_seconds;
+            if (ctx->last_cycles > max_cycles) {
+                max_cycles = ctx->last_cycles;
+            }
+        }
+        ctx->last_input_transfer_seconds = input_sum;
+        ctx->last_launch_seconds = launch_sum;
+        ctx->last_output_transfer_seconds = output_sum;
+        ctx->last_total_seconds = total_sum;
+        ctx->last_cycles = max_cycles;
+        return 0;
+    }
+
+    size_t total_input_i8 = 0;
+    size_t total_output_i32 = 0;
+    size_t total_batches = 0;
+    for (uint32_t i = 0; i < call_count; ++i) {
+        if (inputs[i] == NULL || outputs[i] == NULL) {
+            set_error(error_buffer, error_buffer_len, "run_many input/output pointers must be non-null");
+            return -1;
+        }
+        if (slot_ids[i] >= NUM_SLOTS || (ctx->slot_loaded_mask & (1u << slot_ids[i])) == 0) {
+            set_error(error_buffer, error_buffer_len, "slot %u has no weights loaded", slot_ids[i]);
+            return -1;
+        }
+        request_input_offsets[i] = (uint32_t)total_input_i8;
+        request_output_offsets[i] = (uint32_t)total_output_i32;
+        request_scale_offsets[i] = (uint32_t)total_batches;
+        total_input_i8 += (size_t)batch_sizes[i] * (size_t)ctx->input_dim;
+        total_output_i32 += (size_t)batch_sizes[i] * ctx->shard_output_dim;
+        total_batches += (size_t)batch_sizes[i];
+    }
+    if (total_input_i8 > MAX_INPUT_INT8 || total_output_i32 > MAX_OUTPUT_INT32) {
+        set_error(error_buffer, error_buffer_len, "packed run_many input/output too large");
+        return -1;
+    }
+
+    if (
+        ensure_buffer((void **)&ctx->input_i8_shards, &ctx->input_i8_shards_capacity,
+                      total_input_i8, sizeof(*ctx->input_i8_shards), error_buffer, error_buffer_len, "input_i8_shards") != 0
+        || ensure_buffer((void **)&ctx->output_i32_shards, &ctx->output_i32_shards_capacity,
+                         (size_t)ctx->nr_dpus * total_output_i32, sizeof(*ctx->output_i32_shards), error_buffer, error_buffer_len, "output_i32_shards") != 0
+        || ensure_buffer((void **)&ctx->input_scales, &ctx->input_scales_capacity,
+                         total_batches, sizeof(*ctx->input_scales), error_buffer, error_buffer_len, "input_scales") != 0
+        || ensure_buffer((void **)&ctx->kernel_cycles, &ctx->kernel_cycles_capacity,
+                         ctx->nr_dpus, sizeof(*ctx->kernel_cycles), error_buffer, error_buffer_len, "kernel_cycles") != 0
+    ) {
+        return -1;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &total_start);
+    clock_gettime(CLOCK_MONOTONIC, &input_start);
+    for (uint32_t req = 0; req < call_count; ++req) {
+        const float *inputs_f32 = (const float *)inputs[req];
+        const size_t req_input_base = (size_t)request_input_offsets[req];
+        const size_t req_scale_base = (size_t)request_scale_offsets[req];
+        for (uint32_t batch_idx = 0; batch_idx < batch_sizes[req]; ++batch_idx) {
+            const size_t batch_offset = (size_t)batch_idx * (size_t)ctx->input_dim;
+            float max_abs = 0.0f;
+            for (uint32_t col = 0; col < ctx->input_dim; ++col) {
+                const float value = inputs_f32[batch_offset + col];
+                const float abs_value = value >= 0.0f ? value : -value;
+                if (abs_value > max_abs) {
+                    max_abs = abs_value;
+                }
+            }
+            const float input_scale = max_abs > 0.0f ? (max_abs / 127.0f) : 1.0f;
+            ctx->input_scales[req_scale_base + batch_idx] = input_scale;
+            for (uint32_t col = 0; col < ctx->input_dim; ++col) {
+                float scaled = inputs_f32[batch_offset + col] / input_scale;
+                if (scaled > 127.0f) {
+                    scaled = 127.0f;
+                } else if (scaled < -127.0f) {
+                    scaled = -127.0f;
+                }
+                ctx->input_i8_shards[req_input_base + batch_offset + col] =
+                    (int8_t)(scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
+            }
         }
     }
 
-    ctx->last_input_transfer_seconds = input_sum;
-    ctx->last_launch_seconds = launch_sum;
-    ctx->last_output_transfer_seconds = output_sum;
-    ctx->last_total_seconds = total_sum;
+    if (check_dpu_error(
+            dpu_broadcast_to(ctx->set, "batch_size", 0, &call_count, sizeof(call_count), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(batch_size run_many)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(
+            dpu_broadcast_to(ctx->set, "run_request_count", 0, &call_count, sizeof(call_count), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(run_request_count)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(
+            dpu_broadcast_to(ctx->set, "request_active_slots", 0, slot_ids, call_count * sizeof(uint32_t), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(request_active_slots)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(
+            dpu_broadcast_to(ctx->set, "request_batch_sizes", 0, batch_sizes, call_count * sizeof(uint32_t), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(request_batch_sizes)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(
+            dpu_broadcast_to(ctx->set, "request_input_offsets", 0, request_input_offsets, call_count * sizeof(uint32_t), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(request_input_offsets)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(
+            dpu_broadcast_to(ctx->set, "request_output_offsets", 0, request_output_offsets, call_count * sizeof(uint32_t), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(request_output_offsets)") != 0) {
+        goto cleanup;
+    }
+    if (check_dpu_error(
+            dpu_broadcast_to(ctx->set, "inputs_i8_mram", 0, ctx->input_i8_shards, total_input_i8 * sizeof(int8_t), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_broadcast_to(inputs_i8_mram run_many)") != 0) {
+        goto cleanup;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &input_end);
+
+    clock_gettime(CLOCK_MONOTONIC, &launch_start);
+    if (check_dpu_error(dpu_launch(ctx->set, DPU_SYNCHRONOUS), error_buffer, error_buffer_len, "dpu_launch(run_many)") != 0) {
+        goto cleanup;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &launch_end);
+
+    dpu_index = 0;
+    clock_gettime(CLOCK_MONOTONIC, &output_start);
+    DPU_FOREACH(ctx->set, dpu, dpu_index)
+    {
+        if (check_dpu_error(
+                dpu_prepare_xfer(dpu, ctx->output_i32_shards + ((size_t)dpu_index * total_output_i32)),
+                error_buffer, error_buffer_len, "dpu_prepare_xfer(outputs_i32_mram run_many)") != 0) {
+            goto cleanup;
+        }
+    }
+    if (check_dpu_error(
+            dpu_push_xfer(ctx->set, DPU_XFER_FROM_DPU, "outputs_i32_mram", 0,
+                          total_output_i32 * sizeof(int32_t), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_push_xfer(outputs_i32_mram run_many)") != 0) {
+        goto cleanup;
+    }
+
+    dpu_index = 0;
+    DPU_FOREACH(ctx->set, dpu, dpu_index)
+    {
+        if (check_dpu_error(
+                dpu_prepare_xfer(dpu, ctx->kernel_cycles + dpu_index),
+                error_buffer, error_buffer_len, "dpu_prepare_xfer(kernel_cycles run_many)") != 0) {
+            goto cleanup;
+        }
+    }
+    if (check_dpu_error(
+            dpu_push_xfer(ctx->set, DPU_XFER_FROM_DPU, "kernel_cycles", 0, sizeof(*ctx->kernel_cycles), DPU_XFER_DEFAULT),
+            error_buffer, error_buffer_len, "dpu_push_xfer(kernel_cycles run_many)") != 0) {
+        goto cleanup;
+    }
+
+    for (dpu_index = 0; dpu_index < ctx->nr_dpus; ++dpu_index) {
+        const uint32_t local_rows = ctx->valid_rows[dpu_index];
+        const size_t row_start = (size_t)dpu_index * ctx->rows_per_dpu;
+        if (ctx->kernel_cycles[dpu_index] > max_cycles) {
+            max_cycles = ctx->kernel_cycles[dpu_index];
+        }
+        for (uint32_t req = 0; req < call_count; ++req) {
+            float *output_dst = (float *)outputs[req];
+            const size_t req_output_base = (size_t)request_output_offsets[req];
+            const size_t req_scale_base = (size_t)request_scale_offsets[req];
+            for (uint32_t batch_idx = 0; batch_idx < batch_sizes[req]; ++batch_idx) {
+                const int32_t *shard_ptr_i32 =
+                    ctx->output_i32_shards
+                    + ((size_t)dpu_index * total_output_i32)
+                    + req_output_base
+                    + ((size_t)batch_idx * ctx->shard_output_dim);
+                const float scale = ctx->input_scales[req_scale_base + batch_idx] / 256.0f;
+                for (uint32_t local_row = 0; local_row < local_rows; ++local_row) {
+                    output_dst[((size_t)batch_idx * (size_t)ctx->output_dim) + row_start + local_row] =
+                        ((float)shard_ptr_i32[local_row]) * scale;
+                }
+            }
+        }
+    }
+    clock_gettime(CLOCK_MONOTONIC, &output_end);
+
     ctx->last_cycles = max_cycles;
-    return 0;
+    clock_gettime(CLOCK_MONOTONIC, &total_end);
+    ctx->last_input_transfer_seconds = timespec_diff_seconds(&input_start, &input_end);
+    ctx->last_launch_seconds = timespec_diff_seconds(&launch_start, &launch_end);
+    ctx->last_output_transfer_seconds = timespec_diff_seconds(&output_start, &output_end);
+    ctx->last_total_seconds = timespec_diff_seconds(&total_start, &total_end);
+    rc = 0;
+
+cleanup:
+    return rc;
 }
 
 void
