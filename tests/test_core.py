@@ -8575,3 +8575,45 @@ class TestPIMQuantizedProfileDiagnosticsM13:
         assert summary["quantized_profile_runtime_total_seconds_sum"] == pytest.approx(3.0)
         assert summary["quantized_profile_load_total_seconds_mean"] == pytest.approx(0.25)
         assert summary["quantized_profile_runtime_total_seconds_mean"] == pytest.approx(0.5)
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-14 — C-level run_many for batched quantized PIM execution
+# ----------------------------------------------------------------------
+
+
+class TestPIMQuantizedBatchedRunM14:
+    """M-14 batches preloaded quantized runs into fewer ctypes crossings."""
+
+    def test_runtime_registers_run_many_api_and_helpers(self):
+        from pathlib import Path
+
+        runtime_src = Path("/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_quantized_runtime.py").read_text()
+        bridge_src = Path("/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_native/host_quantized_bridge.c").read_text()
+        backend_src = Path("/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_moe.py").read_text()
+
+        assert "pim_quantized_run_many" in bridge_src
+        assert "self._lib.pim_quantized_run_many.argtypes" in runtime_src
+        assert "def infer_many_raw" in runtime_src
+        assert "def preload_concat_and_get_slot" in runtime_src
+        assert "def _run_quantized_experts_batched_on_dpu" in backend_src
+        assert "quantized_batched_expert_groups_local" in backend_src
+
+    def test_scheduler_summary_aggregates_batched_counts(self):
+        from nano_ktrans.scheduler import summarize_offload_diagnostics
+
+        summary = summarize_offload_diagnostics({
+            "dynamic_scheduler": {"enabled": False},
+            "layer_count": 1,
+            "offload_refresh": {},
+            "layers": [
+                {
+                    "backend": {
+                        "quantized_batched_expert_groups_local": 3,
+                        "quantized_batched_experts_local": 12,
+                    }
+                }
+            ],
+        })
+        assert summary["quantized_batched_expert_groups"] == 3
+        assert summary["quantized_batched_experts"] == 12

@@ -1,0 +1,88 @@
+milestone_id = "M-14"
+title = "C-level run_many for quantized PIM: batched ctypes crossings landed, e2e null/negative confirms dpu_launch/load dominates"
+
+prerequisites = ["M-13"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M13_profile_diagnostics.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M14_run_many.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M14_run_many_min2.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M14_run_many.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 88 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M14_run_many.json",
+]
+
+next_tasks = [
+    "M-15: true launch-count reduction: one DPU launch should process multiple active slots/experts, not merely loop multiple dpu_launch calls inside C.",
+    "M-15: investigate a DPU kernel interface with per-request active_slot/output_offset arrays so gate+up requests for one layer can run in a single launch.",
+    "M-15: alternatively reduce load_count via GPU-resident hot expert tuning / offload=92 profile if safety envelope is acceptable for target prompt lengths.",
+]
+
+# M-14 conclusion:
+#   - Added pim_quantized_run_many() in host_quantized_bridge.c.
+#   - Added PIMQuantizedRuntime.infer_many_raw() and slot/shape preload helpers.
+#   - Added PIMMoEBackend batched GPTQ path: gate+up runs and down runs for
+#     active CPU experts are grouped into fewer ctypes calls.
+#   - E2E was null/slightly negative: launch_seconds_sum remains ~11.2s because
+#     run_many still loops synchronous dpu_launch once per expert.  This proves
+#     ctypes crossing was not the core bottleneck; launch-count reduction is.
+
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-14 run_many e2e run must complete."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget in M-14 primary run."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.55
+reason   = "run_many is allowed to be null/negative but must remain in the M-11+ envelope."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M14_run_many.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M13_profile_diagnostics.json"
+path              = "results[0].runs[0].decode_tokens_per_second"
+op                = ">="
+value             = 0.95
+reason            = "M-14 should not regress more than 5% relative to M-13 observability baseline."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_batched_expert_groups"
+op       = ">="
+value    = 1000
+reason   = "batched path must actually fire across many layer/decode calls."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_batched_experts"
+op       = ">="
+value    = 3000
+reason   = "batched path must cover thousands of active CPU experts."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_profile_launch_seconds_sum"
+op       = ">"
+value    = 10.0
+reason   = "launch time remains visible, supporting the null-result conclusion."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M14_run_many_min2.json"
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "min-2 ablation artifact must complete."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M14_run_many_min2.json"
+path     = "results[0].scheduler_summary.quantized_batched_experts"
+op       = ">="
+value    = 3000
+reason   = "min-2 ablation must also exercise the batched path."

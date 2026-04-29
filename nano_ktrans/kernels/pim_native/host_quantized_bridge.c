@@ -870,6 +870,65 @@ cleanup:
     return rc;
 }
 
+int
+pim_quantized_run_many(
+    void *handle,
+    uint32_t call_count,
+    const uint32_t *batch_sizes,
+    const void *const *inputs,
+    void *const *outputs,
+    const uint32_t *slot_ids,
+    char *error_buffer,
+    size_t error_buffer_len)
+{
+    pim_q_ctx_t *ctx = (pim_q_ctx_t *)handle;
+    if (ctx == NULL) {
+        set_error(error_buffer, error_buffer_len, "handle is NULL");
+        return -1;
+    }
+    if (call_count == 0) {
+        return 0;
+    }
+    if (batch_sizes == NULL || inputs == NULL || outputs == NULL || slot_ids == NULL) {
+        set_error(error_buffer, error_buffer_len, "run_many arrays must be non-null");
+        return -1;
+    }
+
+    double input_sum = 0.0;
+    double launch_sum = 0.0;
+    double output_sum = 0.0;
+    double total_sum = 0.0;
+    uint64_t max_cycles = 0;
+
+    for (uint32_t i = 0; i < call_count; ++i) {
+        const int rc = pim_quantized_run(
+            handle,
+            batch_sizes[i],
+            inputs[i],
+            outputs[i],
+            slot_ids[i],
+            error_buffer,
+            error_buffer_len);
+        if (rc != 0) {
+            return rc;
+        }
+        input_sum += ctx->last_input_transfer_seconds;
+        launch_sum += ctx->last_launch_seconds;
+        output_sum += ctx->last_output_transfer_seconds;
+        total_sum += ctx->last_total_seconds;
+        if (ctx->last_cycles > max_cycles) {
+            max_cycles = ctx->last_cycles;
+        }
+    }
+
+    ctx->last_input_transfer_seconds = input_sum;
+    ctx->last_launch_seconds = launch_sum;
+    ctx->last_output_transfer_seconds = output_sum;
+    ctx->last_total_seconds = total_sum;
+    ctx->last_cycles = max_cycles;
+    return 0;
+}
+
 void
 pim_quantized_shutdown(void *handle)
 {
