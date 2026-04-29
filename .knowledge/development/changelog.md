@@ -5,6 +5,26 @@ tags: [changelog]
 
 # 📝 变更日志
 
+## 2026-04-28
+
+### 2026-04-28 19:30 - ADR-002 M-11 闭合：residency sweep 推出 offload_device_experts=88 安全默认，decode_tps 0.284→0.623 (+119%)
+
+M-10 意外发现 `offload_device_experts=32` 超 M-4 peak，M-11 系统扫 residency 配置。
+
+新增 `benchmarks/benchmark_residency_sweep.py` 子进程 sweep driver，支持 offload values、prompt profiles、timeout、summary。
+
+真机数据：
+- short prompt: offload=94 peak 0.697，但 95/96 OOM
+- medium prompt: offload=94 peak 0.717
+- long prompt: offload=94 OOM，88 稳定 0.666，92 也可跑但安全边界更窄
+- M-11 final 默认 88：decode_tps **0.6226**
+
+默认变更：`benchmark_inference.py --offload-device-experts` **2 → 88**。选择 88 而不是 94，是因为 94 在 long prompt OOM，88 给 47GB GPU 留显存余量。
+
+对比：M-9 0.284 → 0.623 (+119%)；M-4 peak 0.317 → 0.623 (+96%)；CPU baseline 3.07 → ratio 0.203×。
+
+测试：242 → **246 passed** (+4)。dev_gate M-11 PASS 10/10。
+
 ## 2026-04-23
 
 ### 2026-04-23 19:30 - ADR-002 M-10 闭合：Python threading async 无 overlap gain，意外发现 offload=32 赢 M-4 peak (dev_gate PASS 10/10)

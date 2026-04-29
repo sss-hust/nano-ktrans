@@ -490,3 +490,13 @@ tags: [pitfalls, debugging]
   - **M-10**: Python threading 有 GIL 争用 → 发现需要 C-level async
 - 每个 null 平均**揭示一个隐藏的架构约束**, 这些约束无法通过读 spec 或灵感推导得到, 只能通过 e2e 真机实测+诊断. 单个 null 看上去是浪费, 叠起来看是**系统级的深度理解**.
 - 经验: 别急着把 null 归类为失败. 问: 这个 null 揭示了什么之前不知道的约束? 如果答得出, 这个 null 是投资不是浪费. 写 dev_gate 时, **null milestone 的 acceptance KPI 要检查 "发现了 X 约束" 而不是 "tps 提升 Y%"**.
+
+
+<!-- updated: 2026-04-28 19:30 -->
+
+## 先扫 residency 配置，再做深工程：offload_device_experts=88 一把提升 +119%
+
+- 现象：M-11 没改 DPU kernel，也没改 runtime，只系统扫 `offload_device_experts`，就把默认 decode_tps 从 M-9 的 0.284 拉到 0.623 (+119%)。
+- 原理：Qwen3 top_k=8，每层每 token 激活 8 个 expert。GPU 常驻 88/128 expert 后，平均 `8*88/128≈5.5` 个 active expert 在 GPU，PIM 只处理剩下 2-3 个，DPU calls 大幅下降。相比之下此前大量 PIM kernel/runtime 优化仍在处理 5-8 个 CPU-side expert。
+- 边界：94 是 short/medium peak，但 long prompt OOM；95/96 short OOM。88 是当前 47GB GPU 上的安全高性能默认。
+- 经验：任何大工程优化前，先扫简单配置旋钮（residency、batch、rank、prompt length）。配置空间可能藏着最便宜的大胜利。

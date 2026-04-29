@@ -1,0 +1,122 @@
+{
+  "model_path": "/home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4",
+  "offload_values": [
+    94,
+    95
+  ],
+  "prompt_profiles": [
+    "short"
+  ],
+  "max_new_tokens": 32,
+  "pim_layer_group_size": 48,
+  "pim_async": false,
+  "speculative_preload": false,
+  "results": [
+    {
+      "prompt_name": "short",
+      "offload_device_experts": 94,
+      "process_exit_code": 0,
+      "elapsed_seconds": 323.17302779853344,
+      "stdout_tail": "   \"scheduler_profile\": \"baseline\",\n      \"decode_tokens_per_second\": 0.6973845205528255,\n      \"prefill_seconds_avg\": 22.115628391504288,\n      \"decode_seconds_avg\": 45.885733131319284,\n      \"pipeline_prefetch_overlap_hits\": 0,\n      \"pipeline_promotion_source_activated\": 0,\n      \"pipeline_promotion_source_warm\": 0,\n      \"pipeline_promotion_source_cold\": 0,\n      \"pipeline_promotion_non_cold_total\": 0,\n      \"pipeline_promotion_non_cold_ratio\": null,\n      \"background_worker_enabled\": false,\n      \"background_worker_ticks\": 0,\n      \"background_worker_work_ticks\": 0,\n      \"background_worker_work_ratio\": null,\n      \"apply_queue_utilization\": 0.0,\n      \"apply_queue_commit_batch_size_avg\": null,\n      \"apply_commit_queue_utilization\": 0.0,\n      \"apply_queue_pressure_avg\": 0.0,\n      \"apply_queue_pressure_step_avg\": 0.0,\n      \"apply_queue_pressure_ema_avg\": 0.0,\n      \"apply_queue_budget_backoff_avg\": 0.0,\n      \"apply_commit_queue_pressure_avg\": 0.0,\n      \"apply_commit_queue_pressure_step_avg\": 0.0,\n      \"apply_commit_queue_pressure_ema_avg\": 0.0,\n      \"apply_commit_queue_budget_backoff_avg\": 0.0,\n      \"apply_commit_batch_queue_pressure_avg\": 0.0,\n      \"apply_commit_batch_queue_pressure_step_avg\": 0.0,\n      \"apply_commit_batch_queue_pressure_ema_avg\": 0.0,\n      \"apply_commit_batch_queue_budget_backoff_avg\": 0.0,\n      \"apply_queue_commit_batches\": 0,\n      \"apply_queue_commit_experts\": 0,\n      \"background_apply_commit_batches\": 0,\n      \"background_apply_commit_experts\": 0,\n      \"offload_background_work_items_total\": 0,\n      \"offload_background_work_items_avg\": 0.0,\n      \"offload_background_activation_applied_total\": 0,\n      \"pipeline_apply_batches\": 0,\n      \"pipeline_apply_batch_size_avg\": null,\n      \"pipeline_apply_batch_evictions\": 0,\n      \"pipeline_apply_batch_activated\": 0,\n      \"pipeline_apply_batch_warm\": 0,\n      \"pipeline_apply_batch_cold\": 0,\n      \"pipeline_apply_batch_activated_ratio\": null,\n      \"pipeline_apply_batch_warm_ratio\": null,\n      \"pipeline_apply_batch_cold_ratio\": null,\n      \"runtime_offload_pipeline_apply_batch_count_total\": 0,\n      \"runtime_offload_pipeline_apply_batch_experts_total\": 0,\n      \"runtime_offload_pipeline_apply_batch_evictions_total\": 0,\n      \"runtime_apply_batch_size_avg\": null,\n      \"prepared_cache_limit\": 192,\n      \"prepared_cache_budget_backoff_avg\": 0.0,\n      \"effective_prepared_cache_limit\": 192,\n      \"prepared_cache_size\": 0,\n      \"effective_warm_cache_limit\": 192,\n      \"prepared_cache_utilization\": 0.0,\n      \"effective_prepared_cache_utilization\": 0.0,\n      \"prepared_cache_rebalance_pressure_avg\": 0.0,\n      \"prepared_cache_rebalance_pressure_step_avg\": 0.0,\n      \"prepared_cache_rebalance_pressure_ema_avg\": 0.0,\n      \"prepared_cache_rebalance_evicted_warm\": 0,\n      \"prepared_cache_rebalance_evicted_activated\": 0,\n      \"prepared_cache_rebalance_demoted_to_warm\": 0,\n      \"prepared_cache_rebalance_dropped_to_ready\": 0,\n      \"prepared_cache_rebalance_activated_ratio\": null,\n      \"prepared_cache_activation_stage_bonus_avg\": 0.5,\n      \"cold_promotion_penalty_avg\": 0.0,\n      \"adaptive_activation_limit_avg\": 1.0,\n      \"adaptive_prebuild_limit_avg\": 2.0,\n      \"adaptive_prefetch_pending_limit_avg\": 0.0,\n      \"adaptive_prefetch_candidate_budget_avg\": 0.0,\n      \"resident_commit_batch_queue_utilization\": 0.0,\n      \"resident_commit_finalize_queue_utilization\": 0.0,\n      \"resident_commit_ready_cache_utilization\": 0.0,\n      \"offload_background_resident_commit_batch_queue_enqueued_total\": 0,\n      \"offload_background_resident_commit_batch_queue_prefinalized_total\": 0,\n      \"offload_background_resident_commit_finalize_queue_enqueued_total\": 0,\n      \"offload_background_resident_commit_finalize_queue_prefinalized_total\": 0,\n      \"offload_background_resident_commit_ready_cache_stores_total\": 0,\n      \"migration_activation_eviction_regressions\": 0,\n      \"migration_warm_eviction_regressions\": 0,\n      \"runtime_deferred_for_prefetch\": 0\n    }\n  }\n}\n",
+      "cell_json_path": "benchmarks/results/residency_sweep_M11_boundary2/short_offload94.json",
+      "status": "ok",
+      "backend_status": "ok",
+      "error_type": null,
+      "error": null,
+      "prompt_tokens": 14,
+      "generated_tokens": 32,
+      "prefill_seconds": 22.115628391504288,
+      "decode_seconds": 45.885733131319284,
+      "decode_tokens_per_second": 0.6973845205528255,
+      "cuda_max_memory_bytes": 45891458048,
+      "layer_count": 48,
+      "real_dpu_quantized_calls": 6150,
+      "quantized_preload_hits_local": 0,
+      "quantized_preload_misses_local": 6150,
+      "locality_decode_jaccard_count": 1474,
+      "locality_decode_jaccard_sum": 143.9547650305155,
+      "locality_decode_jaccard_mean": 0.09766266284295488
+    },
+    {
+      "prompt_name": "short",
+      "offload_device_experts": 95,
+      "process_exit_code": 0,
+      "elapsed_seconds": 270.7692844737321,
+      "stdout_tail": "y_commit_queue_pressure_ema_avg\",\n      \"apply_commit_queue_budget_backoff_avg\",\n      \"apply_commit_batch_queue_pressure_avg\",\n      \"apply_commit_batch_queue_pressure_ema_avg\",\n      \"apply_commit_batch_queue_budget_backoff_avg\",\n      \"pipeline_prefetch_overlap_hits\",\n      \"pipeline_promotion_source_activated\",\n      \"pipeline_promotion_source_warm\",\n      \"pipeline_promotion_source_cold\",\n      \"runtime_offload_pipeline_apply_batch_count_total\",\n      \"runtime_offload_pipeline_apply_batch_experts_total\",\n      \"runtime_offload_pipeline_apply_batch_evictions_total\",\n      \"offload_background_resident_commit_batch_queue_enqueued_total\",\n      \"offload_background_resident_commit_finalize_queue_enqueued_total\",\n      \"offload_background_resident_commit_ready_cache_stores_total\",\n      \"offload_background_resident_commit_apply_queue_enqueued_total\",\n      \"offload_background_resident_commit_finalize_ready_queue_enqueued_total\",\n      \"pipeline_apply_batch_size_avg\",\n      \"pipeline_apply_batch_evictions\",\n      \"migration_activation_eviction_regressions\",\n      \"migration_warm_eviction_regressions\",\n      \"runtime_deferred_for_prefetch\"\n    ],\n    \"metric_directions\": {\n      \"decode_tokens_per_second\": \"max\",\n      \"prefill_seconds_avg\": \"min\",\n      \"decode_seconds_avg\": \"min\",\n      \"pipeline_prefetch_overlap_hits\": \"max\",\n      \"pipeline_promotion_source_activated\": \"max\",\n      \"pipeline_promotion_source_warm\": \"max\",\n      \"pipeline_promotion_source_cold\": \"min\",\n      \"pipeline_promotion_non_cold_total\": \"max\",\n      \"pipeline_promotion_non_cold_ratio\": \"max\",\n      \"background_worker_work_ratio\": \"max\",\n      \"apply_queue_utilization\": \"max\",\n      \"apply_queue_commit_batch_size_avg\": \"max\",\n      \"apply_commit_queue_utilization\": \"max\",\n      \"resident_commit_batch_queue_utilization\": \"max\",\n      \"resident_commit_finalize_queue_utilization\": \"max\",\n      \"resident_commit_ready_cache_utilization\": \"max\",\n      \"resident_commit_apply_queue_utilization\": \"max\",\n      \"resident_commit_finalize_ready_queue_utilization\": \"max\",\n      \"pipeline_apply_batches\": \"max\",\n      \"pipeline_apply_batch_size_avg\": \"max\",\n      \"pipeline_apply_batch_evictions\": \"min\",\n      \"runtime_offload_pipeline_apply_batch_count_total\": \"max\",\n      \"runtime_offload_pipeline_apply_batch_experts_total\": \"max\",\n      \"runtime_offload_pipeline_apply_batch_evictions_total\": \"min\",\n      \"offload_background_resident_commit_batch_queue_enqueued_total\": \"max\",\n      \"offload_background_resident_commit_finalize_queue_enqueued_total\": \"max\",\n      \"offload_background_resident_commit_ready_cache_stores_total\": \"max\",\n      \"offload_background_resident_commit_apply_queue_enqueued_total\": \"max\",\n      \"offload_background_resident_commit_finalize_ready_queue_enqueued_total\": \"max\",\n      \"runtime_apply_batch_size_avg\": \"max\",\n      \"prepared_cache_utilization\": \"max\",\n      \"effective_prepared_cache_utilization\": \"max\",\n      \"prepared_cache_budget_backoff_avg\": \"min\",\n      \"cold_promotion_penalty_avg\": \"min\",\n      \"prepared_cache_rebalance_pressure_avg\": \"min\",\n      \"prepared_cache_rebalance_pressure_ema_avg\": \"min\",\n      \"apply_queue_pressure_avg\": \"min\",\n      \"apply_queue_pressure_ema_avg\": \"min\",\n      \"apply_queue_budget_backoff_avg\": \"min\",\n      \"apply_commit_queue_pressure_avg\": \"min\",\n      \"apply_commit_queue_pressure_ema_avg\": \"min\",\n      \"apply_commit_queue_budget_backoff_avg\": \"min\",\n      \"apply_commit_batch_queue_pressure_avg\": \"min\",\n      \"apply_commit_batch_queue_pressure_ema_avg\": \"min\",\n      \"apply_commit_batch_queue_budget_backoff_avg\": \"min\",\n      \"adaptive_prefetch_pending_limit_avg\": \"max\",\n      \"adaptive_prefetch_candidate_budget_avg\": \"max\",\n      \"migration_activation_eviction_regressions\": \"min\",\n      \"migration_warm_eviction_regressions\": \"min\",\n      \"runtime_deferred_for_prefetch\": \"min\"\n    },\n    \"profiles\": [],\n    \"comparison_table\": [],\n    \"best_by_metric\": {},\n    \"best_by_decode_tokens_per_second\": null\n  }\n}\n",
+      "cell_json_path": "benchmarks/results/residency_sweep_M11_boundary2/short_offload95.json",
+      "status": "oom",
+      "backend_status": "oom",
+      "error_type": "OutOfMemoryError",
+      "error": "CUDA out of memory. Tried to allocate 594.00 MiB. GPU 0 has a total capacity of 47.41 GiB of which 322.31 MiB is free. Including non-PyTorch memory, this process has 47.09 GiB memory in use. Of the allocated memory 42.38 GiB is allocated by PyTorch, and 4.45 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+      "layer_count": 0,
+      "real_dpu_quantized_calls": 0,
+      "quantized_preload_hits_local": 0,
+      "quantized_preload_misses_local": 0,
+      "locality_decode_jaccard_count": 0,
+      "locality_decode_jaccard_sum": 0
+    }
+  ],
+  "summary": {
+    "cell_count": 2,
+    "ok_count": 1,
+    "oom_count": 1,
+    "error_count": 0,
+    "best": {
+      "prompt_name": "short",
+      "offload_device_experts": 94,
+      "process_exit_code": 0,
+      "elapsed_seconds": 323.17302779853344,
+      "stdout_tail": "   \"scheduler_profile\": \"baseline\",\n      \"decode_tokens_per_second\": 0.6973845205528255,\n      \"prefill_seconds_avg\": 22.115628391504288,\n      \"decode_seconds_avg\": 45.885733131319284,\n      \"pipeline_prefetch_overlap_hits\": 0,\n      \"pipeline_promotion_source_activated\": 0,\n      \"pipeline_promotion_source_warm\": 0,\n      \"pipeline_promotion_source_cold\": 0,\n      \"pipeline_promotion_non_cold_total\": 0,\n      \"pipeline_promotion_non_cold_ratio\": null,\n      \"background_worker_enabled\": false,\n      \"background_worker_ticks\": 0,\n      \"background_worker_work_ticks\": 0,\n      \"background_worker_work_ratio\": null,\n      \"apply_queue_utilization\": 0.0,\n      \"apply_queue_commit_batch_size_avg\": null,\n      \"apply_commit_queue_utilization\": 0.0,\n      \"apply_queue_pressure_avg\": 0.0,\n      \"apply_queue_pressure_step_avg\": 0.0,\n      \"apply_queue_pressure_ema_avg\": 0.0,\n      \"apply_queue_budget_backoff_avg\": 0.0,\n      \"apply_commit_queue_pressure_avg\": 0.0,\n      \"apply_commit_queue_pressure_step_avg\": 0.0,\n      \"apply_commit_queue_pressure_ema_avg\": 0.0,\n      \"apply_commit_queue_budget_backoff_avg\": 0.0,\n      \"apply_commit_batch_queue_pressure_avg\": 0.0,\n      \"apply_commit_batch_queue_pressure_step_avg\": 0.0,\n      \"apply_commit_batch_queue_pressure_ema_avg\": 0.0,\n      \"apply_commit_batch_queue_budget_backoff_avg\": 0.0,\n      \"apply_queue_commit_batches\": 0,\n      \"apply_queue_commit_experts\": 0,\n      \"background_apply_commit_batches\": 0,\n      \"background_apply_commit_experts\": 0,\n      \"offload_background_work_items_total\": 0,\n      \"offload_background_work_items_avg\": 0.0,\n      \"offload_background_activation_applied_total\": 0,\n      \"pipeline_apply_batches\": 0,\n      \"pipeline_apply_batch_size_avg\": null,\n      \"pipeline_apply_batch_evictions\": 0,\n      \"pipeline_apply_batch_activated\": 0,\n      \"pipeline_apply_batch_warm\": 0,\n      \"pipeline_apply_batch_cold\": 0,\n      \"pipeline_apply_batch_activated_ratio\": null,\n      \"pipeline_apply_batch_warm_ratio\": null,\n      \"pipeline_apply_batch_cold_ratio\": null,\n      \"runtime_offload_pipeline_apply_batch_count_total\": 0,\n      \"runtime_offload_pipeline_apply_batch_experts_total\": 0,\n      \"runtime_offload_pipeline_apply_batch_evictions_total\": 0,\n      \"runtime_apply_batch_size_avg\": null,\n      \"prepared_cache_limit\": 192,\n      \"prepared_cache_budget_backoff_avg\": 0.0,\n      \"effective_prepared_cache_limit\": 192,\n      \"prepared_cache_size\": 0,\n      \"effective_warm_cache_limit\": 192,\n      \"prepared_cache_utilization\": 0.0,\n      \"effective_prepared_cache_utilization\": 0.0,\n      \"prepared_cache_rebalance_pressure_avg\": 0.0,\n      \"prepared_cache_rebalance_pressure_step_avg\": 0.0,\n      \"prepared_cache_rebalance_pressure_ema_avg\": 0.0,\n      \"prepared_cache_rebalance_evicted_warm\": 0,\n      \"prepared_cache_rebalance_evicted_activated\": 0,\n      \"prepared_cache_rebalance_demoted_to_warm\": 0,\n      \"prepared_cache_rebalance_dropped_to_ready\": 0,\n      \"prepared_cache_rebalance_activated_ratio\": null,\n      \"prepared_cache_activation_stage_bonus_avg\": 0.5,\n      \"cold_promotion_penalty_avg\": 0.0,\n      \"adaptive_activation_limit_avg\": 1.0,\n      \"adaptive_prebuild_limit_avg\": 2.0,\n      \"adaptive_prefetch_pending_limit_avg\": 0.0,\n      \"adaptive_prefetch_candidate_budget_avg\": 0.0,\n      \"resident_commit_batch_queue_utilization\": 0.0,\n      \"resident_commit_finalize_queue_utilization\": 0.0,\n      \"resident_commit_ready_cache_utilization\": 0.0,\n      \"offload_background_resident_commit_batch_queue_enqueued_total\": 0,\n      \"offload_background_resident_commit_batch_queue_prefinalized_total\": 0,\n      \"offload_background_resident_commit_finalize_queue_enqueued_total\": 0,\n      \"offload_background_resident_commit_finalize_queue_prefinalized_total\": 0,\n      \"offload_background_resident_commit_ready_cache_stores_total\": 0,\n      \"migration_activation_eviction_regressions\": 0,\n      \"migration_warm_eviction_regressions\": 0,\n      \"runtime_deferred_for_prefetch\": 0\n    }\n  }\n}\n",
+      "cell_json_path": "benchmarks/results/residency_sweep_M11_boundary2/short_offload94.json",
+      "status": "ok",
+      "backend_status": "ok",
+      "error_type": null,
+      "error": null,
+      "prompt_tokens": 14,
+      "generated_tokens": 32,
+      "prefill_seconds": 22.115628391504288,
+      "decode_seconds": 45.885733131319284,
+      "decode_tokens_per_second": 0.6973845205528255,
+      "cuda_max_memory_bytes": 45891458048,
+      "layer_count": 48,
+      "real_dpu_quantized_calls": 6150,
+      "quantized_preload_hits_local": 0,
+      "quantized_preload_misses_local": 6150,
+      "locality_decode_jaccard_count": 1474,
+      "locality_decode_jaccard_sum": 143.9547650305155,
+      "locality_decode_jaccard_mean": 0.09766266284295488
+    },
+    "by_prompt": {
+      "short": {
+        "ok_count": 1,
+        "best": {
+          "prompt_name": "short",
+          "offload_device_experts": 94,
+          "process_exit_code": 0,
+          "elapsed_seconds": 323.17302779853344,
+          "stdout_tail": "   \"scheduler_profile\": \"baseline\",\n      \"decode_tokens_per_second\": 0.6973845205528255,\n      \"prefill_seconds_avg\": 22.115628391504288,\n      \"decode_seconds_avg\": 45.885733131319284,\n      \"pipeline_prefetch_overlap_hits\": 0,\n      \"pipeline_promotion_source_activated\": 0,\n      \"pipeline_promotion_source_warm\": 0,\n      \"pipeline_promotion_source_cold\": 0,\n      \"pipeline_promotion_non_cold_total\": 0,\n      \"pipeline_promotion_non_cold_ratio\": null,\n      \"background_worker_enabled\": false,\n      \"background_worker_ticks\": 0,\n      \"background_worker_work_ticks\": 0,\n      \"background_worker_work_ratio\": null,\n      \"apply_queue_utilization\": 0.0,\n      \"apply_queue_commit_batch_size_avg\": null,\n      \"apply_commit_queue_utilization\": 0.0,\n      \"apply_queue_pressure_avg\": 0.0,\n      \"apply_queue_pressure_step_avg\": 0.0,\n      \"apply_queue_pressure_ema_avg\": 0.0,\n      \"apply_queue_budget_backoff_avg\": 0.0,\n      \"apply_commit_queue_pressure_avg\": 0.0,\n      \"apply_commit_queue_pressure_step_avg\": 0.0,\n      \"apply_commit_queue_pressure_ema_avg\": 0.0,\n      \"apply_commit_queue_budget_backoff_avg\": 0.0,\n      \"apply_commit_batch_queue_pressure_avg\": 0.0,\n      \"apply_commit_batch_queue_pressure_step_avg\": 0.0,\n      \"apply_commit_batch_queue_pressure_ema_avg\": 0.0,\n      \"apply_commit_batch_queue_budget_backoff_avg\": 0.0,\n      \"apply_queue_commit_batches\": 0,\n      \"apply_queue_commit_experts\": 0,\n      \"background_apply_commit_batches\": 0,\n      \"background_apply_commit_experts\": 0,\n      \"offload_background_work_items_total\": 0,\n      \"offload_background_work_items_avg\": 0.0,\n      \"offload_background_activation_applied_total\": 0,\n      \"pipeline_apply_batches\": 0,\n      \"pipeline_apply_batch_size_avg\": null,\n      \"pipeline_apply_batch_evictions\": 0,\n      \"pipeline_apply_batch_activated\": 0,\n      \"pipeline_apply_batch_warm\": 0,\n      \"pipeline_apply_batch_cold\": 0,\n      \"pipeline_apply_batch_activated_ratio\": null,\n      \"pipeline_apply_batch_warm_ratio\": null,\n      \"pipeline_apply_batch_cold_ratio\": null,\n      \"runtime_offload_pipeline_apply_batch_count_total\": 0,\n      \"runtime_offload_pipeline_apply_batch_experts_total\": 0,\n      \"runtime_offload_pipeline_apply_batch_evictions_total\": 0,\n      \"runtime_apply_batch_size_avg\": null,\n      \"prepared_cache_limit\": 192,\n      \"prepared_cache_budget_backoff_avg\": 0.0,\n      \"effective_prepared_cache_limit\": 192,\n      \"prepared_cache_size\": 0,\n      \"effective_warm_cache_limit\": 192,\n      \"prepared_cache_utilization\": 0.0,\n      \"effective_prepared_cache_utilization\": 0.0,\n      \"prepared_cache_rebalance_pressure_avg\": 0.0,\n      \"prepared_cache_rebalance_pressure_step_avg\": 0.0,\n      \"prepared_cache_rebalance_pressure_ema_avg\": 0.0,\n      \"prepared_cache_rebalance_evicted_warm\": 0,\n      \"prepared_cache_rebalance_evicted_activated\": 0,\n      \"prepared_cache_rebalance_demoted_to_warm\": 0,\n      \"prepared_cache_rebalance_dropped_to_ready\": 0,\n      \"prepared_cache_rebalance_activated_ratio\": null,\n      \"prepared_cache_activation_stage_bonus_avg\": 0.5,\n      \"cold_promotion_penalty_avg\": 0.0,\n      \"adaptive_activation_limit_avg\": 1.0,\n      \"adaptive_prebuild_limit_avg\": 2.0,\n      \"adaptive_prefetch_pending_limit_avg\": 0.0,\n      \"adaptive_prefetch_candidate_budget_avg\": 0.0,\n      \"resident_commit_batch_queue_utilization\": 0.0,\n      \"resident_commit_finalize_queue_utilization\": 0.0,\n      \"resident_commit_ready_cache_utilization\": 0.0,\n      \"offload_background_resident_commit_batch_queue_enqueued_total\": 0,\n      \"offload_background_resident_commit_batch_queue_prefinalized_total\": 0,\n      \"offload_background_resident_commit_finalize_queue_enqueued_total\": 0,\n      \"offload_background_resident_commit_finalize_queue_prefinalized_total\": 0,\n      \"offload_background_resident_commit_ready_cache_stores_total\": 0,\n      \"migration_activation_eviction_regressions\": 0,\n      \"migration_warm_eviction_regressions\": 0,\n      \"runtime_deferred_for_prefetch\": 0\n    }\n  }\n}\n",
+          "cell_json_path": "benchmarks/results/residency_sweep_M11_boundary2/short_offload94.json",
+          "status": "ok",
+          "backend_status": "ok",
+          "error_type": null,
+          "error": null,
+          "prompt_tokens": 14,
+          "generated_tokens": 32,
+          "prefill_seconds": 22.115628391504288,
+          "decode_seconds": 45.885733131319284,
+          "decode_tokens_per_second": 0.6973845205528255,
+          "cuda_max_memory_bytes": 45891458048,
+          "layer_count": 48,
+          "real_dpu_quantized_calls": 6150,
+          "quantized_preload_hits_local": 0,
+          "quantized_preload_misses_local": 6150,
+          "locality_decode_jaccard_count": 1474,
+          "locality_decode_jaccard_sum": 143.9547650305155,
+          "locality_decode_jaccard_mean": 0.09766266284295488
+        },
+        "oom_count": 1,
+        "error_count": 0
+      }
+    }
+  }
+}

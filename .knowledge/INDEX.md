@@ -6,7 +6,7 @@ updated: 2026-04-22
 
 # nano-ktrans
 
-> 一个面向学习和实验的 Hybrid MoE 推理框架。**ADR-002 M-1 ~ M-10 已在真机 Qwen3-30B-A3B-GPTQ-Int4 上全部关闭**（`dev_gate check` = 全 PASS，累计 87 条 acceptance）。**M-10** 实装 Python `threading.Thread` async PIM submit 试图用 overlap 藏 PIM 时间，A/B 实测 @ offload=2 (-4.7%) / offload=32 (-3.1%) 都输 — Python GIL 争用 + 线程 spawn/join 开销 ~5 ms/call × 1488 call 完全吃掉收益，默认翻回 async OFF. **意外副产品**: A/B 里测出 `offload_device_experts=32 + async OFF` 跑出 **decode_tps = 0.3506, 超 M-4 peak 0.317 +10.6%** — 是 M-4 以来项目第一次 decode_tps 真正前进, 证明 weight residency 旋钮被严重低估. **M-9** routing Jaccard 均值 0.14 一次 1 行 diagnostic 证伪了 M-5~M-8 caching 栈假设. **M-4** 的 fused gate+up 仍是单点设计最大真实胜利. **M-3** BackendCostModel 让 prefill 比 cuda_cpu_offload 快 13.3×. **M-2** 真 T-MAC `kernel_mode=7` 是 publishable 负结果. Decode 仍差 CPU baseline ~8.7× (offload=32 ratio 0.114×), **M-11 双轨**: 选项 A 做 C-level `dpu_launch(DPU_ASYNCHRONOUS)` 消 Python roundtrip overhead; 选项 B 扫 offload_device_experts OOM 边界看能否推 32 做新默认. `pytest tests` = **242 passed** (+59 新单测覆盖 cost_model / dev_gate 扩展 / concat prep / dual runtime / slot LRU / layer group scoping / handle-based / locality diagnostic / CLI flag / async thread lifecycle).
+> 一个面向学习和实验的 Hybrid MoE 推理框架。**ADR-002 M-1 ~ M-11 已在真机 Qwen3-30B-A3B-GPTQ-Int4 上全部关闭**（`dev_gate check` = 全 PASS，累计 97 条 acceptance）。**M-11** 系统扫 `offload_device_experts`，把 `benchmark_inference.py` 默认从 2 改为 **88**：M-11 final `decode_tps=0.6226`，相对 M-9 final 0.284 **+119%**，相对 M-4 peak 0.317 **+96%**。offload=94 是 short/medium peak 但 long prompt OOM，95/96 short OOM，因此 88 是当前 47GB GPU 的安全高性能默认。PIM 端到端 decode 仍低于 CPU baseline 3.07（ratio 0.203×，差 4.9×），但差距已从 M-9 的 10.8× 缩半。`pytest tests` = **246 passed**。M-12 将在 offload=88 新 baseline 上做 OOM envelope 扩展与 C-level batched/async DPU launch。
 
 ## 技术栈
 

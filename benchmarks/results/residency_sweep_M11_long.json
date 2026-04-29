@@ -1,0 +1,48 @@
+{
+  "model_path": "/home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4",
+  "offload_values": [
+    94
+  ],
+  "prompt_profiles": [
+    "long"
+  ],
+  "max_new_tokens": 8,
+  "pim_layer_group_size": 48,
+  "pim_async": false,
+  "speculative_preload": false,
+  "results": [
+    {
+      "prompt_name": "long",
+      "offload_device_experts": 94,
+      "process_exit_code": 0,
+      "elapsed_seconds": 235.32912650331855,
+      "stdout_tail": "y_commit_queue_pressure_ema_avg\",\n      \"apply_commit_queue_budget_backoff_avg\",\n      \"apply_commit_batch_queue_pressure_avg\",\n      \"apply_commit_batch_queue_pressure_ema_avg\",\n      \"apply_commit_batch_queue_budget_backoff_avg\",\n      \"pipeline_prefetch_overlap_hits\",\n      \"pipeline_promotion_source_activated\",\n      \"pipeline_promotion_source_warm\",\n      \"pipeline_promotion_source_cold\",\n      \"runtime_offload_pipeline_apply_batch_count_total\",\n      \"runtime_offload_pipeline_apply_batch_experts_total\",\n      \"runtime_offload_pipeline_apply_batch_evictions_total\",\n      \"offload_background_resident_commit_batch_queue_enqueued_total\",\n      \"offload_background_resident_commit_finalize_queue_enqueued_total\",\n      \"offload_background_resident_commit_ready_cache_stores_total\",\n      \"offload_background_resident_commit_apply_queue_enqueued_total\",\n      \"offload_background_resident_commit_finalize_ready_queue_enqueued_total\",\n      \"pipeline_apply_batch_size_avg\",\n      \"pipeline_apply_batch_evictions\",\n      \"migration_activation_eviction_regressions\",\n      \"migration_warm_eviction_regressions\",\n      \"runtime_deferred_for_prefetch\"\n    ],\n    \"metric_directions\": {\n      \"decode_tokens_per_second\": \"max\",\n      \"prefill_seconds_avg\": \"min\",\n      \"decode_seconds_avg\": \"min\",\n      \"pipeline_prefetch_overlap_hits\": \"max\",\n      \"pipeline_promotion_source_activated\": \"max\",\n      \"pipeline_promotion_source_warm\": \"max\",\n      \"pipeline_promotion_source_cold\": \"min\",\n      \"pipeline_promotion_non_cold_total\": \"max\",\n      \"pipeline_promotion_non_cold_ratio\": \"max\",\n      \"background_worker_work_ratio\": \"max\",\n      \"apply_queue_utilization\": \"max\",\n      \"apply_queue_commit_batch_size_avg\": \"max\",\n      \"apply_commit_queue_utilization\": \"max\",\n      \"resident_commit_batch_queue_utilization\": \"max\",\n      \"resident_commit_finalize_queue_utilization\": \"max\",\n      \"resident_commit_ready_cache_utilization\": \"max\",\n      \"resident_commit_apply_queue_utilization\": \"max\",\n      \"resident_commit_finalize_ready_queue_utilization\": \"max\",\n      \"pipeline_apply_batches\": \"max\",\n      \"pipeline_apply_batch_size_avg\": \"max\",\n      \"pipeline_apply_batch_evictions\": \"min\",\n      \"runtime_offload_pipeline_apply_batch_count_total\": \"max\",\n      \"runtime_offload_pipeline_apply_batch_experts_total\": \"max\",\n      \"runtime_offload_pipeline_apply_batch_evictions_total\": \"min\",\n      \"offload_background_resident_commit_batch_queue_enqueued_total\": \"max\",\n      \"offload_background_resident_commit_finalize_queue_enqueued_total\": \"max\",\n      \"offload_background_resident_commit_ready_cache_stores_total\": \"max\",\n      \"offload_background_resident_commit_apply_queue_enqueued_total\": \"max\",\n      \"offload_background_resident_commit_finalize_ready_queue_enqueued_total\": \"max\",\n      \"runtime_apply_batch_size_avg\": \"max\",\n      \"prepared_cache_utilization\": \"max\",\n      \"effective_prepared_cache_utilization\": \"max\",\n      \"prepared_cache_budget_backoff_avg\": \"min\",\n      \"cold_promotion_penalty_avg\": \"min\",\n      \"prepared_cache_rebalance_pressure_avg\": \"min\",\n      \"prepared_cache_rebalance_pressure_ema_avg\": \"min\",\n      \"apply_queue_pressure_avg\": \"min\",\n      \"apply_queue_pressure_ema_avg\": \"min\",\n      \"apply_queue_budget_backoff_avg\": \"min\",\n      \"apply_commit_queue_pressure_avg\": \"min\",\n      \"apply_commit_queue_pressure_ema_avg\": \"min\",\n      \"apply_commit_queue_budget_backoff_avg\": \"min\",\n      \"apply_commit_batch_queue_pressure_avg\": \"min\",\n      \"apply_commit_batch_queue_pressure_ema_avg\": \"min\",\n      \"apply_commit_batch_queue_budget_backoff_avg\": \"min\",\n      \"adaptive_prefetch_pending_limit_avg\": \"max\",\n      \"adaptive_prefetch_candidate_budget_avg\": \"max\",\n      \"migration_activation_eviction_regressions\": \"min\",\n      \"migration_warm_eviction_regressions\": \"min\",\n      \"runtime_deferred_for_prefetch\": \"min\"\n    },\n    \"profiles\": [],\n    \"comparison_table\": [],\n    \"best_by_metric\": {},\n    \"best_by_decode_tokens_per_second\": null\n  }\n}\n",
+      "cell_json_path": "benchmarks/results/residency_sweep_M11_long/long_offload94.json",
+      "status": "oom",
+      "backend_status": "oom",
+      "error_type": "OutOfMemoryError",
+      "error": "CUDA out of memory. Tried to allocate 246.00 MiB. GPU 0 has a total capacity of 47.41 GiB of which 128.31 MiB is free. Including non-PyTorch memory, this process has 47.28 GiB memory in use. Of the allocated memory 42.75 GiB is allocated by PyTorch, and 4.22 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)",
+      "layer_count": 0,
+      "real_dpu_quantized_calls": 0,
+      "quantized_preload_hits_local": 0,
+      "quantized_preload_misses_local": 0,
+      "locality_decode_jaccard_count": 0,
+      "locality_decode_jaccard_sum": 0
+    }
+  ],
+  "summary": {
+    "cell_count": 1,
+    "ok_count": 0,
+    "oom_count": 1,
+    "error_count": 0,
+    "best": null,
+    "by_prompt": {
+      "long": {
+        "ok_count": 0,
+        "best": null,
+        "oom_count": 1,
+        "error_count": 0
+      }
+    }
+  }
+}

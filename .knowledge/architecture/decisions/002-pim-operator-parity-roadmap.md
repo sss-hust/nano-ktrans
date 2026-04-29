@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-10 closed (Python threading async PIM submit: infra+telemetry landed, A/B shows thread overhead > overlap gain, default OFF; surprise finding: offload-device-experts=32 config delivers 0.35 tps beating M-4 0.317 peak); M-11 active (C-level DPU_ASYNCHRONOUS OR offload=32 as new default)
+status: M-11 closed (residency sweep selected offload_device_experts=88 safe default; decode TPS 0.284→0.623, +119%; offload=94 peak but OOM boundary too tight); M-12 active (C-level batch/async or offload OOM envelope extension)
 created: 2026-04-22
 updated: 2026-04-22
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1285,3 +1285,97 @@ A/B 里顺便测了 **offload_device_experts=32 + async OFF**：`decode_tps = 0.
 ### 18.9 教训
 
 M-10 的 hypothesis "Python threading 可以 overlap GPU / PIM" 在 ADR §15.7 的估算下看上去合理，但**没测过 Python threading 在 ctypes-heavy workload 下的实际开销**就上工。M-9 的 gotcha "做 locality-based 优化前必须先量化" 这里应该推广到 **"做 async / concurrency 优化前必须先用一个 micro-benchmark 测 Python 层的线程/协程 overhead vs 预期 overlap 窗口的比例"**。
+
+
+---
+
+## 19. M-11 执行结论（2026-04-28）：residency sweep 找到最便宜的大胜利，默认 offload=88
+
+### 19.1 背景
+
+M-10 的 async A/B 虽然失败，但意外发现 `offload_device_experts=32` 跑出 0.3506 tps，超过 M-4 peak 0.317。这说明 **GPU residency 配置比 kernel-level 优化更便宜且更有效**。M-11 因此先做配置扫描，不继续 C-level async 深工程。
+
+### 19.2 实装
+
+新增 `benchmarks/benchmark_residency_sweep.py`：
+- 子进程逐 cell 调 `benchmark_inference.py`，避免 GPU/DPU 资源残留影响下一个 cell
+- 支持 `--offload-values`、`--prompt-profiles {short,medium,long}`、`--max-new-tokens`
+- 每 cell 产出独立 JSON，同时聚合 summary：best/offload/oom/error/locality/DPU call 等
+
+`benchmark_inference.py` 默认：
+- `--offload-device-experts`: **2 → 88**
+- help 文案写明：94 在 short/medium 更快但 long prompt OOM；88 是 47GB 卡的安全高性能默认。
+
+### 19.3 真机扫描结果
+
+**short prompt, 32 decode tokens**：
+
+| offload | status | decode_tps |
+|---------|--------|------------|
+| 2 | ok | 0.293 |
+| 16 | ok | 0.307 |
+| 32 | ok | 0.362 |
+| 48 | ok | 0.405 |
+| 64 | ok | 0.477 |
+| 80 | ok | 0.561 |
+| 84 | ok | 0.608 |
+| 88 | ok | 0.614 |
+| 92 | ok | 0.662 |
+| 94 | ok | **0.697** |
+| 95 | OOM | — |
+| 96 | OOM | — |
+
+**medium prompt, 16 decode tokens**：
+
+| offload | status | decode_tps |
+|---------|--------|------------|
+| 80 | ok | 0.576 |
+| 88 | ok | 0.632 |
+| 94 | ok | **0.717** |
+
+**long prompt, 8 decode tokens**：
+
+| offload | status | decode_tps |
+|---------|--------|------------|
+| 64 | ok | 0.505 |
+| 80 | ok | 0.592 |
+| 88 | ok | **0.666** |
+| 92 | ok | 0.691 |
+| 94 | OOM | — |
+
+### 19.4 默认选择：为什么是 88，不是 94 或 92
+
+- 94 是 short/medium peak（0.697 / 0.717），但 long prompt OOM。
+- 95/96 short 也 OOM，说明 94 已在显存边界上。
+- 92 在 long prompt 8-token OK，但没扫 medium/long 更长 decode、KV cache 更大时的 OOM 边界。
+- 88 在 short/medium/long 全 OK，且仍有 0.61-0.67 tps，性能远超 M-10 offload=32。
+
+所以 M-11 选择 **88 作为安全默认**，94 作为"短 prompt 峰值配置"保留给用户显式指定。
+
+### 19.5 M-11 final 数据
+
+`benchmark_inference.py` 不显式传 `--offload-device-experts`（默认 88）：
+
+| 指标 | 值 |
+|------|----|
+| num_device_experts | 88 |
+| prefill_seconds | 21.97s |
+| decode_seconds | 51.40s |
+| generated_tokens | 32 |
+| **decode_tps** | **0.6226** |
+
+对比：
+- M-9 final: 0.2844 → **+119%**
+- M-10 offload=32: 0.3506 → **+77.6%**
+- M-4 peak: 0.3170 → **+96.4%**
+- CPU baseline: 3.0677 → ratio **0.203×**（仍差 4.9×，但比之前 10.8× 差距缩半）
+
+### 19.6 结论
+
+M-11 是 M-4 以来最大的真实 e2e decode 胜利。它没有改 DPU kernel、没有改 runtime，只系统扫了一个此前低估的 residency 参数。**配置空间扫描先于深工程优化** 这个原则再次成立。
+
+### 19.7 M-12
+
+两个方向：
+1. 扩展 OOM envelope：`offload ∈ {88,90,92,94}` × prompt length × max_new_tokens，确认 88 是否能在更长生成下稳定。
+2. C-level batched/async DPU launch：在 offload=88 的新 baseline 上继续消除 Python↔C roundtrip。
