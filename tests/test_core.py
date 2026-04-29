@@ -8402,17 +8402,17 @@ class TestPIMMoEBackendAsyncPimSubmit:
 
 
 # ----------------------------------------------------------------------
-# ADR-002 M-11 — residency sweep + offload_device_experts=88 default
+# ADR-002 M-11/M-16 — residency sweep + offload_device_experts defaults
 # ----------------------------------------------------------------------
 
 
 class TestBenchmarkInferenceResidencyDefaultsM11:
-    """M-11 updates benchmark defaults and ships a residency sweep driver."""
+    """M-11 shipped residency sweep driver; M-16 promotes default to 92."""
 
-    def test_benchmark_inference_default_offload_is_88(self):
-        """M-11 real-hardware sweep selected 88 as the safe default:
-        94 is faster on short/medium but OOMs on long; 88 is stable
-        across short/medium/long prompts."""
+    def test_benchmark_inference_default_offload_is_92_post_m16(self):
+        """M-16 combines M-15 request-table batching with a long/32
+        offload=92 safety probe, then promotes 92 as the benchmark default.
+        94 remains faster on short/medium but OOMs on long."""
         import importlib.util
         path = "/home/yangfu/nano-ktrans/benchmarks/benchmark_inference.py"
         spec = importlib.util.spec_from_file_location("benchmark_inference", path)
@@ -8423,9 +8423,9 @@ class TestBenchmarkInferenceResidencyDefaultsM11:
         # sys.argv), assert the source-level default and help text are present.
         src = open(path).read()
         assert "--offload-device-experts" in src
-        assert "default=88" in src
-        assert "ADR-002 M-11" in src
-        assert "94 is faster" in src
+        assert "default=92" in src
+        assert "ADR-002 M-16" in src
+        assert "94 remains" in src
 
     def test_residency_sweep_driver_exists(self):
         from pathlib import Path

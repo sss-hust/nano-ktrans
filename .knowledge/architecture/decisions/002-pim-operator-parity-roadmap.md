@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-15 closed (true single-launch request table landed; launch_seconds 11.2s→9.57s, decode TPS 0.595→0.640); M-16 active (reduce load/preload cost and combine with offload=92 envelope)
+status: M-16 closed (offload=92 promoted as default to target remaining PIM load/run-call bottleneck; default TPS 0.672, short peak offload=94 reaches 0.700); M-17 active (direct load/preload reduction or routing-aware GPU residency)
 created: 2026-04-22
 updated: 2026-04-29
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1615,3 +1615,55 @@ M-15 仍没有接近 CPU 的 3.07 tps。原因：
 2. **组合 offload=92 envelope**：M-15 + offload=92 可能稳定超过 0.7 tps；需要 long/medium/short × 32/128 tokens OOM envelope。
 
 若继续深工程：下一步可以考虑 gate+up/down 更深融合，让 DPU/host bridge 在一个 request group 内直接处理 gate+up 输出、host activation、down 输入，进一步减少 host/Python 往返。
+
+---
+
+## 24. M-16 执行结论（2026-04-29）：瞄准剩余 PIM load/run-call 瓶颈，默认提升到 offload=92
+
+### 24.1 背景
+
+M-15 已把同步 run launch 的主要一段打下来，但 profile 显示剩余大头仍是 PIM 调用数量本身：
+
+- `offload=88` 下 `load_count=7246`、`load_total_seconds_sum=13.23s`、`launch_seconds_sum=9.57s`。
+- 要继续优化，应优先减少 active CPU experts，也就是减少 PIM load/run call 数。
+
+最便宜的手段是提高 GPU-resident experts。M-11 选择 88 是因为当时只知道 92 long/8 OK，没验证更长 decode。M-16 因此验证 M-15 request-table + offload=92 的短提示性能和 long/32 安全性。
+
+### 24.2 真机数据
+
+| artifact | offload | prompt/tokens | status | decode_tps | decode_seconds | cuda_max_memory_bytes | PIM calls | load_total_seconds_sum | launch_seconds_sum | runtime_total_seconds_sum |
+|----------|---------|---------------|--------|------------|----------------|-----------------------|-----------|------------------------|--------------------|---------------------------|
+| `e2e_gptq_cuda_pim_M15_single_launch_request_table.json` | 88 | short/32 | ok | 0.6402 | 49.98s | 43.17GB | 7246 | 13.23s | 9.57s | 10.98s |
+| `e2e_gptq_cuda_pim_M16_offload92.json` | 92 | short/32 | ok | **0.6721** | 47.62s | 44.99GB | 6630 | 12.50s | 8.80s | 10.13s |
+| `e2e_gptq_cuda_pim_M16_offload94_short.json` | 94 | short/32 | ok | **0.6996** | 45.74s | 45.89GB | 6006 | 11.15s | 7.99s | 9.23s |
+| `residency_sweep_M16_long32_offload92.json` | 92 | long/32 | ok | 0.6568 | 48.72s | 45.19GB | 6782 | — | — | — |
+
+### 24.3 决策
+
+M-16 将 `benchmark_inference.py` 默认 `--offload-device-experts` 从 **88 提升到 92**。
+
+理由：
+
+1. **直接打主要瓶颈**：offload=92 减少 CPU-side active experts，PIM calls 从 7246 降到 6630。
+2. **性能稳定提升**：short/32 decode TPS 从 0.6402 到 0.6721，+5.0%。
+3. **长 prompt 安全性补齐**：long/32 offload=92 OK，显存 45.19GB，仍低于 47GB hard boundary。
+4. **offload=94 仍不做默认**：short/32 达到 0.6996，是当前峰值；但历史 long prompt 94 OOM，且显存更贴近边界。
+
+### 24.4 结论
+
+M-16 不是 kernel 深工程，而是基于 M-15 profile 的 targeted configuration optimization。它证明：在当前系统里，**减少 PIM call 数**仍比继续微调单次 DPU kernel 更划算。
+
+当前最好安全默认：`offload_device_experts=92`，约 0.66-0.67 TPS。  
+当前短提示峰值：`offload_device_experts=94`，约 0.70 TPS，但不安全。
+
+### 24.5 M-16 验收
+
+- `M-16 dev_gate PASS 11/11`
+- 默认配置测试已更新到 `default=92`
+- 全量测试将在提交前跑通。
+
+### 24.6 M-17 方向
+
+1. **直接减少 load/preload cost**：M-16 后 `load_total_seconds_sum` 仍有 12.5s（offload=92）/11.15s（offload=94）。
+2. **routing-aware GPU residency**：当前 GPU experts 是 uniform first-N；如果按真实 router hotness 选择 GPU resident experts，可能在不增加显存的情况下进一步减少 CPU-side active experts。
+3. **更长 OOM envelope**：`offload=92` 还需验证 128 tokens；`offload=94` 若要作为 peak profile，需要 long prompt 安全边界更清晰。
