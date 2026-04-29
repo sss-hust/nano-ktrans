@@ -8455,3 +8455,27 @@ class TestBenchmarkInferenceResidencyDefaultsM11:
         d = json.load(open(p))
         assert d["summary"]["best"]["offload_device_experts"] == 88
         assert d["summary"]["best"]["decode_tokens_per_second"] >= 0.6
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-12 — host-side PIM quantized buffer reuse
+# ----------------------------------------------------------------------
+
+
+class TestHostQuantizedBridgeBufferReuseM12:
+    """M-12 removes per-call malloc/free from the quantized PIM hot path."""
+
+    def test_host_quantized_bridge_reuses_load_and_run_buffers(self):
+        from pathlib import Path
+
+        src = Path("/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_native/host_quantized_bridge.c").read_text()
+        assert "ensure_buffer" in src
+        assert "load_qweight_shards_capacity" in src
+        assert "load_scale_shards_capacity" in src
+        assert "kernel_cycles_capacity" in src
+        assert "input_i8_shards_capacity" in src
+        assert "output_i32_shards_capacity" in src
+        assert "free(ctx->load_qweight_shards)" in src
+        assert "free(ctx->kernel_cycles)" in src
+        assert "qweight_shards = calloc" not in src
+        assert "input_i8_shards = calloc" not in src

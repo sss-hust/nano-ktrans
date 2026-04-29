@@ -1,0 +1,98 @@
+milestone_id = "M-12"
+title = "Host-side quantized PIM buffer reuse: removes per-call malloc/free; e2e neutral, offload=92 safety probe remains optional"
+
+prerequisites = ["M-11"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M12_buffer_reuse.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M12_offload92_buffer_reuse.json",
+    "benchmarks/results/residency_sweep_M12_long32_offload92.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M12_buffer_reuse.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 88 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M12_buffer_reuse.json",
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 92 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M12_offload92_buffer_reuse.json",
+    "python benchmarks/benchmark_residency_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --prompt-profiles long --offload-values 92 --max-new-tokens 32 --json-out benchmarks/results/residency_sweep_M12_long32_offload92.json",
+]
+
+next_tasks = [
+    "M-13: C-level batched quantized expert execution: collapse the Python per-expert loop into one ctypes call per layer so gate+up/down launches can be grouped and Python roundtrips drop sharply.",
+    "M-13: aggregate PIMQuantizedRuntime.last_profile() into per-layer diagnostics so load/input/launch/output timings are visible in benchmark JSON instead of only the last call.",
+    "M-13: keep offload=92 as an optional performance profile only; it is stable on long/32 here but has much less memory headroom than the M-11 default 88.",
+]
+
+# M-12 conclusion:
+#   - host_quantized_bridge.c now reuses ctx-owned load/run buffers instead
+#     of allocating/freeing qweight/scale/lut/input/output buffers on every
+#     quantized PIM call.
+#   - Real-hardware e2e at offload=88 is neutral: 0.613 tps vs M-11's
+#     0.623 tps, within run-to-run variance and not a new headline win.
+#   - offload=92 reduces PIM calls and is stable on long prompt / 32 decode
+#     tokens, but memory rises to ~45.2 GB, so it is not promoted as the
+#     default yet.
+
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-12 offload=88 buffer-reuse e2e run must complete."
+
+[[acceptance_checks]]
+path     = "results[0].num_device_experts"
+op       = "=="
+value    = 88
+reason   = "M-12 primary artifact keeps the M-11 safe default for apples-to-apples comparison."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget in M-12 primary run."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.60
+reason   = "buffer reuse must not regress materially below M-11's 0.61-0.67 envelope."
+
+[[acceptance_checks]]
+path     = "sum(results[0].offload_diagnostics.layers[*].backend.real_dpu_quantized_calls)"
+op       = ">="
+value    = 6000
+reason   = "PIM must still execute real DPU quantized work."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M12_offload92_buffer_reuse.json"
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "offload=92 optional profile must complete on the default prompt."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M12_offload92_buffer_reuse.json"
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.60
+reason   = "offload=92 must remain in the M-11/M-12 performance envelope."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M12_long32_offload92.json"
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "long prompt / 32-token offload=92 safety probe must not OOM."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M12_long32_offload92.json"
+path     = "results[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "long prompt safety probe must generate the full token budget."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M12_long32_offload92.json"
+path     = "results[0].cuda_max_memory_bytes"
+op       = "<"
+value    = 47000000000
+reason   = "offload=92 should remain below the 47GB-card hard OOM boundary in this probe."
