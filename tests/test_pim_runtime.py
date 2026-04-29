@@ -93,6 +93,37 @@ def test_pim_quantized_runtime_int8_fixed_batch_tile_matches_cpu():
 
 
 @pytest.mark.skipif(not _has_real_dpu(), reason="Real UPMEM hardware and toolchain are required.")
+def test_pim_quantized_runtime_infer_many_raw_matches_individual_cpu():
+    from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+    from nano_ktrans.kernels.quantized_ops import cpu_w4a32_matvec, quantize_symmetric_w4a32
+
+    torch.manual_seed(2)
+    weight_a = torch.randn(64, 128, dtype=torch.float32)
+    weight_b = torch.randn(64, 128, dtype=torch.float32)
+    inputs_a = torch.randn(1, 128, dtype=torch.float32)
+    inputs_b = torch.randn(1, 128, dtype=torch.float32)
+    q_a = quantize_symmetric_w4a32(weight_a, group_size=64, linear_prefix="synthetic_a")
+    q_b = quantize_symmetric_w4a32(weight_b, group_size=64, linear_prefix="synthetic_b")
+
+    runtime = PIMQuantizedRuntime.get_shared(rank_count=1, instance_key="m14_infer_many")
+    slot_a, padded_in_a, padded_out_a, orig_a = runtime.preload_and_get_slot(1001, q_a, kernel_mode=4)
+    slot_b, padded_in_b, padded_out_b, orig_b = runtime.preload_and_get_slot(1002, q_b, kernel_mode=4)
+    actual_a, actual_b = runtime.infer_many_raw([
+        (inputs_a, slot_a, padded_in_a, padded_out_a),
+        (inputs_b, slot_b, padded_in_b, padded_out_b),
+    ])
+
+    expected_a = cpu_w4a32_matvec(inputs_a, q_a).output
+    expected_b = cpu_w4a32_matvec(inputs_b, q_b).output
+    assert actual_a[:, :orig_a].shape == expected_a.shape
+    assert actual_b[:, :orig_b].shape == expected_b.shape
+    assert torch.allclose(actual_a[:, :orig_a], expected_a, atol=1.5, rtol=5e-1)
+    assert torch.allclose(actual_b[:, :orig_b], expected_b, atol=1.5, rtol=5e-1)
+    counters = runtime.profile_counters()
+    assert counters["run_count"] >= 2
+
+
+@pytest.mark.skipif(not _has_real_dpu(), reason="Real UPMEM hardware and toolchain are required.")
 def test_pim_moe_backend_real_mode_uses_dpu(tmp_path):
     from nano_ktrans.kernels.pim_moe import PIMMoEBackend
 

@@ -104,6 +104,17 @@ class PIMQuantizedRuntime:
             ctypes.c_size_t,
         ]
         self._lib.pim_quantized_run.restype = ctypes.c_int
+        self._lib.pim_quantized_run_many.argtypes = [
+            ctypes.c_void_p,   # handle
+            ctypes.c_uint32,   # call_count
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
+        self._lib.pim_quantized_run_many.restype = ctypes.c_int
         self._lib.pim_quantized_last_cycles.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_last_cycles.restype = ctypes.c_uint64
         self._lib.pim_quantized_last_load_qweight_transfer_seconds.argtypes = [ctypes.c_void_p]
@@ -539,6 +550,68 @@ class PIMQuantizedRuntime:
             self._resident_expert_id = 0
             self._loaded_signature = None
 
+    def preload_and_get_slot(
+        self,
+        expert_id: int,
+        quantized: GPTQLinearWeight,
+        kernel_mode: int = 4,
+    ) -> tuple[int, int, int, int]:
+        self.preload(expert_id, quantized, kernel_mode)
+        slot = self._expert_to_slot[expert_id]
+        _, _, padded_input_dim, padded_output_dim, _, _, orig_output_dim = \
+            self._weight_cache[expert_id]
+        return slot, padded_input_dim, padded_output_dim, orig_output_dim
+
+    def preload_concat_and_get_slot(
+        self,
+        expert_id: int,
+        lhs: GPTQLinearWeight,
+        rhs: GPTQLinearWeight,
+        *,
+        kernel_mode: int = 4,
+    ) -> tuple[int, int, int, int, int]:
+        if expert_id not in self._weight_cache or len(self._weight_cache[expert_id]) != 7 \
+                or self._weight_cache[expert_id][6] <= 0:
+            concat_qw, concat_sc, padded_in, concat_rows, lhs_orig, rhs_orig = \
+                self._prepare_concat_quantized_weights(lhs, rhs, kernel_mode)
+            self._weight_cache[expert_id] = (
+                concat_qw, concat_sc, padded_in, concat_rows,
+                lhs.group_size, kernel_mode, rhs_orig,
+            )
+            concat_lhs_orig = lhs_orig
+            concat_rhs_orig = rhs_orig
+        else:
+            concat_qw, concat_sc, padded_in, concat_rows, group_size, km, concat_rhs_orig = \
+                self._weight_cache[expert_id]
+            concat_lhs_orig = lhs.output_dim
+
+        slot, was_resident = self._allocate_slot(expert_id)
+        self._last_touched_slot = slot
+        if not was_resident:
+            error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
+            rc = self._lib.pim_quantized_load_weights(
+                self._handle,
+                ctypes.c_uint32(padded_in),
+                ctypes.c_uint32(concat_rows),
+                ctypes.c_uint32(lhs.group_size),
+                ctypes.c_uint32(kernel_mode),
+                ctypes.c_void_p(concat_qw.data_ptr()),
+                ctypes.c_void_p(concat_sc.data_ptr()),
+                ctypes.c_uint32(slot),
+                error_buffer,
+                len(error_buffer),
+            )
+            if rc != 0:
+                raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+            self._record_load_profile()
+            self._resident_expert_id = expert_id
+            self._loaded_signature = (padded_in, concat_rows, lhs.group_size, kernel_mode, expert_id)
+            self.preload_misses += 1
+        else:
+            self._resident_expert_id = expert_id
+            self.preload_hits += 1
+        return slot, padded_in, concat_rows, concat_lhs_orig, concat_rhs_orig
+
     # ── NEW (ADR-002 M-4.1): fused preload+infer for two concatenated
     #    projections sharing the same input.  One DPU launch instead
     #    of two, one host->DPU weight transfer instead of two.
@@ -573,81 +646,14 @@ class PIMQuantizedRuntime:
                 f"lhs.input_dim={lhs.input_dim}, rhs.input_dim={rhs.input_dim}"
             )
 
-        # Cache lookup: each expert_id may hold a pre-prepared concat bundle.
-        if expert_id not in self._weight_cache or len(self._weight_cache[expert_id]) != 7 \
-                or self._weight_cache[expert_id][6] <= 0:
-            concat_qw, concat_sc, padded_in, concat_rows, lhs_orig, rhs_orig = \
-                self._prepare_concat_quantized_weights(lhs, rhs, kernel_mode)
-            # Store with a 7th slot = rhs_orig_out (encoded as positive int).
-            # The single-projection cache entry uses this slot to hold
-            # ``original_output_dim`` (same semantic), so we overload the
-            # tuple shape here for concat bundles: when slot[6] > 0 and
-            # slot[5] == kernel_mode we know it's a concat bundle; downstream
-            # readers care only about tensor+shape.
-            self._weight_cache[expert_id] = (
-                concat_qw, concat_sc, padded_in, concat_rows,
-                lhs.group_size, kernel_mode, rhs_orig,
+        slot, padded_in, concat_rows, concat_lhs_orig, concat_rhs_orig = \
+            self.preload_concat_and_get_slot(
+                expert_id,
+                lhs,
+                rhs,
+                kernel_mode=kernel_mode,
             )
-            concat_lhs_orig = lhs_orig
-            concat_rhs_orig = rhs_orig
-        else:
-            concat_qw, concat_sc, padded_in, concat_rows, group_size, km, concat_rhs_orig = \
-                self._weight_cache[expert_id]
-            concat_lhs_orig = lhs.output_dim
-
-        # ADR-002 M-6.1: route through slot LRU — if this expert's
-        # concat bundle is already resident in some slot, skip the
-        # host->DPU transfer entirely.
-        slot, was_resident = self._allocate_slot(expert_id)
-        self._last_touched_slot = slot
-
-        if not was_resident:
-            error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
-            rc = self._lib.pim_quantized_load_weights(
-                self._handle,
-                ctypes.c_uint32(padded_in),
-                ctypes.c_uint32(concat_rows),
-                ctypes.c_uint32(lhs.group_size),
-                ctypes.c_uint32(kernel_mode),
-                ctypes.c_void_p(concat_qw.data_ptr()),
-                ctypes.c_void_p(concat_sc.data_ptr()),
-                ctypes.c_uint32(slot),
-                error_buffer,
-                len(error_buffer),
-            )
-            if rc != 0:
-                raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
-            self._record_load_profile()
-            self._resident_expert_id = expert_id
-            self._loaded_signature = (padded_in, concat_rows, lhs.group_size, kernel_mode, expert_id)
-            self.preload_misses += 1
-        else:
-            # Hit: keep ``_resident_expert_id`` pointing at this bundle
-            # so infer()'s shape lookup finds it.
-            self._resident_expert_id = expert_id
-            self.preload_hits += 1
-
-        # Pad inputs if needed.
-        inputs_f32 = inputs.detach().to(device="cpu", dtype=torch.float32, copy=True).contiguous()
-        if padded_in != input_dim:
-            padded_inputs = torch.zeros(batch_size, padded_in, dtype=torch.float32)
-            padded_inputs[:, :input_dim] = inputs_f32
-            inputs_f32 = padded_inputs
-
-        outputs = torch.empty(batch_size, concat_rows, dtype=torch.float32)
-        error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
-        rc = self._lib.pim_quantized_run(
-            self._handle,
-            ctypes.c_uint32(batch_size),
-            ctypes.c_void_p(inputs_f32.data_ptr()),
-            ctypes.c_void_p(outputs.data_ptr()),
-            ctypes.c_uint32(slot),
-            error_buffer,
-            len(error_buffer),
-        )
-        if rc != 0:
-            raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
-        self._record_run_profile()
+        outputs = self.infer_many_raw([(inputs, slot, padded_in, concat_rows)])[0]
 
         # Split: first concat_lhs_orig rows go to lhs, next concat_rhs_orig to rhs.
         lhs_out = outputs[:, :concat_lhs_orig].contiguous()
@@ -756,11 +762,68 @@ class PIMQuantizedRuntime:
             self._profile_totals[field] += float(profile.get(field, 0.0) or 0.0)
         self._profile_load_count += 1
 
-    def _record_run_profile(self) -> None:
+    def _record_run_profile(self, count: int = 1) -> None:
         profile = self.last_profile()
         for field in self.PROFILE_RUN_FIELDS:
             self._profile_totals[field] += float(profile.get(field, 0.0) or 0.0)
-        self._profile_run_count += 1
+        self._profile_run_count += max(0, int(count))
+
+    def infer_many_raw(
+        self,
+        requests: list[tuple[torch.Tensor, int, int, int]],
+    ) -> list[torch.Tensor]:
+        """Run multiple already-preloaded slots through one ctypes call.
+
+        Each request is ``(inputs, slot_id, padded_input_dim, padded_output_dim)``.
+        Outputs are returned with the full padded output dimension; callers
+        that use concatenated bundles are responsible for splitting/slicing.
+        """
+        if not requests:
+            return []
+
+        inputs_prepared: list[torch.Tensor] = []
+        outputs: list[torch.Tensor] = []
+        batch_sizes: list[int] = []
+        slot_ids: list[int] = []
+        for inputs, slot_id, padded_input_dim, padded_output_dim in requests:
+            if inputs.ndim != 2:
+                raise ValueError("infer_many_raw expects 2D input tensors.")
+            effective_slot = int(slot_id)
+            if not (0 <= effective_slot < self.NUM_SLOTS):
+                raise ValueError(
+                    f"slot_id must be in [0, {self.NUM_SLOTS}); got {effective_slot}"
+                )
+            batch_size, input_dim = inputs.shape
+            inputs_f32 = inputs.detach().to(device="cpu", dtype=torch.float32, copy=True).contiguous()
+            if padded_input_dim != input_dim:
+                padded_inputs = torch.zeros(batch_size, padded_input_dim, dtype=torch.float32)
+                padded_inputs[:, :input_dim] = inputs_f32
+                inputs_f32 = padded_inputs
+            inputs_prepared.append(inputs_f32)
+            outputs.append(torch.empty(batch_size, padded_output_dim, dtype=torch.float32))
+            batch_sizes.append(int(batch_size))
+            slot_ids.append(effective_slot)
+
+        n = len(requests)
+        batch_arr = (ctypes.c_uint32 * n)(*batch_sizes)
+        slot_arr = (ctypes.c_uint32 * n)(*slot_ids)
+        input_ptrs = (ctypes.c_void_p * n)(*[ctypes.c_void_p(t.data_ptr()) for t in inputs_prepared])
+        output_ptrs = (ctypes.c_void_p * n)(*[ctypes.c_void_p(t.data_ptr()) for t in outputs])
+        error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
+        rc = self._lib.pim_quantized_run_many(
+            self._handle,
+            ctypes.c_uint32(n),
+            batch_arr,
+            input_ptrs,
+            output_ptrs,
+            slot_arr,
+            error_buffer,
+            len(error_buffer),
+        )
+        if rc != 0:
+            raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+        self._record_run_profile(count=n)
+        return outputs
 
     def profile_counters(self) -> dict[str, float | int]:
         result: dict[str, float | int] = {

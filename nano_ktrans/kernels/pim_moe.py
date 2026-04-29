@@ -189,6 +189,8 @@ class PIMMoEBackend(CPUMoEBackend):
                 *PIMQuantizedRuntime.PROFILE_RUN_FIELDS,
             )
         }
+        self.quantized_batched_expert_groups_local: int = 0
+        self.quantized_batched_experts_local: int = 0
         super().__init__(
             layer_idx=layer_idx,
             num_experts=num_experts,
@@ -517,6 +519,112 @@ class PIMMoEBackend(CPUMoEBackend):
         self.last_kernel_cycles = rt_down.last_cycles()
         return output
 
+    def _run_quantized_experts_batched_on_dpu(
+        self,
+        activated_cpu_experts: list[tuple[int, int, torch.Tensor, torch.Tensor]],
+        flat_cpu: torch.Tensor,
+        topk_weights_cpu: torch.Tensor,
+        output: torch.Tensor,
+    ) -> bool:
+        rt_gate_up = self.quantized_runtime
+        rt_down = self.quantized_runtime_down or self.quantized_runtime
+        if rt_gate_up is None or rt_down is None:
+            return False
+        if not activated_cpu_experts:
+            return False
+
+        kernel_mode = 4
+        gate_entries: list[dict[str, Any]] = []
+        pre_hits = rt_gate_up.preload_hits
+        pre_miss = rt_gate_up.preload_misses
+        pre_profile = self._snapshot_quantized_profile(rt_gate_up)
+        for expert_idx, cpu_slot, token_indices, match in activated_cpu_experts:
+            gptq = self._gptq_experts.get(cpu_slot)
+            if gptq is None:
+                return False
+            states = flat_cpu[token_indices]
+            base_eid = self._expert_id(cpu_slot)
+            gate_up_eid = base_eid ^ 0x1212121212121212
+            slot, padded_in, concat_rows, lhs_orig, rhs_orig = rt_gate_up.preload_concat_and_get_slot(
+                gate_up_eid,
+                gptq["gate"],
+                gptq["up"],
+                kernel_mode=kernel_mode,
+            )
+            gate_entries.append({
+                "expert_idx": expert_idx,
+                "cpu_slot": cpu_slot,
+                "token_indices": token_indices,
+                "match": match,
+                "states": states,
+                "slot": slot,
+                "padded_in": padded_in,
+                "concat_rows": concat_rows,
+                "lhs_orig": lhs_orig,
+                "rhs_orig": rhs_orig,
+                "base_eid": base_eid,
+                "gptq": gptq,
+            })
+
+        gate_outputs = rt_gate_up.infer_many_raw([
+            (entry["states"], entry["slot"], entry["padded_in"], entry["concat_rows"])
+            for entry in gate_entries
+        ])
+        self.quantized_preload_hits_local += (rt_gate_up.preload_hits - pre_hits)
+        self.quantized_preload_misses_local += (rt_gate_up.preload_misses - pre_miss)
+        self._accumulate_quantized_profile_delta(
+            pre_profile, self._snapshot_quantized_profile(rt_gate_up)
+        )
+
+        down_entries: list[dict[str, Any]] = []
+        pre_hits_d = rt_down.preload_hits
+        pre_miss_d = rt_down.preload_misses
+        pre_profile_d = self._snapshot_quantized_profile(rt_down)
+        for entry, gate_up_output in zip(gate_entries, gate_outputs):
+            gate = gate_up_output[:, :entry["lhs_orig"]].contiguous()
+            up = gate_up_output[:, entry["lhs_orig"] : entry["lhs_orig"] + entry["rhs_orig"]].contiguous()
+            hidden = F.silu(gate) * up
+            down_eid = entry["base_eid"] ^ 0x3333333333333333
+            slot, padded_in, padded_out, orig_out = rt_down.preload_and_get_slot(
+                down_eid,
+                entry["gptq"]["down"],
+                kernel_mode,
+            )
+            down_entries.append({
+                **entry,
+                "hidden": hidden,
+                "down_slot": slot,
+                "down_padded_in": padded_in,
+                "down_padded_out": padded_out,
+                "down_orig_out": orig_out,
+            })
+
+        down_outputs = rt_down.infer_many_raw([
+            (entry["hidden"], entry["down_slot"], entry["down_padded_in"], entry["down_padded_out"])
+            for entry in down_entries
+        ])
+        self.quantized_preload_hits_local += (rt_down.preload_hits - pre_hits_d)
+        self.quantized_preload_misses_local += (rt_down.preload_misses - pre_miss_d)
+        self._accumulate_quantized_profile_delta(
+            pre_profile_d, self._snapshot_quantized_profile(rt_down)
+        )
+
+        for entry, down_output in zip(down_entries, down_outputs):
+            expert_output = down_output[:, :entry["down_orig_out"]].contiguous()
+            token_indices = entry["token_indices"]
+            match = entry["match"]
+            row_idx, col_idx = torch.where(match[token_indices])
+            weights = topk_weights_cpu[token_indices[row_idx], col_idx].to(dtype=expert_output.dtype).unsqueeze(1)
+            output.index_add_(0, token_indices[row_idx], expert_output[row_idx] * weights)
+
+        n = len(down_entries)
+        self.real_dpu_quantized_calls += 2 * n
+        self.real_dpu_expert_calls += n
+        self.last_kernel_cycles = rt_down.last_cycles()
+        self.quantized_batched_expert_groups_local += 1
+        self.quantized_batched_experts_local += n
+        return True
+
     # ── Speculative preload at end of prefill ──────────────────────────
 
     def _speculative_preload(self, topk_ids: torch.Tensor) -> None:
@@ -817,6 +925,25 @@ class PIMMoEBackend(CPUMoEBackend):
         activated_cpu_experts.sort(
             key=lambda x: (1 if self._expert_id(x[1]) == resident_eid else 0,)
         )
+
+        # ADR-002 M-14: batch the common GPTQ quantized path before
+        # falling back to the legacy per-expert loop.  The batched path
+        # preserves Python routing/gather/index_add semantics but reduces
+        # ctypes crossings by grouping gate+up runs and down runs.
+        if self.is_gptq and self.quantized_runtime is not None and activated_cpu_experts:
+            all_quantized = all(cpu_slot in self._gptq_experts for _expert_idx, cpu_slot, _ti, _m in activated_cpu_experts)
+            if all_quantized:
+                try:
+                    if self._run_quantized_experts_batched_on_dpu(
+                        activated_cpu_experts,
+                        flat_cpu,
+                        topk_weights_cpu,
+                        output,
+                    ):
+                        self._fallback_output = output.to(device=device, dtype=hidden_states.dtype)
+                        return True
+                except Exception:
+                    self._record_fallback("expert_quantized_dpu_batched_run_failed")
 
         # ── Process each expert ────────────────────────────────────────
         for expert_idx, cpu_slot, token_indices, match in activated_cpu_experts:
@@ -1129,6 +1256,8 @@ class PIMMoEBackend(CPUMoEBackend):
                 "quantized_profile_run_count_local": self.quantized_profile_run_count_local,
                 "quantized_profile_seconds_sum_local": dict(self.quantized_profile_seconds_sum_local),
                 "quantized_profile_seconds_mean_local": profile_means,
+                "quantized_batched_expert_groups_local": self.quantized_batched_expert_groups_local,
+                "quantized_batched_experts_local": self.quantized_batched_experts_local,
                 # ADR-002 M-7: layer-group scoping + GPTQ speculative preload.
                 "pim_layer_group_size": self.pim_layer_group_size,
                 "pim_layer_group_id": self.layer_idx // max(1, self.pim_layer_group_size),

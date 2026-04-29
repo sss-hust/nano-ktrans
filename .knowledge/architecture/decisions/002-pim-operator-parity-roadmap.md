@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-13 closed (quantized PIM native profile aggregation landed; launch/load timing quantified); M-14 active (C-level batched quantized expert execution using M-13 bottleneck data)
+status: M-14 closed (C-level run_many batching landed; e2e null/negative proves synchronous dpu_launch count, not ctypes crossing, is core bottleneck); M-15 active (true launch-count reduction / multi-slot single-launch kernel)
 created: 2026-04-22
 updated: 2026-04-29
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1500,3 +1500,53 @@ C-level batched quantized expert execution。建议先做最小可行版本：
 2. 在 Python runtime 层新增一个 batch runner，把同一层 active CPU experts 的 gate+up 或 down 请求合并成更少的 ctypes calls。
 3. C 侧先不做真正 `DPU_ASYNCHRONOUS`，先做 **batched synchronous loop inside one C API**，减少 Python roundtrip，并保持输出完全等价。
 4. 若 M-14A 证明 Python↔C roundtrip 是显著项，再推进 M-14B：C 侧 async submit/wait/readback 拆分。
+
+---
+
+## 22. M-14 执行结论（2026-04-29）：run_many 减少 ctypes crossing，但 e2e 负结果证明核心是同步 launch 次数
+
+### 22.1 实装
+
+M-14A 实现了最低风险的 C-level batching：
+
+- `host_quantized_bridge.c`：新增 `pim_quantized_run_many()`，一次 C API 接收多组 `(batch_size, input_ptr, output_ptr, slot_id)`，在 C 侧循环调用现有 `pim_quantized_run()`。
+- `PIMQuantizedRuntime`：新增 `infer_many_raw()`，以及 `preload_and_get_slot()` / `preload_concat_and_get_slot()`，让 Python 能先批量 preload，再批量 run。
+- `PIMMoEBackend`：新增 `_run_quantized_experts_batched_on_dpu()`：
+  - gate+up：同一层 active CPU experts 先逐个 preload 到 slot，然后通过一次 `infer_many_raw()` 批量 run。
+  - down：对 gate/up 输出做 `silu(gate)*up` 后，同样 batch run down。
+  - Python 仍保留 routing、token gather、weighted `index_add_`，因此风险较低。
+- diagnostics：新增 `quantized_batched_expert_groups_local` / `quantized_batched_experts_local`，并聚合到 `scheduler_summary`。
+
+### 22.2 真机数据
+
+| artifact | 策略 | status | decode_tps | decode_seconds | quantized calls | batched groups | batched experts | launch_seconds_sum | runtime_total_seconds_sum |
+|----------|------|--------|------------|----------------|-----------------|----------------|-----------------|--------------------|---------------------------|
+| `e2e_gptq_cuda_pim_M13_profile_diagnostics.json` | baseline | ok | 0.6071 | 52.71s | 7358 | — | — | 11.185s | 13.520s |
+| `e2e_gptq_cuda_pim_M14_run_many.json` | run_many all | ok | 0.5947 | 53.81s | 7334 | 1414 | 3667 | 11.205s | 13.623s |
+| `e2e_gptq_cuda_pim_M14_run_many_min2.json` | only batch if >=2 experts | ok | 0.5783 | 55.34s | 7200 | 1147 | 3318 | 11.033s | 13.458s |
+
+### 22.3 结论
+
+M-14 是一个有价值的负结果：
+
+1. **batched path 确实触发了**：`run_many all` 覆盖 1414 个 batched groups、3667 个 active CPU experts。
+2. **ctypes crossing 不是核心瓶颈**：虽然 gate+up/down run 的 ctypes 调用被合并，e2e 反而从 0.6071 降到 0.5947。
+3. **同步 `dpu_launch` 次数才是核心**：`launch_seconds_sum` 仍约 11.2s，因为 `run_many()` 内部仍然对每个 expert 同步 `dpu_launch()` 一次。只是把循环从 Python 移到 C，不减少 DPU launch count。
+4. **min2 策略更差**：只在至少 2 个 active CPU experts 时 batching，decode_tps 0.5783；说明分支/路径混合本身也有 overhead。
+
+### 22.4 M-14 dev_gate
+
+- `M-14 dev_gate PASS 9/9`
+- `run_many` 相对 M-13 decode_tps 比值约 0.98，未超过 5% 回归阈值。
+- 全量测试将在本 milestone 提交前继续跑通。
+
+### 22.5 M-15 方向
+
+M-15 必须做 **true launch-count reduction**，而不是 ctypes batching：
+
+- DPU kernel 接收 request table：`active_slot[]`、`batch_size[]`、`input_offset[]`、`output_offset[]`。
+- 一次 `dpu_launch()` 内处理同一层多个 experts / slots。
+- host 侧一次性把多个 experts 的 inputs 拼到 MRAM，outputs 也拼到连续 buffer。
+- 这样才能把 `launch_seconds_sum ≈ 11s` 降下来。
+
+备选低风险方向：继续扩大 `offload=92` 的 OOM envelope；但要超过 CPU，最终仍绕不开 launch-count reduction。
