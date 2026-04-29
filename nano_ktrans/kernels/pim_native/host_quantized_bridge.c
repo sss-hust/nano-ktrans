@@ -105,6 +105,23 @@ typedef struct {
     int8_t *input_i8_shards;
     int32_t *output_i32_shards;
     int16_t *runtime_lut_i16_shards;
+    uint32_t *load_qweight_shards;
+    float *load_scale_shards;
+    uint64_t *kernel_cycles;
+    float *output_shards;
+    float *input_scales;
+    uint64_t *input_bitplanes;
+    size_t valid_rows_capacity;
+    size_t lut_i16_shards_capacity;
+    size_t input_i8_shards_capacity;
+    size_t output_i32_shards_capacity;
+    size_t runtime_lut_i16_shards_capacity;
+    size_t load_qweight_shards_capacity;
+    size_t load_scale_shards_capacity;
+    size_t kernel_cycles_capacity;
+    size_t output_shards_capacity;
+    size_t input_scales_capacity;
+    size_t input_bitplanes_capacity;
     /* ADR-002 M-6.1: per-slot occupancy tracking.  Bit b set => slot b
      * has valid weights loaded.  Host-side LRU logic in Python sets the
      * active slot on every run; this flag just gates sanity checks. */
@@ -130,6 +147,37 @@ timespec_diff_seconds(const struct timespec *start, const struct timespec *end)
     const time_t sec = end->tv_sec - start->tv_sec;
     const long nsec = end->tv_nsec - start->tv_nsec;
     return (double)sec + ((double)nsec / 1000000000.0);
+}
+
+static int
+ensure_buffer(
+    void **buffer,
+    size_t *capacity,
+    size_t needed_count,
+    size_t element_size,
+    char *error_buffer,
+    size_t error_buffer_len,
+    const char *name)
+{
+    if (needed_count == 0) {
+        return 0;
+    }
+    if (*buffer != NULL && *capacity >= needed_count) {
+        return 0;
+    }
+    if (element_size != 0 && needed_count > (SIZE_MAX / element_size)) {
+        set_error(error_buffer, error_buffer_len, "%s buffer size overflow", name);
+        return -1;
+    }
+
+    void *new_buffer = realloc(*buffer, needed_count * element_size);
+    if (new_buffer == NULL) {
+        set_error(error_buffer, error_buffer_len, "failed to allocate %s buffer", name);
+        return -1;
+    }
+    *buffer = new_buffer;
+    *capacity = needed_count;
+    return 0;
 }
 
 static int
@@ -288,19 +336,24 @@ pim_quantized_load_weights(
         return -1;
     }
 
-    free(ctx->valid_rows);
-    free(ctx->lut_i16_shards);
-    ctx->lut_i16_shards = NULL;
-    free(ctx->runtime_lut_i16_shards);
-    ctx->runtime_lut_i16_shards = NULL;
-    ctx->valid_rows = calloc(ctx->nr_dpus, sizeof(*ctx->valid_rows));
-    qweight_shards = calloc((size_t)ctx->nr_dpus * shard_qweight_words, sizeof(*qweight_shards));
-    scale_shards = calloc((size_t)ctx->nr_dpus * shard_scale_floats, sizeof(*scale_shards));
-    lut_i16_shards = calloc((size_t)ctx->nr_dpus * shard_lut_i16, sizeof(*lut_i16_shards));
-    if (ctx->valid_rows == NULL || qweight_shards == NULL || scale_shards == NULL || lut_i16_shards == NULL) {
-        set_error(error_buffer, error_buffer_len, "failed to allocate weight shard buffers");
+    const size_t total_qweight_words = (size_t)ctx->nr_dpus * shard_qweight_words;
+    const size_t total_scale_floats = (size_t)ctx->nr_dpus * shard_scale_floats;
+    const size_t total_lut_i16 = (size_t)ctx->nr_dpus * shard_lut_i16;
+    if (
+        ensure_buffer((void **)&ctx->valid_rows, &ctx->valid_rows_capacity,
+                      ctx->nr_dpus, sizeof(*ctx->valid_rows), error_buffer, error_buffer_len, "valid_rows") != 0
+        || ensure_buffer((void **)&ctx->load_qweight_shards, &ctx->load_qweight_shards_capacity,
+                         total_qweight_words, sizeof(*ctx->load_qweight_shards), error_buffer, error_buffer_len, "load_qweight_shards") != 0
+        || ensure_buffer((void **)&ctx->load_scale_shards, &ctx->load_scale_shards_capacity,
+                         total_scale_floats, sizeof(*ctx->load_scale_shards), error_buffer, error_buffer_len, "load_scale_shards") != 0
+        || ensure_buffer((void **)&ctx->lut_i16_shards, &ctx->lut_i16_shards_capacity,
+                         total_lut_i16, sizeof(*ctx->lut_i16_shards), error_buffer, error_buffer_len, "lut_i16_shards") != 0
+    ) {
         goto cleanup;
     }
+    qweight_shards = ctx->load_qweight_shards;
+    scale_shards = ctx->load_scale_shards;
+    lut_i16_shards = ctx->lut_i16_shards;
 
     clock_gettime(CLOCK_MONOTONIC, &total_start);
 
@@ -434,13 +487,8 @@ pim_quantized_load_weights(
     ctx->last_load_scale_transfer_seconds = timespec_diff_seconds(&scale_start, &scale_end);
     ctx->last_load_total_seconds = timespec_diff_seconds(&total_start, &total_end);
     rc = 0;
-    ctx->lut_i16_shards = lut_i16_shards;
-    lut_i16_shards = NULL;
 
 cleanup:
-    free(lut_i16_shards);
-    free(scale_shards);
-    free(qweight_shards);
     return rc;
 }
 
@@ -514,32 +562,33 @@ pim_quantized_run(
         return -1;
     }
 
-    kernel_cycles = calloc(ctx->nr_dpus, sizeof(*kernel_cycles));
-    output_shards = calloc((size_t)ctx->nr_dpus * shard_output_floats, sizeof(*output_shards));
-    if (ctx->kernel_mode == 4 || ctx->kernel_mode == 5 || ctx->kernel_mode == 6 || ctx->kernel_mode == 7) {
-        input_i8_shards = calloc(input_i8_count, sizeof(*input_i8_shards));
-        output_i32_shards = calloc((size_t)ctx->nr_dpus * shard_output_i32, sizeof(*output_i32_shards));
-        if (ctx->kernel_mode == 5) {
-            runtime_lut_i16_shards = calloc(runtime_lut_i16_count, sizeof(*runtime_lut_i16_shards));
-        }
-        if (ctx->kernel_mode == 4 || ctx->kernel_mode == 6 || ctx->kernel_mode == 7) {
-            input_scales = calloc(batch_size, sizeof(*input_scales));
-        }
-        if (ctx->kernel_mode == 7) {
-            input_bitplanes = calloc(bitplane_u64_count, sizeof(*input_bitplanes));
-        }
-    }
+    const bool int_kernel = (ctx->kernel_mode == 4 || ctx->kernel_mode == 5 || ctx->kernel_mode == 6 || ctx->kernel_mode == 7);
     if (
-        kernel_cycles == NULL || output_shards == NULL
-        || ((ctx->kernel_mode == 4 || ctx->kernel_mode == 5 || ctx->kernel_mode == 6 || ctx->kernel_mode == 7)
-            && (input_i8_shards == NULL || output_i32_shards == NULL))
-        || ((ctx->kernel_mode == 4 || ctx->kernel_mode == 6 || ctx->kernel_mode == 7) && input_scales == NULL)
-        || (ctx->kernel_mode == 5 && runtime_lut_i16_shards == NULL)
-        || (ctx->kernel_mode == 7 && input_bitplanes == NULL)
+        ensure_buffer((void **)&ctx->kernel_cycles, &ctx->kernel_cycles_capacity,
+                      ctx->nr_dpus, sizeof(*ctx->kernel_cycles), error_buffer, error_buffer_len, "kernel_cycles") != 0
+        || ensure_buffer((void **)&ctx->output_shards, &ctx->output_shards_capacity,
+                         (size_t)ctx->nr_dpus * shard_output_floats, sizeof(*ctx->output_shards), error_buffer, error_buffer_len, "output_shards") != 0
+        || (int_kernel && ensure_buffer((void **)&ctx->input_i8_shards, &ctx->input_i8_shards_capacity,
+                                        input_i8_count, sizeof(*ctx->input_i8_shards), error_buffer, error_buffer_len, "input_i8_shards") != 0)
+        || (int_kernel && ensure_buffer((void **)&ctx->output_i32_shards, &ctx->output_i32_shards_capacity,
+                                        (size_t)ctx->nr_dpus * shard_output_i32, sizeof(*ctx->output_i32_shards), error_buffer, error_buffer_len, "output_i32_shards") != 0)
+        || (ctx->kernel_mode == 5 && ensure_buffer((void **)&ctx->runtime_lut_i16_shards, &ctx->runtime_lut_i16_shards_capacity,
+                                                   runtime_lut_i16_count, sizeof(*ctx->runtime_lut_i16_shards), error_buffer, error_buffer_len, "runtime_lut_i16_shards") != 0)
+        || ((ctx->kernel_mode == 4 || ctx->kernel_mode == 6 || ctx->kernel_mode == 7)
+            && ensure_buffer((void **)&ctx->input_scales, &ctx->input_scales_capacity,
+                             batch_size, sizeof(*ctx->input_scales), error_buffer, error_buffer_len, "input_scales") != 0)
+        || (ctx->kernel_mode == 7 && ensure_buffer((void **)&ctx->input_bitplanes, &ctx->input_bitplanes_capacity,
+                                                   bitplane_u64_count, sizeof(*ctx->input_bitplanes), error_buffer, error_buffer_len, "input_bitplanes") != 0)
     ) {
-        set_error(error_buffer, error_buffer_len, "failed to allocate run buffers");
         goto cleanup;
     }
+    kernel_cycles = ctx->kernel_cycles;
+    output_shards = ctx->output_shards;
+    input_i8_shards = ctx->input_i8_shards;
+    output_i32_shards = ctx->output_i32_shards;
+    runtime_lut_i16_shards = ctx->runtime_lut_i16_shards;
+    input_scales = ctx->input_scales;
+    input_bitplanes = ctx->input_bitplanes;
 
     clock_gettime(CLOCK_MONOTONIC, &total_start);
 
@@ -818,13 +867,6 @@ pim_quantized_run(
     rc = 0;
 
 cleanup:
-    free(runtime_lut_i16_shards);
-    free(input_scales);
-    free(input_bitplanes);
-    free(output_i32_shards);
-    free(input_i8_shards);
-    free(output_shards);
-    free(kernel_cycles);
     return rc;
 }
 
@@ -838,7 +880,15 @@ pim_quantized_shutdown(void *handle)
 
     free(ctx->valid_rows);
     free(ctx->lut_i16_shards);
+    free(ctx->input_i8_shards);
+    free(ctx->output_i32_shards);
     free(ctx->runtime_lut_i16_shards);
+    free(ctx->load_qweight_shards);
+    free(ctx->load_scale_shards);
+    free(ctx->kernel_cycles);
+    free(ctx->output_shards);
+    free(ctx->input_scales);
+    free(ctx->input_bitplanes);
     dpu_free(ctx->set);
     free(ctx);  /* handle is invalid after this call. */
 }
