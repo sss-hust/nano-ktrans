@@ -8617,3 +8617,32 @@ class TestPIMQuantizedBatchedRunM14:
         })
         assert summary["quantized_batched_expert_groups"] == 3
         assert summary["quantized_batched_experts"] == 12
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-15 — true single-launch request-table mode
+# ----------------------------------------------------------------------
+
+
+class TestPIMQuantizedSingleLaunchRequestTableM15:
+    """M-15 makes run_many reduce dpu_launch count, not just ctypes crossings."""
+
+    def test_dpu_kernel_exposes_request_table_symbols(self):
+        from pathlib import Path
+
+        src = Path("/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_native/dpu_quantized_kernel.c").read_text()
+        assert "MAX_RUN_REQUESTS" in src
+        assert "run_request_count" in src
+        assert "request_active_slots" in src
+        assert "run_request_count > 0" in src
+        assert "request_active_slots[batch_idx]" in src
+
+    def test_host_run_many_uses_single_launch_hot_path(self):
+        from pathlib import Path
+
+        src = Path("/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_native/host_quantized_bridge.c").read_text()
+        assert "dpu_broadcast_to(ctx->set, \"run_request_count\"" in src
+        assert "dpu_broadcast_to(ctx->set, \"request_active_slots\"" in src
+        assert "dpu_launch(ctx->set, DPU_SYNCHRONOUS)" in src
+        assert "dpu_launch(run_many)" in src
+        assert "ctx->kernel_mode != 4 || !all_batch_one" in src

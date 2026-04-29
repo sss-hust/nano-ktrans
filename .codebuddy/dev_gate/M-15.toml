@@ -1,0 +1,85 @@
+milestone_id = "M-15"
+title = "True single-launch request table for quantized PIM run_many: launch_seconds 11.2s→9.57s, decode TPS 0.595→0.640"
+
+prerequisites = ["M-14"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M14_run_many.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M15_single_launch_request_table.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M15_single_launch_request_table.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 88 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M15_single_launch_request_table.json",
+]
+
+next_tasks = [
+    "M-16: push request-table batching deeper into load/preload or gate+up/down combined scheduling; load_total_seconds remains a large contributor.",
+    "M-16: extend request-table mode beyond batch_size=1 if prefill/decode batching scenarios become important.",
+    "M-16: combine M-15 request-table launch reduction with offload=92 safety envelope to test whether >0.7 TPS is stable.",
+]
+
+# M-15 conclusion:
+#   - Added DPU request-table mode for kernel_mode=4: run_request_count + request_active_slots.
+#   - Host run_many now packs batch=1 requests into one inputs_i8_mram/output_i32_mram span,
+#     broadcasts request_active_slots, launches once, and deinterleaves outputs.
+#   - Non-hot paths (non-mode4 or batch_size != 1) fall back to M-14 run_many loop.
+#   - This is the first milestone to directly reduce dpu_launch count.
+
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-15 request-table e2e run must complete."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget in M-15 primary run."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.63
+reason   = "M-15 should improve over M-14 and clear the 0.63 TPS threshold."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M15_single_launch_request_table.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M14_run_many.json"
+path              = "results[0].runs[0].decode_tokens_per_second"
+op                = ">="
+value             = 1.05
+reason            = "M-15 true launch-count reduction should improve M-14 by at least 5%."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_profile_launch_seconds_sum"
+op       = "<"
+value    = 10.0
+reason   = "launch_seconds_sum should drop below 10s after true request-table batching."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M14_run_many.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M15_single_launch_request_table.json"
+path              = "results[0].scheduler_summary.quantized_profile_launch_seconds_sum"
+op                = ">="
+value             = 1.10
+reason            = "M-14 launch time should be at least 10% higher than M-15."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_batched_expert_groups"
+op       = ">="
+value    = 1000
+reason   = "request-table batched path must fire across many layer/decode calls."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_batched_experts"
+op       = ">="
+value    = 3000
+reason   = "request-table batched path must cover thousands of active CPU experts."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_profile_runtime_total_seconds_sum"
+op       = "<"
+value    = 12.0
+reason   = "runtime_total_seconds_sum should drop materially from M-14's ~13.6s."
