@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-12 closed (host-side quantized PIM buffer reuse landed; e2e neutral at offload=88, optional offload=92 stable on long/32 but not default); M-13 active (diagnostics aggregation then C-level batched quantized expert execution)
+status: M-13 closed (quantized PIM native profile aggregation landed; launch/load timing quantified); M-14 active (C-level batched quantized expert execution using M-13 bottleneck data)
 created: 2026-04-22
 updated: 2026-04-29
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1431,3 +1431,72 @@ M-11 把默认 `offload_device_experts` 提到 88 后，端到端瓶颈已经不
 `HybridMoE.forward()` → `PIMMoEBackend.submit_forward()` → `_submit_forward_real()` → Python 遍历 active CPU experts → `_run_expert_quantized_on_dpu()` → `preload_and_infer_concat()` + `preload()` + `infer()` → 多次 ctypes `pim_quantized_load_weights` / `pim_quantized_run`。
 
 目标：把每层 active CPU experts 的 gate+up/down 序列尽量压进更少的 C API 调用，减少 Python↔C roundtrip 和 per-expert host 调度。真正的 C-level async/batching 要求 C 侧能持有请求队列和中间 hidden buffer；风险高于 M-13A。
+
+---
+
+## 21. M-13 执行结论（2026-04-29）：native profile 聚合让 PIM 时间构成可见
+
+### 21.1 实装
+
+M-13A 先做观测，不做深工程：
+
+- `PIMQuantizedRuntime`：围绕 `pim_quantized_load_weights()` / `pim_quantized_run()` 增加累计计数器：
+  - `load_count` / `run_count`
+  - `load_qweight_transfer_seconds_sum`
+  - `load_scale_transfer_seconds_sum`
+  - `load_total_seconds_sum`
+  - `input_transfer_seconds_sum`
+  - `launch_seconds_sum`
+  - `output_transfer_seconds_sum`
+  - `runtime_total_seconds_sum`
+- `PIMMoEBackend`：因为 `PIMQuantizedRuntime` 是跨层共享对象，所以每层用 before/after delta 聚合到本地 diagnostics。
+- `summarize_offload_diagnostics()`：把每层 profile 聚合成 benchmark 顶层 `scheduler_summary` 字段，便于 dev_gate 和报告直接读取。
+- `tests/test_core.py`：新增 M-13 单测覆盖 per-layer diagnostics 和 scheduler summary 聚合。
+
+### 21.2 真机数据
+
+Artifact：`benchmarks/results/e2e_gptq_cuda_pim_M13_profile_diagnostics.json`
+
+| 指标 | 值 |
+|------|----|
+| status | ok |
+| generated_tokens | 32 |
+| decode_tps | 0.6071 |
+| decode_seconds | 52.71s |
+| prefill_seconds | 25.12s |
+| quantized_profile_load_count | 7358 |
+| quantized_profile_run_count | 7358 |
+| load_total_seconds_sum | 13.724s |
+| input_transfer_seconds_sum | 0.543s |
+| launch_seconds_sum | 11.185s |
+| output_transfer_seconds_sum | 1.526s |
+| runtime_total_seconds_sum | 13.520s |
+| load_total_seconds_mean | 1.865ms/call |
+| launch_seconds_mean | 1.520ms/call |
+| runtime_total_seconds_mean | 1.837ms/call |
+
+### 21.3 解释
+
+M-13 解释了 M-12 为什么中性：`malloc/free` 不是最大项。真机总量里：
+
+- `load_total_seconds_sum ≈ 13.7s`
+- `runtime_total_seconds_sum ≈ 13.5s`
+- 其中 `launch_seconds_sum ≈ 11.2s`
+- `input_transfer_seconds_sum ≈ 0.54s`，`output_transfer_seconds_sum ≈ 1.53s`
+
+说明瓶颈不是 activation/input DMA，而是 **每次 DPU call 的同步 launch + 每 expert bundle 的 load/run 调度成本**。这支持 M-14 的方向：减少 call 数、减少同步边界、减少 Python↔C 往返，而不是继续打磨 input/output transfer。
+
+### 21.4 验收
+
+- `M-13 dev_gate PASS 9/9`
+- `249 passed, 1 warning`
+- e2e decode_tps 0.6071，符合观测型 milestone 不显著回归的预期。
+
+### 21.5 M-14 推荐目标
+
+C-level batched quantized expert execution。建议先做最小可行版本：
+
+1. 保留 Python 的 routing / token gather / final weighted `index_add_`，降低重写风险。
+2. 在 Python runtime 层新增一个 batch runner，把同一层 active CPU experts 的 gate+up 或 down 请求合并成更少的 ctypes calls。
+3. C 侧先不做真正 `DPU_ASYNCHRONOUS`，先做 **batched synchronous loop inside one C API**，减少 Python roundtrip，并保持输出完全等价。
+4. 若 M-14A 证明 Python↔C roundtrip 是显著项，再推进 M-14B：C 侧 async submit/wait/readback 拆分。

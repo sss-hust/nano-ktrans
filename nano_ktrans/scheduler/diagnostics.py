@@ -446,6 +446,17 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
             "deferred": 0,
             "applied": 0,
         },
+        "quantized_profile_load_count": 0,
+        "quantized_profile_run_count": 0,
+        "quantized_profile_seconds_sum": {
+            "load_qweight_transfer_seconds": 0.0,
+            "load_scale_transfer_seconds": 0.0,
+            "load_total_seconds": 0.0,
+            "input_transfer_seconds": 0.0,
+            "launch_seconds": 0.0,
+            "output_transfer_seconds": 0.0,
+            "runtime_total_seconds": 0.0,
+        },
         "prefetch_hit_rate": None,
         "dedupe_ratio": None,
         "decode_ready_rate": None,
@@ -774,6 +785,15 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
 
         backend = layer.get("backend") or {}
         summary["migration_submit_calls"] += int(backend.get("migration_submit_calls", 0))
+        summary["quantized_profile_load_count"] += int(
+            backend.get("quantized_profile_load_count_local", 0) or 0
+        )
+        summary["quantized_profile_run_count"] += int(
+            backend.get("quantized_profile_run_count_local", 0) or 0
+        )
+        profile_sums = backend.get("quantized_profile_seconds_sum_local") or {}
+        for field in summary["quantized_profile_seconds_sum"]:
+            summary["quantized_profile_seconds_sum"][field] += float(profile_sums.get(field, 0.0) or 0.0)
         for migration_layer in backend.get("migration_manager", {}).get("layers", []):
             summary["migration_total_enqueued_ops"] += int(migration_layer.get("total_enqueued_ops", 0))
             summary["migration_total_deduped_ops"] += int(migration_layer.get("total_deduped_ops", 0))
@@ -803,6 +823,15 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
             summary["migration_applied_events"] += int(migration_layer.get("total_applied_events", 0))
             for key in summary["migration_lifecycle_counts"]:
                 summary["migration_lifecycle_counts"][key] += int(lifecycle_counts.get(key, 0))
+
+    for field, value in summary["quantized_profile_seconds_sum"].items():
+        summary[f"quantized_profile_{field}_sum"] = value
+        denom = (
+            summary["quantized_profile_load_count"]
+            if field.startswith("load_")
+            else summary["quantized_profile_run_count"]
+        )
+        summary[f"quantized_profile_{field}_mean"] = (value / denom) if denom > 0 else None
 
     total_prefetch_decisions = summary["decode_prefetch_hits"] + summary["decode_prefetch_misses"]
     if total_prefetch_decisions > 0:
