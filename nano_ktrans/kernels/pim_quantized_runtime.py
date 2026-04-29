@@ -28,6 +28,17 @@ class PIMQuantizedRuntime:
     # N > top_k (Qwen3 uses top_k=8) lets a decode step that revisits
     # an expert in the next step find its bundle still resident.
     NUM_SLOTS = 8
+    PROFILE_LOAD_FIELDS = (
+        "load_qweight_transfer_seconds",
+        "load_scale_transfer_seconds",
+        "load_total_seconds",
+    )
+    PROFILE_RUN_FIELDS = (
+        "input_transfer_seconds",
+        "launch_seconds",
+        "output_transfer_seconds",
+        "runtime_total_seconds",
+    )
 
     _shared: dict[tuple[str, int], "PIMQuantizedRuntime"] = {}
     _shared_lock = threading.Lock()
@@ -151,6 +162,15 @@ class PIMQuantizedRuntime:
         # Stats
         self.preload_hits: int = 0
         self.preload_misses: int = 0
+
+        # ADR-002 M-13: cumulative native profile counters.  The C bridge
+        # exposes only "last call" timings; aggregate them here so callers
+        # can take before/after deltas and attribute per-layer PIM time.
+        self._profile_totals: dict[str, float] = {
+            field: 0.0 for field in (*self.PROFILE_LOAD_FIELDS, *self.PROFILE_RUN_FIELDS)
+        }
+        self._profile_load_count: int = 0
+        self._profile_run_count: int = 0
 
     @classmethod
     def get_shared(
@@ -433,6 +453,7 @@ class PIMQuantizedRuntime:
         # with anything that still reads them.  Semantics change
         # slightly: ``_resident_expert_id`` is now the most-recently
         # preloaded expert rather than the single occupant.
+        self._record_load_profile()
         self._loaded_signature = (padded_input_dim, padded_output_dim, group_size, km, expert_id)
         self._resident_expert_id = expert_id
         self.preload_misses += 1
@@ -491,6 +512,7 @@ class PIMQuantizedRuntime:
         )
         if rc != 0:
             raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+        self._record_run_profile()
 
         return outputs[:, :orig_output_dim].contiguous()
 
@@ -595,6 +617,7 @@ class PIMQuantizedRuntime:
             )
             if rc != 0:
                 raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+            self._record_load_profile()
             self._resident_expert_id = expert_id
             self._loaded_signature = (padded_in, concat_rows, lhs.group_size, kernel_mode, expert_id)
             self.preload_misses += 1
@@ -624,6 +647,7 @@ class PIMQuantizedRuntime:
         )
         if rc != 0:
             raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+        self._record_run_profile()
 
         # Split: first concat_lhs_orig rows go to lhs, next concat_rhs_orig to rhs.
         lhs_out = outputs[:, :concat_lhs_orig].contiguous()
@@ -687,6 +711,7 @@ class PIMQuantizedRuntime:
             )
             if rc != 0:
                 raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+            self._record_load_profile()
             self._loaded_signature = signature
 
         outputs = torch.empty(batch_size, padded_output_dim, dtype=torch.float32)
@@ -702,6 +727,7 @@ class PIMQuantizedRuntime:
         )
         if rc != 0:
             raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+        self._record_run_profile()
         return outputs[:, :output_dim].contiguous()
 
     # ── Query / diagnostics ─────────────────────────────────────────────
@@ -723,6 +749,27 @@ class PIMQuantizedRuntime:
             "output_transfer_seconds": float(self._lib.pim_quantized_last_output_transfer_seconds(self._handle)),
             "runtime_total_seconds": float(self._lib.pim_quantized_last_total_seconds(self._handle)),
         }
+
+    def _record_load_profile(self) -> None:
+        profile = self.last_profile()
+        for field in self.PROFILE_LOAD_FIELDS:
+            self._profile_totals[field] += float(profile.get(field, 0.0) or 0.0)
+        self._profile_load_count += 1
+
+    def _record_run_profile(self) -> None:
+        profile = self.last_profile()
+        for field in self.PROFILE_RUN_FIELDS:
+            self._profile_totals[field] += float(profile.get(field, 0.0) or 0.0)
+        self._profile_run_count += 1
+
+    def profile_counters(self) -> dict[str, float | int]:
+        result: dict[str, float | int] = {
+            "load_count": self._profile_load_count,
+            "run_count": self._profile_run_count,
+        }
+        for field, value in self._profile_totals.items():
+            result[f"{field}_sum"] = float(value)
+        return result
 
     def num_dpus(self) -> int:
         return int(self._lib.pim_quantized_num_dpus(self._handle))

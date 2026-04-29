@@ -8479,3 +8479,99 @@ class TestHostQuantizedBridgeBufferReuseM12:
         assert "free(ctx->kernel_cycles)" in src
         assert "qweight_shards = calloc" not in src
         assert "input_i8_shards = calloc" not in src
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-13 — quantized PIM native profile diagnostics
+# ----------------------------------------------------------------------
+
+
+class TestPIMQuantizedProfileDiagnosticsM13:
+    """M-13 exposes load/input/launch/output timing aggregation."""
+
+    def test_pim_backend_diagnostics_exposes_profile_fields(self, tmp_path):
+        from nano_ktrans.kernels.pim_moe import PIMMoEBackend
+        from safetensors.torch import save_file
+
+        hidden_size = 64
+        intermediate_size = 32
+        num_experts = 2
+        tensors = {}
+        for e in range(num_experts):
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w1.weight"] = torch.randn(intermediate_size, hidden_size)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w3.weight"] = torch.randn(intermediate_size, hidden_size)
+            tensors[f"model.layers.0.block_sparse_moe.experts.{e}.w2.weight"] = torch.randn(hidden_size, intermediate_size)
+        save_file(tensors, str(tmp_path / "model.safetensors"))
+
+        backend = PIMMoEBackend(
+            layer_idx=0,
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            gpu_experts_mask=torch.zeros(num_experts, dtype=torch.bool),
+            weight_path=str(tmp_path),
+            pim_execution_mode="shadow",
+        )
+        diag = backend.diagnostics()
+        assert diag["quantized_profile_load_count_local"] == 0
+        assert diag["quantized_profile_run_count_local"] == 0
+        for field in (
+            "load_qweight_transfer_seconds",
+            "load_scale_transfer_seconds",
+            "load_total_seconds",
+            "input_transfer_seconds",
+            "launch_seconds",
+            "output_transfer_seconds",
+            "runtime_total_seconds",
+        ):
+            assert field in diag["quantized_profile_seconds_sum_local"]
+            assert field in diag["quantized_profile_seconds_mean_local"]
+
+    def test_summarize_offload_diagnostics_aggregates_quantized_profile(self):
+        from nano_ktrans.scheduler import summarize_offload_diagnostics
+
+        summary = summarize_offload_diagnostics({
+            "dynamic_scheduler": {"enabled": False},
+            "layer_count": 2,
+            "offload_refresh": {},
+            "layers": [
+                {
+                    "backend": {
+                        "quantized_profile_load_count_local": 2,
+                        "quantized_profile_run_count_local": 4,
+                        "quantized_profile_seconds_sum_local": {
+                            "load_qweight_transfer_seconds": 0.2,
+                            "load_scale_transfer_seconds": 0.1,
+                            "load_total_seconds": 0.5,
+                            "input_transfer_seconds": 0.4,
+                            "launch_seconds": 1.2,
+                            "output_transfer_seconds": 0.3,
+                            "runtime_total_seconds": 2.0,
+                        },
+                    }
+                },
+                {
+                    "backend": {
+                        "quantized_profile_load_count_local": 1,
+                        "quantized_profile_run_count_local": 2,
+                        "quantized_profile_seconds_sum_local": {
+                            "load_qweight_transfer_seconds": 0.1,
+                            "load_scale_transfer_seconds": 0.05,
+                            "load_total_seconds": 0.25,
+                            "input_transfer_seconds": 0.2,
+                            "launch_seconds": 0.6,
+                            "output_transfer_seconds": 0.15,
+                            "runtime_total_seconds": 1.0,
+                        },
+                    }
+                },
+            ],
+        })
+
+        assert summary["quantized_profile_load_count"] == 3
+        assert summary["quantized_profile_run_count"] == 6
+        assert summary["quantized_profile_load_total_seconds_sum"] == pytest.approx(0.75)
+        assert summary["quantized_profile_runtime_total_seconds_sum"] == pytest.approx(3.0)
+        assert summary["quantized_profile_load_total_seconds_mean"] == pytest.approx(0.25)
+        assert summary["quantized_profile_runtime_total_seconds_mean"] == pytest.approx(0.5)

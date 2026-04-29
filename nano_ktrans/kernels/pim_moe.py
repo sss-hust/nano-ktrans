@@ -177,6 +177,18 @@ class PIMMoEBackend(CPUMoEBackend):
         # depend on the aggregate of two singleton runtimes.
         self.quantized_preload_hits_local: int = 0
         self.quantized_preload_misses_local: int = 0
+        # ADR-002 M-13: per-layer deltas of PIMQuantizedRuntime native
+        # profile counters.  Runtime objects are shared across layers,
+        # so diagnostics must aggregate before/after deltas locally.
+        self.quantized_profile_load_count_local: int = 0
+        self.quantized_profile_run_count_local: int = 0
+        self.quantized_profile_seconds_sum_local: dict[str, float] = {
+            field: 0.0
+            for field in (
+                *PIMQuantizedRuntime.PROFILE_LOAD_FIELDS,
+                *PIMQuantizedRuntime.PROFILE_RUN_FIELDS,
+            )
+        }
         super().__init__(
             layer_idx=layer_idx,
             num_experts=num_experts,
@@ -353,6 +365,35 @@ class PIMMoEBackend(CPUMoEBackend):
         """Stable expert identity for DPU residency tracking."""
         return hash((self.layer_idx, cpu_slot)) & 0xFFFFFFFFFFFFFFFF
 
+    def _snapshot_quantized_profile(
+        self, runtime: Optional[PIMQuantizedRuntime]
+    ) -> dict[str, float | int]:
+        if runtime is None:
+            return {}
+        try:
+            return runtime.profile_counters()
+        except Exception:
+            return {}
+
+    def _accumulate_quantized_profile_delta(
+        self,
+        before: dict[str, float | int],
+        after: dict[str, float | int],
+    ) -> None:
+        if not after:
+            return
+        self.quantized_profile_load_count_local += max(
+            0, int(after.get("load_count", 0) or 0) - int(before.get("load_count", 0) or 0)
+        )
+        self.quantized_profile_run_count_local += max(
+            0, int(after.get("run_count", 0) or 0) - int(before.get("run_count", 0) or 0)
+        )
+        for field in self.quantized_profile_seconds_sum_local:
+            key = f"{field}_sum"
+            delta = float(after.get(key, 0.0) or 0.0) - float(before.get(key, 0.0) or 0.0)
+            if delta > 0.0:
+                self.quantized_profile_seconds_sum_local[field] += delta
+
     # ── Fused expert path (preload + infer) ────────────────────────────
 
     def _run_expert_fused_on_dpu(
@@ -442,6 +483,7 @@ class PIMMoEBackend(CPUMoEBackend):
         # global, so aggregating at the backend needs a local delta.
         pre_hits = rt_gate_up.preload_hits
         pre_miss = rt_gate_up.preload_misses
+        pre_profile = self._snapshot_quantized_profile(rt_gate_up)
 
         gate, up = rt_gate_up.preload_and_infer_concat(
             gate_up_eid,
@@ -452,16 +494,23 @@ class PIMMoEBackend(CPUMoEBackend):
         )
         self.quantized_preload_hits_local += (rt_gate_up.preload_hits - pre_hits)
         self.quantized_preload_misses_local += (rt_gate_up.preload_misses - pre_miss)
+        self._accumulate_quantized_profile_delta(
+            pre_profile, self._snapshot_quantized_profile(rt_gate_up)
+        )
 
         hidden = F.silu(gate) * up
 
         down_eid = base_eid ^ 0x3333333333333333
         pre_hits_d = rt_down.preload_hits
         pre_miss_d = rt_down.preload_misses
+        pre_profile_d = self._snapshot_quantized_profile(rt_down)
         rt_down.preload(down_eid, gptq["down"], kernel_mode)
         output = rt_down.infer(hidden)
         self.quantized_preload_hits_local += (rt_down.preload_hits - pre_hits_d)
         self.quantized_preload_misses_local += (rt_down.preload_misses - pre_miss_d)
+        self._accumulate_quantized_profile_delta(
+            pre_profile_d, self._snapshot_quantized_profile(rt_down)
+        )
 
         self.real_dpu_quantized_calls += 2
         self.real_dpu_expert_calls += 1
@@ -598,6 +647,7 @@ class PIMMoEBackend(CPUMoEBackend):
                     )
                     if rc != 0:
                         raise RuntimeError(err.value.decode("utf-8", errors="replace"))
+                    rt_gate_up._record_load_profile()
                     rt_gate_up.preload_misses += 1
                     rt_gate_up._resident_expert_id = gate_up_eid
 
@@ -988,6 +1038,15 @@ class PIMMoEBackend(CPUMoEBackend):
                 pass
 
     def diagnostics(self) -> dict[str, Any]:
+        profile_means: dict[str, Optional[float]] = {}
+        for field, value in self.quantized_profile_seconds_sum_local.items():
+            denom = (
+                self.quantized_profile_load_count_local
+                if field in PIMQuantizedRuntime.PROFILE_LOAD_FIELDS
+                else self.quantized_profile_run_count_local
+            )
+            profile_means[field] = (value / denom) if denom > 0 else None
+
         diagnostics = super().diagnostics()
         diagnostics.update(
             {
@@ -1063,6 +1122,13 @@ class PIMMoEBackend(CPUMoEBackend):
                 ),
                 "quantized_preload_hits_local": self.quantized_preload_hits_local,
                 "quantized_preload_misses_local": self.quantized_preload_misses_local,
+                # ADR-002 M-13: native PIM profile aggregation.  These
+                # fields are local to this MoE layer, unlike runtime-global
+                # counters on shared PIMQuantizedRuntime instances.
+                "quantized_profile_load_count_local": self.quantized_profile_load_count_local,
+                "quantized_profile_run_count_local": self.quantized_profile_run_count_local,
+                "quantized_profile_seconds_sum_local": dict(self.quantized_profile_seconds_sum_local),
+                "quantized_profile_seconds_mean_local": profile_means,
                 # ADR-002 M-7: layer-group scoping + GPTQ speculative preload.
                 "pim_layer_group_size": self.pim_layer_group_size,
                 "pim_layer_group_id": self.layer_idx // max(1, self.pim_layer_group_size),

@@ -1,0 +1,81 @@
+milestone_id = "M-13"
+title = "Quantized PIM native profile diagnostics: aggregate load/input/launch/output/runtime seconds into benchmark JSON"
+
+prerequisites = ["M-12"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M13_profile_diagnostics.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M13_profile_diagnostics.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 88 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M13_profile_diagnostics.json",
+]
+
+next_tasks = [
+    "M-14: use M-13 profile data to prioritize C-level batched quantized expert execution; launch_seconds_sum is ~11.2s and load_total_seconds_sum is ~13.7s over 7358 calls.",
+    "M-14: move per-layer active CPU expert sequencing below Python where possible; the target is fewer ctypes crossings and eventually fewer dpu_launch synchronization points.",
+]
+
+# M-13 conclusion:
+#   - Added PIMQuantizedRuntime cumulative profile counters around native
+#     pim_quantized_load_weights / pim_quantized_run calls.
+#   - Added PIMMoEBackend per-layer before/after delta aggregation because
+#     PIMQuantizedRuntime objects are shared across layers.
+#   - Added scheduler_summary aggregation so benchmark JSON exposes total
+#     load/input/launch/output/runtime seconds.
+#   - M-13 is observability-only; e2e tps is expected to remain within the
+#     M-11/M-12 envelope.
+
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-13 profile-diagnostics e2e run must complete."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget in M-13 profile artifact."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.58
+reason   = "observability-only M-13 must not materially regress below the M-11/M-12 0.61-ish envelope."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_profile_run_count"
+op       = ">="
+value    = 6000
+reason   = "profile aggregation must observe real quantized PIM run calls."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_profile_load_count"
+op       = ">="
+value    = 6000
+reason   = "profile aggregation must observe real quantized PIM load calls."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_profile_runtime_total_seconds_sum"
+op       = ">"
+value    = 10.0
+reason   = "runtime_total_seconds_sum must be populated from native profile counters."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_profile_launch_seconds_sum"
+op       = ">"
+value    = 5.0
+reason   = "launch_seconds_sum must be populated; M-13 data should quantify launch overhead."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_profile_load_total_seconds_mean"
+op       = ">"
+value    = 0.0
+reason   = "load mean must be computed from load_count."
+
+[[acceptance_checks]]
+path     = "results[0].offload_diagnostics.layers[0].backend.quantized_profile_seconds_sum_local.runtime_total_seconds"
+op       = "exists"
+reason   = "per-layer backend diagnostics must expose raw profile sums."
