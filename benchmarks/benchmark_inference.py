@@ -280,13 +280,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--offload-device-experts",
         type=int,
-        default=88,
+        default=92,
         help=(
-            "Experts kept on GPU for CUDA+offload backends. ADR-002 M-11 "
-            "real-hardware sweep on Qwen3-GPTQ-Int4 found 88 to be a safe "
-            "high-performance default on the 47GB GPU: 0.61-0.67 decode TPS "
-            "across short/medium/long prompts; 94 is faster on short/medium "
-            "but OOMs on the long prompt, and 95+ OOMs even on short."
+            "Experts kept on GPU for CUDA+offload backends. ADR-002 M-16 "
+            "promotes 92 as the current 47GB-card default after combining "
+            "M-15 single-launch request-table batching with a long-prompt "
+            "32-token OOM envelope: offload=92 is stable at ~0.66-0.67 "
+            "decode TPS and reduces PIM load/run calls versus 88; 94 remains "
+            "a short/medium peak option but OOMs on long prompts, and 95+ "
+            "OOMs even on short."
         ),
     )
     parser.add_argument(

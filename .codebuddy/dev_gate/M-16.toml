@@ -1,0 +1,103 @@
+milestone_id = "M-16"
+title = "Target remaining PIM load/run-call bottleneck with offload=92 default; short peak 0.700 TPS, long/32 safe"
+
+prerequisites = ["M-15"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M15_single_launch_request_table.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M16_offload92.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M16_offload94_short.json",
+    "benchmarks/results/residency_sweep_M16_long32_offload92.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M16_offload92.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 92 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M16_offload92.json",
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 94 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M16_offload94_short.json",
+    "python benchmarks/benchmark_residency_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --prompt-profiles long --offload-values 92 --max-new-tokens 32 --json-out benchmarks/results/residency_sweep_M16_long32_offload92.json",
+]
+
+next_tasks = [
+    "M-17: reduce load/preload cost directly: load_total_seconds remains ~12.5s at offload=92 and ~11.2s at offload=94.",
+    "M-17: test offload=92/94 with longer max_new_tokens=128 if runtime budget allows; 94 remains unsafe until long prompt evidence exists.",
+    "M-17: investigate hot-expert selection from observed routing instead of uniform first-N GPU residency to reduce CPU-side active experts without increasing memory."
+]
+
+# M-16 conclusion:
+#   - M-15 identified remaining primary bottleneck as number of PIM load/run calls.
+#   - Raising GPU-resident experts from 88 to 92 reduces active CPU experts and PIM calls.
+#   - M-16 promotes benchmark_inference.py default offload_device_experts from 88 to 92.
+#   - 94 is retained as short/medium peak but not default because historical long prompt 94 OOMs.
+
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-16 offload=92 e2e run must complete."
+
+[[acceptance_checks]]
+path     = "results[0].num_device_experts"
+op       = "=="
+value    = 92
+reason   = "M-16 primary artifact must use the promoted offload=92 configuration."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget in M-16 primary run."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.66
+reason   = "offload=92 should beat M-15 default 88 and land in the 0.66+ TPS range."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M16_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M15_single_launch_request_table.json"
+path              = "results[0].runs[0].decode_tokens_per_second"
+op                = ">="
+value             = 1.04
+reason            = "offload=92 should improve M-15 default 88 by at least 4%."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_profile_load_count"
+op       = "<"
+value    = 7000
+reason   = "offload=92 should reduce PIM load count below M-15's 7246."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M16_offload94_short.json"
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "offload=94 short-prompt peak run must complete."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M16_offload94_short.json"
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.69
+reason   = "offload=94 short prompt should reach the current peak ~0.70 TPS."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M16_long32_offload92.json"
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "offload=92 must be stable on long prompt / 32 decode tokens before becoming default."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M16_long32_offload92.json"
+path     = "results[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "long prompt safety probe must generate the full token budget."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M16_long32_offload92.json"
+path     = "results[0].cuda_max_memory_bytes"
+op       = "<"
+value    = 47000000000
+reason   = "offload=92 long/32 must remain below the 47GB-card hard OOM boundary."
