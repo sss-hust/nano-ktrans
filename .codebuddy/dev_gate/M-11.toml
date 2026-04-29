@@ -1,0 +1,106 @@
+milestone_id = "M-11"
+title = "Residency sweep: offload_device_experts=88 becomes safe default, decode TPS 0.284→0.623 (+119%)"
+
+prerequisites = ["M-10"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M11_default_offload88.json",
+    "benchmarks/results/residency_sweep_M11_short.json",
+    "benchmarks/results/residency_sweep_M11_high.json",
+    "benchmarks/results/residency_sweep_M11_boundary.json",
+    "benchmarks/results/residency_sweep_M11_boundary2.json",
+    "benchmarks/results/residency_sweep_M11_medium.json",
+    "benchmarks/results/residency_sweep_M11_long_safe.json",
+    "benchmarks/results/residency_sweep_M11_long.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M11_default_offload88.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_residency_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --prompt-profiles short --offload-values 2 16 32 48 64 --max-new-tokens 32 --json-out benchmarks/results/residency_sweep_M11_short.json",
+    "python benchmarks/benchmark_residency_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --prompt-profiles short --offload-values 80 96 --max-new-tokens 32 --json-out benchmarks/results/residency_sweep_M11_high.json",
+    "python benchmarks/benchmark_residency_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --prompt-profiles short --offload-values 84 88 92 --max-new-tokens 32 --json-out benchmarks/results/residency_sweep_M11_boundary.json",
+    "python benchmarks/benchmark_residency_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --prompt-profiles short --offload-values 94 95 --max-new-tokens 32 --json-out benchmarks/results/residency_sweep_M11_boundary2.json",
+    "python benchmarks/benchmark_residency_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --prompt-profiles medium --offload-values 80 88 94 --max-new-tokens 16 --json-out benchmarks/results/residency_sweep_M11_medium.json",
+    "python benchmarks/benchmark_residency_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --prompt-profiles long --offload-values 64 80 88 --max-new-tokens 8 --json-out benchmarks/results/residency_sweep_M11_long_safe.json",
+    "python benchmarks/benchmark_residency_sweep.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --prompt-profiles long --offload-values 94 --max-new-tokens 8 --json-out benchmarks/results/residency_sweep_M11_long.json",
+]
+
+next_tasks = [
+    "M-12: C-level batched quantized expert execution (pim_quantized_run_expert_batch) to reduce Python↔C roundtrips after residency default shift solved the largest easy win.",
+    "M-12: prompt-length OOM envelope for offload=88 under max_new_tokens=128/512 and medium/long prompts, before documenting it as production-safe beyond the current 32-token benchmark envelope.",
+    "M-12: if offload=88 remains stable, consider making example.py recommend --num-device-experts 88 for Qwen3-GPTQ on 47GB cards."
+]
+
+# M-11 conclusion:
+#   - offload_device_experts is the cheapest large lever discovered so far.
+#   - safe default raised from 2 to 88 for benchmark_inference.py.
+#   - short prompt peak = offload 94 (0.697 tps) but offload 95/96 OOM.
+#   - medium prompt offload 94 ok (0.717 tps).
+#   - long prompt offload 94 OOM; offload 92 ok (0.691 tps) and offload 88 ok (0.666 tps).
+#   - default 88 gives memory headroom while still delivering >2× M-9 and >1.9× M-10 offload=32.
+
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-11 default offload=88 e2e run must complete."
+
+[[acceptance_checks]]
+path     = "results[0].num_device_experts"
+op       = "=="
+value    = 88
+reason   = "benchmark_inference.py default offload_device_experts must now be 88."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget in M-11 final."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.55
+reason   = "offload=88 default must deliver at least 0.55 tok/s (M-9 final was 0.284; M-10 offload=32 was 0.351)."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M11_boundary2.json"
+path     = "summary.best.offload_device_experts"
+op       = "=="
+value    = 94
+reason   = "short-prompt boundary sweep must show 94 as the fastest non-OOM tested cell."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M11_boundary2.json"
+path     = "results[1].backend_status"
+op       = "=="
+value    = "oom"
+reason   = "short-prompt boundary sweep must show 95 OOM, proving 94 is near the limit and unsafe as a default."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M11_medium.json"
+path     = "summary.best.offload_device_experts"
+op       = "=="
+value    = 94
+reason   = "medium-prompt sweep must show 94 remains best among {80,88,94}."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M11_long.json"
+path     = "results[0].backend_status"
+op       = "=="
+value    = "oom"
+reason   = "long-prompt offload=94 must OOM; this is why M-11 chooses 88 as safer default, not peak 94."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M11_long_safe.json"
+path     = "summary.best.offload_device_experts"
+op       = "=="
+value    = 88
+reason   = "long-prompt safe sweep must show 88 is the best stable value among {64,80,88}."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/residency_sweep_M11_long_safe.json"
+path     = "summary.best.decode_tokens_per_second"
+op       = ">="
+value    = 0.60
+reason   = "long prompt offload=88 must still be materially faster than offload=32 era results."

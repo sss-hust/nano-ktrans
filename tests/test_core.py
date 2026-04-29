@@ -8398,3 +8398,60 @@ class TestPIMMoEBackendAsyncPimSubmit:
                 backend.sync_forward(hs, None)
         finally:
             reset_context()
+
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-11 — residency sweep + offload_device_experts=88 default
+# ----------------------------------------------------------------------
+
+
+class TestBenchmarkInferenceResidencyDefaultsM11:
+    """M-11 updates benchmark defaults and ships a residency sweep driver."""
+
+    def test_benchmark_inference_default_offload_is_88(self):
+        """M-11 real-hardware sweep selected 88 as the safe default:
+        94 is faster on short/medium but OOMs on long; 88 is stable
+        across short/medium/long prompts."""
+        import importlib.util
+        path = "/home/yangfu/nano-ktrans/benchmarks/benchmark_inference.py"
+        spec = importlib.util.spec_from_file_location("benchmark_inference", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        args = mod.parse_args.__globals__["argparse"].ArgumentParser()
+        # Rather than reconstruct the full parser from parse_args (which reads
+        # sys.argv), assert the source-level default and help text are present.
+        src = open(path).read()
+        assert "--offload-device-experts" in src
+        assert "default=88" in src
+        assert "ADR-002 M-11" in src
+        assert "94 is faster" in src
+
+    def test_residency_sweep_driver_exists(self):
+        from pathlib import Path
+        p = Path("/home/yangfu/nano-ktrans/benchmarks/benchmark_residency_sweep.py")
+        assert p.exists()
+        src = p.read_text()
+        assert "ADR-002 M-11" in src
+        assert "PROMPT_LIBRARY" in src
+        assert "--offload-values" in src
+        assert "summary" in src
+
+    def test_residency_sweep_artifact_records_oom_boundary(self):
+        """Boundary artifact: short prompt offload=94 OK, 95 OOM.
+        This is the key evidence for not promoting 94 as the default."""
+        import json
+        p = "/home/yangfu/nano-ktrans/benchmarks/results/residency_sweep_M11_boundary2.json"
+        d = json.load(open(p))
+        assert d["summary"]["best"]["offload_device_experts"] == 94
+        rows = {r["offload_device_experts"]: r for r in d["results"]}
+        assert rows[94]["status"] == "ok"
+        assert rows[95]["backend_status"] == "oom"
+
+    def test_residency_sweep_long_safe_best_is_88(self):
+        """Long prompt safe sweep picks 88 among {64,80,88}."""
+        import json
+        p = "/home/yangfu/nano-ktrans/benchmarks/results/residency_sweep_M11_long_safe.json"
+        d = json.load(open(p))
+        assert d["summary"]["best"]["offload_device_experts"] == 88
+        assert d["summary"]["best"]["decode_tokens_per_second"] >= 0.6

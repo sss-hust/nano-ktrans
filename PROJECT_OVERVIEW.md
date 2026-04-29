@@ -1380,3 +1380,48 @@ int pim_quantized_run_batch(
     └── journal/
         ├── 2026-04-07.md ... 2026-04-23.md       ← 每日开发日志
 ```
+
+
+---
+
+## 11. M-11 更新补充（2026-04-28）
+
+M-11 是 M-4 以来最大的真实 e2e decode 胜利：通过系统扫 `offload_device_experts`，把 `benchmark_inference.py` 默认值从 2 改为 **88**。
+
+### M-11 sweep 关键结果
+
+| prompt | offload | status | decode_tps |
+|---|---:|---|---:|
+| short | 2 | ok | 0.293 |
+| short | 32 | ok | 0.362 |
+| short | 64 | ok | 0.477 |
+| short | 88 | ok | 0.614 |
+| short | 94 | ok | **0.697** |
+| short | 95/96 | OOM | — |
+| medium | 88 | ok | 0.632 |
+| medium | 94 | ok | **0.717** |
+| long | 88 | ok | **0.666** |
+| long | 92 | ok | 0.691 |
+| long | 94 | OOM | — |
+
+### 新默认为什么是 88
+
+94 是 peak，但 long prompt OOM；92 可跑 long 8-token 但更贴边；88 在 short/medium/long 都稳定，并且性能已经足够大幅领先此前默认。
+
+### M-11 final
+
+默认 88，不显式传 `--offload-device-experts`：
+- prefill_seconds = 21.97s
+- decode_seconds = 51.40s
+- generated_tokens = 32
+- **decode_tps = 0.6226**
+
+对比：
+- M-9 final 0.284 → **+119%**
+- M-10 offload=32 0.351 → **+78%**
+- M-4 peak 0.317 → **+96%**
+- CPU baseline 3.07 → ratio **0.203×**（仍差 4.9×，但相较 M-9 的 10.8× 已缩半）
+
+### M-11 最大教训
+
+配置空间扫描比深工程更便宜。此前大量 PIM kernel/runtime 优化都在努力减少每个 CPU-side expert 的成本；M-11 直接减少 CPU-side expert 数量本身（GPU 常驻 88/128 expert），所以收益巨大。

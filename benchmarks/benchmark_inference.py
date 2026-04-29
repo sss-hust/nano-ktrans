@@ -280,8 +280,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--offload-device-experts",
         type=int,
-        default=2,
-        help="Experts kept on GPU for the CUDA+CPU-offload backend.",
+        default=88,
+        help=(
+            "Experts kept on GPU for CUDA+offload backends. ADR-002 M-11 "
+            "real-hardware sweep on Qwen3-GPTQ-Int4 found 88 to be a safe "
+            "high-performance default on the 47GB GPU: 0.61-0.67 decode TPS "
+            "across short/medium/long prompts; 94 is faster on short/medium "
+            "but OOMs on the long prompt, and 95+ OOMs even on short."
+        ),
     )
     parser.add_argument(
         "--pim-rank-count",
