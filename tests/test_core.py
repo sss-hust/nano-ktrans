@@ -8730,3 +8730,73 @@ class TestPIMQuantizedHostLutCacheM17:
         # ``preload`` and ``preload_concat_and_get_slot`` no longer
         # call the legacy bridge entry point directly.
         assert "self._lib.pim_quantized_load_weights(\n            self._handle," not in src
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-17.2 — async DMA push + deferred sync at run/shutdown entry
+# ----------------------------------------------------------------------
+
+
+class TestPIMQuantizedAsyncDmaM17_2:
+    """M-17.2 issues weight DMA pushes with DPU_XFER_ASYNC and defers
+    dpu_sync to the next run / shutdown / next load."""
+
+    def test_host_quantized_bridge_uses_async_xfer_for_weight_pushes(self):
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_native/host_quantized_bridge.c"
+        ).read_text()
+        # All three weight pushes must be ASYNC.
+        assert "\"lut_mram\",\n                              (size_t)slot_id * LUT_INT16_PER_SLOT * sizeof(int16_t),\n                              shard_lut_i16 * sizeof(int16_t), DPU_XFER_ASYNC" in src
+        assert "\"qweight_mram\",\n                          (size_t)slot_id * WORDS_PER_SLOT * sizeof(uint32_t),\n                          shard_qweight_words * sizeof(uint32_t), DPU_XFER_ASYNC" in src
+        assert "\"scales_mram\",\n                          (size_t)slot_id * SCALES_PER_SLOT * sizeof(float),\n                          shard_scale_floats * sizeof(float), DPU_XFER_ASYNC" in src
+
+    def test_host_quantized_bridge_tracks_inflight_async_load(self):
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_native/host_quantized_bridge.c"
+        ).read_text()
+        # Context flag must exist.
+        assert "bool inflight_async_load;" in src
+        # Set after every async load.
+        assert "ctx->inflight_async_load = true;" in src
+        # Cleared by the flush helper.
+        assert "ctx->inflight_async_load = false;" in src
+
+    def test_host_quantized_bridge_flush_helper_called_at_every_entry(self):
+        """flush_inflight_async_load() must be invoked at the start of
+        every entry that touches the DPU set or overwrites the host
+        shard buffers, so the ASYNC pushes are guaranteed safe.
+        """
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_native/host_quantized_bridge.c"
+        ).read_text()
+        assert "static int\nflush_inflight_async_load(" in src
+        # load_weights_inner: protect ctx-owned shard buffer reuse.
+        assert "dpu_sync(flush before load_weights_inner)" in src
+        # pim_quantized_run: protect run path.
+        assert "dpu_sync(flush before pim_quantized_run)" in src
+        # pim_quantized_run_many: protect batched run path.
+        assert "dpu_sync(flush before pim_quantized_run_many)" in src
+        # shutdown: protect dpu_free.
+        assert "(void)dpu_sync(ctx->set);" in src
+
+    def test_host_quantized_bridge_load_path_no_longer_synchronous(self):
+        """The old synchronous DPU_XFER_DEFAULT pushes for the weight
+        symbols must be gone — otherwise we wouldn't be overlapping."""
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_native/host_quantized_bridge.c"
+        ).read_text()
+        assert "dpu_push_xfer(lut_mram)" not in src      # old sync error label
+        assert "dpu_push_xfer(qweight_mram)" not in src
+        assert "dpu_push_xfer(scales_mram)" not in src
+        # Asynchronous error labels must exist.
+        assert "dpu_push_xfer(lut_mram async)" in src
+        assert "dpu_push_xfer(qweight_mram async)" in src
+        assert "dpu_push_xfer(scales_mram async)" in src

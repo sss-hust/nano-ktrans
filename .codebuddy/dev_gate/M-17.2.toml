@@ -1,0 +1,77 @@
+milestone_id = "M-17.2"
+title = "Async DMA push for weight load + deferred dpu_sync at run/shutdown entry — overlaps weight DMA with kernel launch"
+
+prerequisites = ["M-17"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_lut_cache_offload92.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_2_async_dma_offload92.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_2_async_dma_offload92.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 92 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M17_2_async_dma_offload92.json",
+]
+
+next_tasks = [
+    "M-17.3: in PIMMoEBackend._run_quantized_experts_batched_on_dpu, pre-issue down preload(s) before gate+up infer_many_raw so down weight DMA overlaps with gate+up DPU launch (requires extending the LRU model to keep all required slots live across the call).",
+    "M-17.4: investigate whether broadcast_to scalars (input_dim/output_dim/group_size/num_groups/kernel_mode) can be folded into one ASYNC group to shrink the residual ~6.8s load_total budget.",
+    "M-17.5: routing-aware GPU residency to further cut PIM call count (orthogonal to the DMA work).",
+]
+
+# M-17.2 conclusion:
+#   - Weight load (lut/qweight/scale) pushes are now DPU_XFER_ASYNC.
+#   - A new flush_inflight_async_load() helper drains pending DMAs at
+#     every entry that would race with the ctx-owned shard buffers
+#     (load_weights_inner re-entry, run, run_many, shutdown).
+#   - The 3 push segments inside a single load_weights call still
+#     overlap inside the SDK; cross-load overlap is bounded by host
+#     buffer reuse, but launch / next-load entry sync hides most of
+#     the residual transfer time behind the DPU compute.
+#   - load_qweight_transfer 2.14s -> 0.025s, load_scale_transfer
+#     0.527s -> 0.023s (these counters now measure async-issue time
+#     only — actual DMA finishes during the next sync, which lands
+#     inside launch_seconds).
+#   - decode_tps 0.6808 -> 0.7176 (+5.41%), beating the previous
+#     short-prompt peak (offload=94 short ~0.700) at the much safer
+#     offload=92 default.
+
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-17.2 async DMA e2e run must complete."
+
+[[acceptance_checks]]
+path     = "results[0].num_device_experts"
+op       = "=="
+value    = 92
+reason   = "M-17.2 must use the M-16/M-17.1 default offload=92 for an apples-to-apples comparison."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget in M-17.2 primary run."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.70
+reason   = "ASYNC DMA must push past the previous short-prompt peak ~0.70 TPS."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M17_2_async_dma_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_lut_cache_offload92.json"
+path              = "results[0].runs[0].decode_tokens_per_second"
+op                = ">="
+value             = 1.04
+reason            = "M-17.2 should improve M-17.1 LUT cache decode_tps by at least 4%."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M17_2_async_dma_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_lut_cache_offload92.json"
+path              = "results[0].scheduler_summary.quantized_profile_load_total_seconds_sum"
+op                = "<="
+value             = 0.80
+reason            = "ASYNC issue accounting should make load_total_seconds_sum drop below 80% of the M-17.1 baseline (most weight DMA is now hidden behind launch)."

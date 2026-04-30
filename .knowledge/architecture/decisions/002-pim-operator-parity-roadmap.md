@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-17.1 closed (host-precomputed LUT cache + new pim_quantized_load_weights_with_lut entry: load_total_seconds_sum 12.50s -> 10.88s, decode TPS 0.672 -> 0.681 at offload=92, +1.30%); M-17.2 active (overlap weight DMA with kernel launch, async push, pre-issue down preload during gate+up infer)
+status: M-17.2 closed (DPU_XFER_ASYNC for lut/qweight/scale + flush_inflight_async_load() at every run/load/shutdown entry: load_total_seconds_sum 10.88s -> 6.79s, decode TPS 0.6808 -> 0.7176 at offload=92, +5.41%, new short-prompt peak surpasses prior offload=94 0.700); M-17.3 active (pre-issue down preload during gate+up infer to overlap weight DMA with launch across calls)
 created: 2026-04-22
 updated: 2026-04-29
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1745,3 +1745,87 @@ profile 显示：
 1. **DMA × launch overlap（M-17.2）**：当前 lut/qweight/scale 三段 `dpu_push_xfer` 与之后的 `dpu_launch` 严格串行。`DPU_XFER_ASYNC` + `dpu_sync` 让 push 与上一轮 launch 重叠是直接候选。
 2. **gate+up 与 down preload 流水（M-17.3）**：在 `_run_quantized_experts_batched_on_dpu` 中，down 的 preload 当前发生在 gate+up `infer_many_raw` *之后*；可以提前到之前发起，使 down weight DMA 与 gate+up DPU launch 重叠。
 3. **routing-aware GPU residency**：M-16 后的低风险 envelope 增长项；和上面两条工程优化正交，可以并行推进。
+
+---
+
+## 26. M-17.2 执行结论（2026-04-30）：DPU_XFER_ASYNC 让 weight DMA 与 kernel launch 重叠，单步 +5.41% 直接突破 0.71 TPS
+
+### 26.1 背景
+
+M-17.1 之后剩余 `load_total_seconds_sum ≈ 10.88s` 中：
+- `load_qweight_transfer ≈ 2.14s`（qweight DMA）
+- `load_scale_transfer ≈ 0.53s`（scale DMA）
+- 剩余 ~8.2s 是 LUT push（mode=4 路径下 lut DMA 远比 qweight 大，~17KB→128KB 取决于配置）+ ctx buffer memcpy + scalar broadcast。
+
+这些 push 当前都是 `DPU_XFER_DEFAULT`（同步），每段 push 都让 host 等到 DMA 真的完成。但其实 DMA 之后立刻调用 `dpu_launch(SYNC)`——push 完成 + launch 完成是 host 真正需要的 fence；中间的多次 sync 是不必要的串行。
+
+### 26.2 实装
+
+**C bridge** (`host_quantized_bridge.c`)
+
+- `pim_q_ctx_t` 加字段 `bool inflight_async_load`；calloc 自动初始化为 false。
+- 新增 `static int flush_inflight_async_load(ctx, ...)`：当且仅当 `inflight_async_load == true` 时调用 `dpu_sync(ctx->set)` 并清标志，否则零开销 no-op。
+- `load_weights_inner`：
+  - 入口先调用 `flush_inflight_async_load`（**关键正确性约束**：M-12 的 ctx-owned shard buffer 跨调用复用，前一次的 ASYNC DMA 必须先完成才能覆写 host buffer；否则会读到部分覆写后的脏数据，本里程碑 first-cut 真机测试因此暴露 numerical bug，立即修正）。
+  - 三段 weight push（lut/qweight/scale）改为 `DPU_XFER_ASYNC`。
+  - 函数末尾不 sync，置 `inflight_async_load = true`。
+- `pim_quantized_run` 入口：在 slot validity check 之后立刻 `flush_inflight_async_load`。
+- `pim_quantized_run_many` 入口：在参数校验之后立刻 `flush_inflight_async_load`。
+- `pim_quantized_shutdown` 入口：tear-down 之前 `dpu_sync` + 清标志，避免 `dpu_free` 时还有 inflight DMA。
+
+**没改 Python 端**：因为 ASYNC 行为对 Python 完全透明——run/shutdown 入口自动 flush，调用方不需要知道有 inflight 状态。
+
+### 26.3 真机数据
+
+| artifact | 配置 | status | decode_tps | decode_seconds | load_total_sum | load_qweight_sum | load_scale_sum | launch_sum | runtime_total_sum |
+|----------|------|--------|------------|----------------|----------------|------------------|----------------|------------|-------------------|
+| `e2e_gptq_cuda_pim_M17_lut_cache_offload92.json` | M-17.1 baseline | ok | 0.6808 | 47.01s | 10.876s | 2.138s | 0.527s | 8.785s | 10.112s |
+| `e2e_gptq_cuda_pim_M17_2_async_dma_offload92.json` | **M-17.2 ASYNC** | ok | **0.7176** | **44.59s** | **6.793s** | **0.025s** | **0.023s** | 8.995s | 10.319s |
+
+### 26.4 结论
+
+- **decode TPS：`0.6808 → 0.7176`，+5.41%**。
+- **新短提示峰值 0.7176 TPS 直接超过 M-16 的 short/offload=94 历史峰值 0.700 TPS**，并且是在更安全的 `offload=92` 默认配置下达到的。
+- `load_qweight_transfer` 2.14s → **0.025s**（−98.8%），`load_scale_transfer` 0.527s → **0.023s**（−95.6%）。**注意这是 ASYNC 计时语义变化**：`clock_gettime` 现在只测到 host 把 DMA 请求交给 SDK 的瞬间，DMA 真正完成的时间被推到下一次 `dpu_sync`（也就是吸收到 `launch_seconds` 或下一次 load 入口的 flush 中）。所以这两个数变小**不**等于 DMA 字节数减少，而是 DMA 与 launch 真的重叠了。
+- `launch_sum` 仅 +0.21s（8.785→8.995），`load_total_sum` 减少 4.08s。**净收益 ≈ −3.87s**，对应 decode 总时间 47.01s → 44.59s（−2.42s，差额是 Python/host 端非 PIM 工作占了一部分，但仍然有 +5.41%）。
+
+### 26.5 正确性回溯
+
+M-17.2 first-cut（push 全部改 ASYNC，但**没在 load_weights_inner 入口加 flush**）在 `tests/test_pim_runtime.py::test_pim_quantized_runtime_infer_many_raw_matches_individual_cpu`（真机测试）跑挂了：跨 expert preload 的输出全部错乱。
+
+根因：M-12 之后 host 端 `load_qweight_shards / load_scale_shards / lut_i16_shards` 是 ctx 级共享单一 buffer，**第二次 preload_concat_and_get_slot 在 host 上覆写同一段 buffer 时，第一次的 ASYNC DMA 还在读这段 buffer**，导致部分覆写后的混合数据被推到 DPU。
+
+修正：在 `load_weights_inner` 入口处先 flush 上一次 inflight async DMA。这放弃了“跨 expert preload 之间真实重叠”，但保留了：
+1. 单次 load 内 3 段 weight push 的 SDK 内部重叠。
+2. **load 与之后 launch 的重叠**——这个才是真正大头：load 完成后 host 立刻调用 `infer_many_raw`，但 `infer_many_raw` 内部第一段是 input push + DPU launch；ASYNC 让 host 在最后一段 weight push 后立刻进 infer 流程，weight DMA 与 input quantize/push、甚至 launch 自身都能在 SDK 里 pipeline。
+
+要做真正的“跨 expert preload 之间重叠”，必须给每个 expert 独立的 host shard buffer——这是 M-17.4 候选。
+
+### 26.6 M-17.2 验收
+
+- `M-17.2 dev_gate PASS 6/6`
+  - `decode_tps ≥ 0.70` 实测 **0.7176**
+  - vs M-17.1 比例 ≥ 1.04 实测 **1.054**
+  - `load_total_sum` 比例 ≤ 0.80 实测 **0.625**（远好于阈值）
+- 全量 pytest：`262 passed, 1 warning`（含新增 `TestPIMQuantizedAsyncDmaM17_2` 4 个用例）。
+- 真机回归 `tests/test_pim_runtime.py` 12 项全过，**关键** `test_pim_quantized_runtime_infer_many_raw_matches_individual_cpu` 跨 expert 数值仍正确。
+
+### 26.7 与 CPU 距离更新
+
+| backend | 配置 | decode_tps |
+|---|---|---|
+| CPU baseline | — | 3.07 |
+| PIM M-15 default | offload=88 | 0.6402 |
+| PIM M-16 default | offload=92 | 0.6721 |
+| PIM M-17.1 | offload=92 + LUT cache | 0.6808 |
+| PIM M-17.2 | offload=92 + LUT cache + ASYNC DMA | **0.7176** |
+
+落后 CPU 4.28×（M-16 时是 4.57×）。
+
+### 26.8 M-17.3 / M-17.4 方向
+
+剩余可挖掘点（按预期收益排序）：
+
+1. **跨调用 weight DMA 重叠（M-17.3）**：在 `_run_quantized_experts_batched_on_dpu` 中，**先**把 down 的 N 个 preload 全部下发（ASYNC，不 sync），再 `infer_many_raw(gate+up)`。这样 down 的 weight DMA 可以与 gate+up 的 launch + readback 重叠。难点：down preload 可能 evict gate+up 还在用的 slot——需要扩展 LRU 模型在一次 batched call 内 lock 一组 slot。
+2. **ctx-owned shard buffer 多缓冲（M-17.4）**：给 host shard buffer 做 N 路轮换，让 `load_weights_inner` 入口的 flush 不再 force 跨 expert 串行，进一步压缩 6.79s 的 `load_total_sum`。
+3. **routing-aware GPU residency**：和上面两条工程优化正交。
