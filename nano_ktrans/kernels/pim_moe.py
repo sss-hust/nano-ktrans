@@ -191,6 +191,9 @@ class PIMMoEBackend(CPUMoEBackend):
         }
         self.quantized_batched_expert_groups_local: int = 0
         self.quantized_batched_experts_local: int = 0
+        # ADR-002 M-17.3: counts how many batched groups successfully
+        # took the down-preload-before-gate-up-infer overlap path.
+        self.quantized_down_preload_overlap_local: int = 0
         super().__init__(
             layer_idx=layer_idx,
             num_experts=num_experts,
@@ -566,6 +569,32 @@ class PIMMoEBackend(CPUMoEBackend):
                 "gptq": gptq,
             })
 
+        # ADR-002 M-17.3: when down lives on a DISTINCT DPU rank pool
+        # (M-5 dual-runtime path), pre-issue all down preloads BEFORE
+        # gate+up infer.  Their lut/qweight/scale ASYNC pushes (M-17.2)
+        # then run on the down dpu_set in parallel with the gate+up
+        # launch on the gate_up dpu_set, hiding most of the down weight
+        # DMA behind gate+up compute and the host-side silu(gate)*up.
+        #
+        # When the two runtimes collapse to the same ctx (single-ctx
+        # fallback), pre-issuing down preload would let down evict
+        # slots that gate+up infer is about to read — keep the legacy
+        # ordering in that case.
+        down_preload_overlap = rt_down is not rt_gate_up
+        if down_preload_overlap:
+            pre_hits_d = rt_down.preload_hits
+            pre_miss_d = rt_down.preload_misses
+            pre_profile_d = self._snapshot_quantized_profile(rt_down)
+            down_preload_records: list[tuple[int, int, int, int]] = []
+            for entry in gate_entries:
+                down_eid = entry["base_eid"] ^ 0x3333333333333333
+                slot, padded_in, padded_out, orig_out = rt_down.preload_and_get_slot(
+                    down_eid,
+                    entry["gptq"]["down"],
+                    kernel_mode,
+                )
+                down_preload_records.append((slot, padded_in, padded_out, orig_out))
+
         gate_outputs = rt_gate_up.infer_many_raw([
             (entry["states"], entry["slot"], entry["padded_in"], entry["concat_rows"])
             for entry in gate_entries
@@ -577,19 +606,23 @@ class PIMMoEBackend(CPUMoEBackend):
         )
 
         down_entries: list[dict[str, Any]] = []
-        pre_hits_d = rt_down.preload_hits
-        pre_miss_d = rt_down.preload_misses
-        pre_profile_d = self._snapshot_quantized_profile(rt_down)
-        for entry, gate_up_output in zip(gate_entries, gate_outputs):
+        if not down_preload_overlap:
+            pre_hits_d = rt_down.preload_hits
+            pre_miss_d = rt_down.preload_misses
+            pre_profile_d = self._snapshot_quantized_profile(rt_down)
+        for i, (entry, gate_up_output) in enumerate(zip(gate_entries, gate_outputs)):
             gate = gate_up_output[:, :entry["lhs_orig"]].contiguous()
             up = gate_up_output[:, entry["lhs_orig"] : entry["lhs_orig"] + entry["rhs_orig"]].contiguous()
             hidden = F.silu(gate) * up
-            down_eid = entry["base_eid"] ^ 0x3333333333333333
-            slot, padded_in, padded_out, orig_out = rt_down.preload_and_get_slot(
-                down_eid,
-                entry["gptq"]["down"],
-                kernel_mode,
-            )
+            if down_preload_overlap:
+                slot, padded_in, padded_out, orig_out = down_preload_records[i]
+            else:
+                down_eid = entry["base_eid"] ^ 0x3333333333333333
+                slot, padded_in, padded_out, orig_out = rt_down.preload_and_get_slot(
+                    down_eid,
+                    entry["gptq"]["down"],
+                    kernel_mode,
+                )
             down_entries.append({
                 **entry,
                 "hidden": hidden,
@@ -623,6 +656,10 @@ class PIMMoEBackend(CPUMoEBackend):
         self.last_kernel_cycles = rt_down.last_cycles()
         self.quantized_batched_expert_groups_local += 1
         self.quantized_batched_experts_local += n
+        # ADR-002 M-17.3: expose whether the overlap path was taken so
+        # diagnostics can show it landed at runtime.
+        if down_preload_overlap:
+            self.quantized_down_preload_overlap_local += 1
         return True
 
     # ── Speculative preload at end of prefill ──────────────────────────
@@ -1258,6 +1295,12 @@ class PIMMoEBackend(CPUMoEBackend):
                 "quantized_profile_seconds_mean_local": profile_means,
                 "quantized_batched_expert_groups_local": self.quantized_batched_expert_groups_local,
                 "quantized_batched_experts_local": self.quantized_batched_experts_local,
+                # ADR-002 M-17.3: diagnostic counter for the
+                # down-preload-before-gate-up-infer overlap.  Equals
+                # batched_expert_groups when the dual-runtime split is
+                # active everywhere; smaller when fallback paths kicked
+                # in for some calls.
+                "quantized_down_preload_overlap_local": self.quantized_down_preload_overlap_local,
                 # ADR-002 M-7: layer-group scoping + GPTQ speculative preload.
                 "pim_layer_group_size": self.pim_layer_group_size,
                 "pim_layer_group_id": self.layer_idx // max(1, self.pim_layer_group_size),

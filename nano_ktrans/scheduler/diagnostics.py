@@ -450,6 +450,7 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         "quantized_profile_run_count": 0,
         "quantized_batched_expert_groups": 0,
         "quantized_batched_experts": 0,
+        "quantized_down_preload_overlap": 0,
         "quantized_profile_seconds_sum": {
             "load_qweight_transfer_seconds": 0.0,
             "load_scale_transfer_seconds": 0.0,
@@ -798,6 +799,9 @@ def summarize_offload_diagnostics(offload_diagnostics: dict[str, Any]) -> dict[s
         )
         summary["quantized_batched_experts"] += int(
             backend.get("quantized_batched_experts_local", 0) or 0
+        )
+        summary["quantized_down_preload_overlap"] += int(
+            backend.get("quantized_down_preload_overlap_local", 0) or 0
         )
         profile_sums = backend.get("quantized_profile_seconds_sum_local") or {}
         for field in summary["quantized_profile_seconds_sum"]:
