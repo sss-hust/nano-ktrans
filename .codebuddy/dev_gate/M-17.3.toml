@@ -1,0 +1,70 @@
+milestone_id = "M-17.3"
+title = "Pre-issue down preload before gate+up infer to overlap down weight DMA with gate+up launch"
+
+prerequisites = ["M-17.2"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_2_async_dma_offload92.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 92 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json",
+]
+
+next_tasks = [
+    "M-17.4: multi-buffer the host-owned weight shard buffers (load_qweight_shards/load_scale_shards/lut_i16_shards) so cross-expert preloads on the SAME runtime can also overlap, removing the M-17.2 entry-flush serialisation.",
+    "M-17.5: routing-aware GPU residency (orthogonal to DMA work).",
+    "M-17.6: explore early down preload for the NEXT layer's experts during this layer's compute (cross-layer pipelining).",
+]
+
+# M-17.3 conclusion:
+#   - In _run_quantized_experts_batched_on_dpu, when rt_down lives on
+#     a distinct DPU rank pool (M-5 dual-runtime, the production
+#     default), all down preloads are now issued BEFORE
+#     rt_gate_up.infer_many_raw().  Their lut/qweight/scale ASYNC
+#     pushes (M-17.2) run on the down dpu_set in parallel with the
+#     gate+up launch on the gate_up dpu_set.
+#   - When the runtimes collapse to a single ctx, the legacy ordering
+#     is preserved so the down preload cannot evict gate+up slots.
+#   - New diagnostic counter quantized_down_preload_overlap counts how
+#     many batched groups successfully took the overlap path.
+
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-17.3 down-preload overlap e2e run must complete."
+
+[[acceptance_checks]]
+path     = "results[0].num_device_experts"
+op       = "=="
+value    = 92
+reason   = "M-17.3 must use the M-16/M-17.x default offload=92 for an apples-to-apples comparison."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget in M-17.3 primary run."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.73
+reason   = "down-preload overlap must push past 0.73 TPS on top of the M-17.2 0.7176 baseline."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_2_async_dma_offload92.json"
+path              = "results[0].runs[0].decode_tokens_per_second"
+op                = ">="
+value             = 1.03
+reason            = "M-17.3 should improve M-17.2 decode_tps by at least 3%."
+
+[[acceptance_checks]]
+path     = "results[0].scheduler_summary.quantized_down_preload_overlap"
+op       = ">="
+value    = 1000
+reason   = "the dual-runtime overlap path must actually be taken at runtime (not silently fall back)."

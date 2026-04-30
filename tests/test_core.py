@@ -8800,3 +8800,79 @@ class TestPIMQuantizedAsyncDmaM17_2:
         assert "dpu_push_xfer(lut_mram async)" in src
         assert "dpu_push_xfer(qweight_mram async)" in src
         assert "dpu_push_xfer(scales_mram async)" in src
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-17.3 — pre-issue down preload before gate+up infer
+# ----------------------------------------------------------------------
+
+
+class TestPIMQuantizedDownPreloadOverlapM17_3:
+    """M-17.3 pre-issues down preload (ASYNC weight DMA on the down
+    runtime's dpu_set) BEFORE gate+up infer_many_raw, so down weight
+    DMA overlaps with gate+up launch + readback + host silu*up."""
+
+    def test_pim_moe_batched_path_pre_issues_down_preload_in_dual_mode(self):
+        """The batched expert routine must:
+        1. Probe ``rt_down is not rt_gate_up`` to enable the overlap.
+        2. Iterate over ``gate_entries`` calling ``preload_and_get_slot``
+           for the down expert BEFORE invoking ``infer_many_raw`` for
+           gate+up.
+        3. Reuse those preload records during the down phase.
+        """
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_moe.py"
+        ).read_text()
+        idx_overlap_flag = src.find("down_preload_overlap = rt_down is not rt_gate_up")
+        idx_pre_for = src.find("for entry in gate_entries:", idx_overlap_flag)
+        idx_pre_call = src.find("rt_down.preload_and_get_slot(", idx_pre_for)
+        idx_gate_infer = src.find("rt_gate_up.infer_many_raw(", idx_overlap_flag)
+        idx_records = src.find("down_preload_records.append(", idx_pre_call)
+        idx_reuse = src.find("down_preload_records[i]", idx_gate_infer)
+        # All landmarks must exist and be in order.
+        assert idx_overlap_flag != -1
+        assert idx_pre_for != -1 and idx_pre_for > idx_overlap_flag
+        assert idx_pre_call != -1 and idx_pre_call > idx_pre_for
+        assert idx_records != -1 and idx_records > idx_pre_call
+        assert idx_gate_infer != -1 and idx_gate_infer > idx_records, \
+            "gate_up infer_many_raw must run AFTER all down preloads are issued"
+        assert idx_reuse != -1 and idx_reuse > idx_gate_infer, \
+            "down preload records must be consumed during the down phase"
+
+    def test_pim_moe_diagnostics_exposes_down_preload_overlap_counter(self):
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_moe.py"
+        ).read_text()
+        assert "self.quantized_down_preload_overlap_local: int = 0" in src
+        assert "self.quantized_down_preload_overlap_local += 1" in src
+        assert "\"quantized_down_preload_overlap_local\": self.quantized_down_preload_overlap_local," in src
+
+    def test_scheduler_summary_aggregates_down_preload_overlap(self):
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/nano_ktrans/scheduler/diagnostics.py"
+        ).read_text()
+        assert "\"quantized_down_preload_overlap\": 0," in src
+        assert "summary[\"quantized_down_preload_overlap\"] += int(" in src
+
+    def test_pim_moe_single_ctx_fallback_keeps_legacy_ordering(self):
+        """When rt_down is rt_gate_up (single-ctx fallback), the
+        down preload must happen AFTER gate+up infer_many_raw, so the
+        gate+up slots can't be evicted by a same-ctx down preload
+        before they are read by the gate+up launch."""
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_moe.py"
+        ).read_text()
+        # The legacy in-loop preload still exists, gated on the
+        # else branch when down_preload_overlap is False.
+        assert "if not down_preload_overlap:" in src
+        # Source still keeps a per-entry preload_and_get_slot inside
+        # the down loop for the single-ctx fallback.
+        assert src.count("rt_down.preload_and_get_slot(") >= 2
