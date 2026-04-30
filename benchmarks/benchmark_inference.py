@@ -91,6 +91,7 @@ def benchmark_backend(
     cpu_device_experts: int | None,
     cuda_device_experts: int | None,
     offload_device_experts: int | None,
+    routing_freq_tensor: "torch.Tensor | None" = None,
     pim_rank_count: int,
     pim_profile: str,
     pim_max_batch_tokens: int,
@@ -177,6 +178,7 @@ def benchmark_backend(
             model_path,
             device=device,
             num_gpu_experts=num_device_experts,
+            activation_freq=routing_freq_tensor,
             offload_backend=offload_backend,
             offload_backend_kwargs=offload_backend_kwargs,
             enable_dynamic_expert_scheduler=enable_dynamic_expert_scheduler,
@@ -207,6 +209,7 @@ def benchmark_backend(
             "status": "ok",
             "device": device,
             "num_device_experts": num_device_experts,
+            "routing_aware_residency": routing_freq_tensor is not None,
             "offload_backend": offload_backend,
             "load_seconds": load_seconds,
             "offload_diagnostics": offload_diagnostics,
@@ -382,6 +385,22 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Force async PIM submit OFF (default is already OFF)."
     )
+    # ADR-002 M-18: routing-aware GPU residency.
+    parser.add_argument(
+        "--routing-freq-json",
+        dest="routing_freq_json",
+        type=str,
+        default=None,
+        help=(
+            "ADR-002 M-18: path to a JSON file containing the per-layer "
+            "expert routing frequency table (shape [num_layers, num_experts]) "
+            "produced by benchmarks/profile_expert_routing.py.  When provided, "
+            "the GPU-resident expert set per layer is chosen as the empirically-"
+            "hottest top-N (where N = --offload-device-experts) instead of the "
+            "default uniform first-N selection.  This typically reduces PIM "
+            "call count when the model's router has any per-expert skew."
+        ),
+    )
     parser.add_argument(
         "--enable-dynamic-expert-scheduler",
         action="store_true",
@@ -442,6 +461,23 @@ def main() -> None:
     if not args.model_path:
         raise SystemExit("--model-path is required when the local default checkpoint is absent.")
 
+    # ADR-002 M-18: load routing-frequency calibration table if provided.
+    routing_freq_tensor: torch.Tensor | None = None
+    if args.routing_freq_json:
+        with open(args.routing_freq_json, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        # Accept either a raw 2D list or a {"activation_freq": [[...]]} envelope.
+        if isinstance(payload, dict) and "activation_freq" in payload:
+            freq_list = payload["activation_freq"]
+        else:
+            freq_list = payload
+        routing_freq_tensor = torch.tensor(freq_list, dtype=torch.float32)
+        if routing_freq_tensor.ndim != 2:
+            raise SystemExit(
+                f"--routing-freq-json must contain a 2D [num_layers, num_experts] "
+                f"array; got shape {tuple(routing_freq_tensor.shape)}"
+            )
+
     results = {
         "model_path": args.model_path,
         "torch_version": torch.__version__,
@@ -467,6 +503,7 @@ def main() -> None:
                 cpu_device_experts=args.cpu_device_experts,
                 cuda_device_experts=args.cuda_device_experts,
                 offload_device_experts=args.offload_device_experts,
+                routing_freq_tensor=routing_freq_tensor,
                 pim_rank_count=args.pim_rank_count,
                 pim_profile=args.pim_profile,
                 pim_max_batch_tokens=args.pim_max_batch_tokens,
