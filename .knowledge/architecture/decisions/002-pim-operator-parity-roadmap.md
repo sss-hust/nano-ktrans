@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-17.3 closed (down preload pre-issued before gate+up infer on dual runtime: down weight DMA overlaps gate+up launch, decode TPS 0.7176 -> 0.7456 at offload=92, +3.90%, cumulative since M-15 +16.5%); M-17.4 active (multi-buffer host shard buffers to enable cross-expert preload overlap on the same runtime)
+status: M-17.4 closed as NEGATIVE (per-slot host shard buffers regress decode TPS 0.7456 -> 0.7343, branch adr-002-m17-4-multi-buffer-shards NOT merged into pim; root cause: UPMEM dpu_push_xfer is bandwidth-bound on the rank/dimm bus so multi-buffering host wins nothing on DMA but adds CPU cache pressure); pim main line stops at M-17.3 (decode TPS 0.7456 at offload=92, +16.5% cumulative since M-15); M-17.5 active (cross-layer speculative preload pipelining)
 created: 2026-04-22
 updated: 2026-04-29
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1903,3 +1903,74 @@ M-17 系列累计自 M-16 baseline 提升：`0.6721 → 0.7456 = +10.9%`。
 1. **多缓冲 host shard buffer（M-17.4）**：M-17.2 在 `load_weights_inner` 入口加 flush 是为了保护 ctx-owned `load_qweight_shards/load_scale_shards/lut_i16_shards` 跨调用复用安全。如果给这三组 buffer 做 N 路轮换（per-slot 或 per-call），同一个 runtime 内**跨 expert** preload 之间也能重叠，消化掉残留的 6.7s `load_total_sum`。
 2. **跨 layer 流水（M-17.6）**：在当前 layer 计算时提前 preload **下一个 layer** 的 expert 权重，与当前 layer 的 launch 并行。难点：需要 router 提前预测下一层的活跃 expert，或者用 speculative warmup（参考 `_speculative_preload`）。
 3. **routing-aware GPU residency**：与 DMA overlap 工程正交，在不增加显存的前提下进一步减少 CPU active expert 数。
+
+---
+
+## 28. M-17.4 执行结论（2026-04-30）：[NEGATIVE] per-slot host shard buffers，未合入 pim
+
+### 28.1 假设
+
+M-17.2 之后 `load_weights_inner` 入口必须 `dpu_sync` 才能保证安全复用 ctx-owned `load_qweight_shards / load_scale_shards / lut_i16_shards`。这一同步在 batched expert 路径下让“同一 runtime 内跨 expert 的 preload”被串行化。
+
+假设：把这三组 buffer 改成 `[NUM_SLOTS]` 数组，按 `slot_id` 索引到独立的内存。则跨 slot 的 preload 没有 host buffer 复用冲突，可以让 SDK 内部真正并发执行多 ASYNC push，进一步压缩剩余 6.7s 的 `load_total_sum`。
+
+### 28.2 实装
+
+`adr-002-m17-4-multi-buffer-shards` 分支（HEAD `d20bc2d`）：
+
+- `pim_q_ctx_t` 中三组 buffer + capacity 全部改成 `[NUM_SLOTS]`。
+- 替换 M-17.2 单 bool `inflight_async_load` 为 `uint32_t inflight_slot_mask`。
+- 拆分两个 helper：
+  - `flush_all_inflight_async_load(ctx)`：run / run_many / shutdown 入口用，`dpu_sync` 全 set。
+  - `flush_inflight_for_slot(ctx, slot_id)`：`load_weights_inner` 入口用，**只在该 slot 之前的 ASYNC 还没 sync 时才 sync**；跨 slot reload 走 no-op 路径。
+- `mode=5` 路径中 `ctx->lut_i16_shards` 改为 `ctx->lut_i16_shards[slot_id]`。
+- shutdown 加 per-slot free 循环。
+- 真机正确性测试通过（`test_pim_quantized_runtime_cross_expert_preload_numerically_correct` 显式验证两个 expert 在两个 slot 上 ASYNC preload 并 batched infer 的数值正确性）。
+
+### 28.3 真机数据
+
+| artifact | 配置 | status | decode_tps | decode_seconds | load_total_sum | launch_sum | runtime_total_sum |
+|----------|------|--------|------------|----------------|----------------|------------|-------------------|
+| `e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json` | M-17.3 baseline | ok | 0.7456 | 42.92s | 6.727s | 8.771s | 10.198s |
+| `e2e_gptq_cuda_pim_M17_4_per_slot_buffers_offload92.json` | **M-17.4 per-slot buffers** | ok | **0.7343** | **43.58s** | **8.590s** | 8.941s | 10.371s |
+
+### 28.4 结论：负结果
+
+- `decode_tps` 从 0.7456 **回落到 0.7343，−1.51%**。
+- `load_total_sum` 反向增加 **+1.86s**（6.73 → 8.59）。
+- `launch_sum` 也微增 +0.17s。
+- 数值正确性没问题，单元测试 271/271 全过。
+
+### 28.5 根因分析
+
+1. **UPMEM `dpu_push_xfer` 是带宽 bound 的 rank/dimm 总线 DMA**：硬件层面只有一条 DMA 总线，多个 ASYNC push 被 SDK 内部排队但**不能真正并行执行**。M-17.2 看到 +5.4% 是因为 push 与 launch 在不同硬件资源上（DMA bus vs. DPU compute）真重叠；M-17.4 想做的“push × push 跨 slot 并行”则受同一条 DMA bus 限制，并行度为 1。
+2. **per-slot buffer 8× host RAM 占用**：每个 slot 拥有独立的 lut/qweight/scale staging buffer，hot path 上反复写入 8 份 mostly-cold 的 buffer，让 host CPU 的 L1/L2/L3 命中率下降。`ensure_buffer` realloc 的次数虽然总量不变，但**第一次访问每个 slot buffer 的 cache miss 成本**反映在了 +1.86s 的 `load_total_sum` 上。
+3. **取消 entry flush 没有救回的额外开销**：原本 `flush_inflight_for_slot` 在跨 slot 时确实是 no-op 了，但单次 `dpu_sync()` 在 inflight DMA 已经接近完成时本来就只花数十 µs，并不是真瓶颈。
+
+### 28.6 决策
+
+- **不 merge `adr-002-m17-4-multi-buffer-shards` 到 pim**。
+- 保留分支 + benchmark artifact + 5 个 M-17.4 unit test，让“per-slot multi-buffer 在 UPMEM 上不 work”这一负结论可重现、可被 grep。
+- pim 主线代码停在 M-17.3，仍然是当前最佳 0.7456 TPS。
+
+### 28.7 教训（指导 M-17.5+）
+
+- **DMA 重叠优化要瞄准不同硬件资源**（DMA bus × DPU compute × host CPU），不是把更多并行往同一条总线上塞。
+- **多缓冲只在生产者和消费者落在不同物理单元时才有用**。host shard buffer 的“消费者”是 DMA 引擎，跨 slot 也只有一台引擎，所以多缓冲无效。
+- 加 buffer 永远要计**新加的 cache footprint** vs. **省下来的同步**——M-17.4 是后者远小于前者的反例。
+
+### 28.8 M-17.4 验收（NEGATIVE）
+
+- `M-17.4 dev_gate PASS 2/2` —— 验收的是“负结果分类正确”：
+  - `status == ok`：实验本身完整跑完。
+  - `decode_tps ratio vs M-17.3 < 1.0` 实测 **0.985**：确认确实退步了。
+- 单元测试：271 passed（含 5 个新 `TestPIMQuantizedPerSlotShardBuffersM17_4`，均验证代码层面的 multi-buffer 实装正确）。
+- 真机 `tests/test_pim_runtime.py`：12/12 全过，包括跨 expert 跨 slot 数值正确性。
+
+### 28.9 M-17.5 / M-17.6 方向（修正后）
+
+经过 M-17.4 的负结果反思，DMA 总线已经是 PIM 侧的 critical resource。剩余可挖掘点（按预期收益排序）重新调整：
+
+1. **跨 layer 推测预加载（M-17.6 → 提升为 M-17.5）**：layer N 计算时，speculatively 把 layer N+1 的高频 expert 提前 ASYNC preload。**这是 push × launch 重叠的延伸版本，跨 layer 而非跨 expert，仍然是不同硬件资源的重叠**，应该有正收益。
+2. **routing-aware GPU residency**：减少 PIM 调用数本身，与 DMA 重叠正交。
+3. **单次 push 内部带宽优化**：用 `dpu_broadcast_to`（如果 lut/scale 在所有 DPU 上是同样的，但 quantized 路径中每个 DPU 的 shard 不同，所以不适用）。

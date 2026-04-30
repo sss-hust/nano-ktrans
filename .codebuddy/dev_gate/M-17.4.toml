@@ -1,0 +1,60 @@
+milestone_id = "M-17.4"
+title = "[NEGATIVE RESULT] Per-slot host shard buffers regress decode TPS; not merged into pim"
+
+# Marker: this milestone is recorded for documentation only.  The
+# implementation lives on the un-merged branch
+# adr-002-m17-4-multi-buffer-shards (HEAD: d20bc2d).  The pim main
+# line therefore stops at M-17.3.
+status_marker = "negative"
+
+prerequisites = ["M-17.3"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_4_per_slot_buffers_offload92.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_4_per_slot_buffers_offload92.json"
+
+suggested_commands = [
+    "git checkout adr-002-m17-4-multi-buffer-shards   # to reproduce the regression",
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 92 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M17_4_per_slot_buffers_offload92.json",
+]
+
+# M-17.4 conclusion (NEGATIVE):
+#   - Per-slot ASYNC DMA does NOT win on UPMEM hardware: dpu_push_xfer
+#     is bandwidth-bound on the rank/dimm bus, so multiple inflight
+#     pushes serialise inside the SDK regardless of host buffering.
+#   - The 8x host RAM footprint of the per-slot staging buffers
+#     measurably hurts CPU cache behaviour on the
+#     ensure_buffer / memcpy / LUT memcpy paths
+#     (load_total_sum 6.73s -> 8.59s, +1.86s).
+#   - Net: decode_tps 0.7456 -> 0.7343 (-1.51%).
+#   - DECISION: keep the branch + artifact for reproducibility but do
+#     NOT merge.  pim main line stays at M-17.3.
+#
+# Lesson for M-17.5+:
+#   - DMA-overlap optimisations should focus on overlapping different
+#     hardware resources (DMA bus vs DPU compute vs host CPU), not on
+#     pushing more parallelism into a single bus.
+#   - Multi-buffering only pays off when the producer and consumer of
+#     the buffer are on different physical units.
+
+next_tasks = [
+    "M-17.5: routing-aware GPU residency (orthogonal to DMA work; targets PIM call count, not single-call latency).",
+    "M-17.6: cross-layer pipelining — at the end of layer N, speculatively preload the most likely activated experts of layer N+1 so their DMA overlaps layer N's launch + activations.",
+]
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_4_per_slot_buffers_offload92.json"
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "Even the negative experiment must complete cleanly to be considered a valid datapoint."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M17_4_per_slot_buffers_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json"
+path              = "results[0].runs[0].decode_tokens_per_second"
+op                = "<"
+value             = 1.0
+reason            = "M-17.4 is documented as negative; the artifact must show a decode_tps regression vs M-17.3 for the negative-result classification to be justified."
