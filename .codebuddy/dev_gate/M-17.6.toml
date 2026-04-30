@@ -1,0 +1,86 @@
+milestone_id = "M-17.6"
+title = "[NEGATIVE RESULT] Early-trigger cross-layer preload still regresses; closes the cross-layer preload direction on this hardware topology"
+
+# Marker: this milestone is recorded for documentation only.  The
+# implementation lives on the un-merged branch
+# adr-002-m17-6-cross-layer-preload-early-trigger (HEAD: e0a219e).
+# Together with M-17.5 it closes the entire cross-layer-preload
+# direction; pim main line stays at M-17.3.
+status_marker = "negative"
+
+prerequisites = ["M-17.5"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_5_cross_layer_topk2_offload92.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_6_early_trigger_topk1_offload92.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_6_early_trigger_topk1_offload92.json"
+
+suggested_commands = [
+    "git checkout adr-002-m17-6-cross-layer-preload-early-trigger   # to reproduce",
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 92 --max-new-tokens 32 --pim-enable-cross-layer-preload --pim-cross-layer-preload-top-k 1 --json-out benchmarks/results/e2e_gptq_cuda_pim_M17_6_early_trigger_topk1_offload92.json",
+]
+
+# M-17.6 conclusion (NEGATIVE):
+#
+# Goal: address M-17.5's negative result by relocating the cross-layer
+# speculative preload trigger from end-of-call to BEFORE gate+up
+# infer_many_raw.  Also reduced top_k from 2 to 1 to bound per-call
+# Python+ctypes overhead.
+#
+# Result: still regresses, AND the LRU-warming mechanism that worked
+# in M-17.5 now backfires:
+#     decode_tps     0.7456 -> 0.7140  (-4.24%)
+#     load_count     6616   -> 7006    (+5.9%, WORSE than baseline)
+#     cross_layer    1323 / 1390 batched groups (95% trigger rate)
+#
+# Refined root cause (covers BOTH M-17.5 and M-17.6):
+# With pim_layer_group_size=48 (current default), all 48 layers share
+# one (gate_up, down) runtime pair with NUM_SLOTS=8.  Cross-layer
+# preload either (a) fires after DPU is idle and gives no overlap
+# (M-17.5), or (b) fires earlier and gets immediately demoted in LRU
+# by this layer's down preload, so the next layer evicts the
+# preloaded slot anyway (M-17.6).  The 8-slot LRU is too small to
+# carry warm-up across layer boundaries.
+#
+# Decision: NOT merging.  Closes the entire cross-layer-preload
+# direction on this hardware topology.  Would need either NUM_SLOTS
+# bump (DPU MRAM constraint, expensive) or layer_group_size shrink
+# (M-9 already showed coordination overhead loses on 39 ranks) to
+# make this direction viable.
+
+next_tasks = [
+    "M-18 (or M-17.7): routing-aware GPU residency selection — orthogonal to all M-17 DMA-overlap work; attacks PIM call count via better STATIC residency selection (replace uniform first-N with empirically-hottest experts).",
+    "M-19 (defer): NUM_SLOTS bump in DPU kernel (would unlock cross-layer preload but requires DPU MRAM rework + multi-slot LUT layout changes).",
+]
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_6_early_trigger_topk1_offload92.json"
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "Even the negative experiment must complete cleanly to be considered a valid datapoint."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M17_6_early_trigger_topk1_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json"
+path              = "results[0].runs[0].decode_tokens_per_second"
+op                = "<"
+value             = 1.0
+reason            = "M-17.6 is documented as negative; the artifact must show a decode_tps regression vs M-17.3 for the negative-result classification to be justified."
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_6_early_trigger_topk1_offload92.json"
+path     = "results[0].scheduler_summary.quantized_cross_layer_preload"
+op       = ">="
+value    = 1000
+reason   = "The mechanism must actually fire to produce a valid negative datapoint."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M17_6_early_trigger_topk1_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json"
+path              = "results[0].scheduler_summary.quantized_profile_load_count"
+op                = ">"
+value             = 1.0
+reason            = "Documents the M-17.6-specific LRU-eviction-cascade effect: load_count must be HIGHER than baseline (mechanism backfires), in CONTRAST with M-17.5 where it dropped to 76%.  Two different failure modes, same direction closed."
