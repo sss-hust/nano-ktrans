@@ -130,6 +130,11 @@ typedef struct {
      * has valid weights loaded.  Host-side LRU logic in Python sets the
      * active slot on every run; this flag just gates sanity checks. */
     uint32_t slot_loaded_mask;
+    /* ADR-002 M-17.2: when true, at least one weight load has issued
+     * DPU_XFER_ASYNC pushes that have not been waited on yet.  Run /
+     * shutdown entry points must call dpu_sync(ctx->set) and clear
+     * this flag before touching the DPU set. */
+    bool inflight_async_load;
 } pim_q_ctx_t;
 
 static void
@@ -259,6 +264,29 @@ pim_quantized_init(
     return ctx;
 }
 
+/* ADR-002 M-17.2: drain any inflight async weight pushes from prior
+ * pim_quantized_load_weights[_with_lut] calls.  Must be called at the
+ * very start of every entry point that touches the DPU set after a
+ * load (run, run_many, shutdown).  Cheap no-op when no async load is
+ * outstanding. */
+static int
+flush_inflight_async_load(
+    pim_q_ctx_t *ctx,
+    char *error_buffer,
+    size_t error_buffer_len,
+    const char *context)
+{
+    if (ctx == NULL || !ctx->inflight_async_load) {
+        return 0;
+    }
+    if (check_dpu_error(
+            dpu_sync(ctx->set), error_buffer, error_buffer_len, context) != 0) {
+        return -1;
+    }
+    ctx->inflight_async_load = false;
+    return 0;
+}
+
 /* ADR-002 M-17.1: shared core for both legacy
  * pim_quantized_load_weights() (which still computes the LUT inside the
  * shard loop) and the new pim_quantized_load_weights_with_lut() entry
@@ -306,6 +334,17 @@ load_weights_inner(
 
     if (ctx == NULL) {
         set_error(error_buffer, error_buffer_len, "handle is NULL");
+        return -1;
+    }
+    /* ADR-002 M-17.2 (correctness): the ctx-owned host shard buffers
+     * (load_qweight_shards / load_scale_shards / lut_i16_shards) are
+     * reused across calls.  If a previous load issued ASYNC pushes
+     * over those buffers, we MUST sync before overwriting them with
+     * this call's data.  The 3 pushes inside this single call can
+     * still overlap inside the SDK because the per-symbol prepare/push
+     * pairs target distinct mram symbols and are issued back-to-back. */
+    if (flush_inflight_async_load(ctx, error_buffer, error_buffer_len,
+                                  "dpu_sync(flush before load_weights_inner)") != 0) {
         return -1;
     }
     if (packed_qweights == NULL || scales == NULL) {
@@ -465,11 +504,14 @@ load_weights_inner(
                 goto cleanup;
             }
         }
+        /* ADR-002 M-17.2: ASYNC push.  Sync is deferred to the next
+         * run/shutdown entry so multiple back-to-back loads + their
+         * lut/qweight/scale segments can overlap inside the SDK. */
         if (check_dpu_error(
                 dpu_push_xfer(ctx->set, DPU_XFER_TO_DPU, "lut_mram",
                               (size_t)slot_id * LUT_INT16_PER_SLOT * sizeof(int16_t),
-                              shard_lut_i16 * sizeof(int16_t), DPU_XFER_DEFAULT),
-                error_buffer, error_buffer_len, "dpu_push_xfer(lut_mram)") != 0) {
+                              shard_lut_i16 * sizeof(int16_t), DPU_XFER_ASYNC),
+                error_buffer, error_buffer_len, "dpu_push_xfer(lut_mram async)") != 0) {
             goto cleanup;
         }
     }
@@ -487,8 +529,8 @@ load_weights_inner(
     if (check_dpu_error(
             dpu_push_xfer(ctx->set, DPU_XFER_TO_DPU, "qweight_mram",
                           (size_t)slot_id * WORDS_PER_SLOT * sizeof(uint32_t),
-                          shard_qweight_words * sizeof(uint32_t), DPU_XFER_DEFAULT),
-            error_buffer, error_buffer_len, "dpu_push_xfer(qweight_mram)") != 0) {
+                          shard_qweight_words * sizeof(uint32_t), DPU_XFER_ASYNC),
+            error_buffer, error_buffer_len, "dpu_push_xfer(qweight_mram async)") != 0) {
         goto cleanup;
     }
     clock_gettime(CLOCK_MONOTONIC, &qweight_end);
@@ -506,14 +548,17 @@ load_weights_inner(
     if (check_dpu_error(
             dpu_push_xfer(ctx->set, DPU_XFER_TO_DPU, "scales_mram",
                           (size_t)slot_id * SCALES_PER_SLOT * sizeof(float),
-                          shard_scale_floats * sizeof(float), DPU_XFER_DEFAULT),
-            error_buffer, error_buffer_len, "dpu_push_xfer(scales_mram)") != 0) {
+                          shard_scale_floats * sizeof(float), DPU_XFER_ASYNC),
+            error_buffer, error_buffer_len, "dpu_push_xfer(scales_mram async)") != 0) {
         goto cleanup;
     }
     clock_gettime(CLOCK_MONOTONIC, &scale_end);
 
     ctx->weights_loaded = true;
     ctx->slot_loaded_mask |= (1u << slot_id);
+    /* M-17.2: mark inflight async DMA; the next run/shutdown entry
+     * will do dpu_sync(ctx->set) before touching the device. */
+    ctx->inflight_async_load = true;
     clock_gettime(CLOCK_MONOTONIC, &total_end);
     ctx->last_load_qweight_transfer_seconds = timespec_diff_seconds(&qweight_start, &qweight_end);
     ctx->last_load_scale_transfer_seconds = timespec_diff_seconds(&scale_start, &scale_end);
@@ -684,6 +729,13 @@ pim_quantized_run(
         set_error(error_buffer, error_buffer_len,
                   "slot %u has no weights loaded (ctx->slot_loaded_mask=0x%x)",
                   slot_id, ctx->slot_loaded_mask);
+        goto cleanup;
+    }
+
+    /* ADR-002 M-17.2: drain any inflight async weight pushes from
+     * previous load_weights[_with_lut] calls before starting the run. */
+    if (flush_inflight_async_load(ctx, error_buffer, error_buffer_len,
+                                  "dpu_sync(flush before pim_quantized_run)") != 0) {
         goto cleanup;
     }
 
@@ -1002,6 +1054,16 @@ pim_quantized_run_many(
         set_error(error_buffer, error_buffer_len, "call_count too large: %u > %u", call_count, MAX_RUN_REQUESTS);
         return -1;
     }
+
+    /* ADR-002 M-17.2: drain inflight async weight pushes before
+     * touching the device, regardless of which run path we take.
+     * The fallback loop calls pim_quantized_run() which would also
+     * flush, but doing it here keeps the launch-time profile clean.
+     */
+    if (flush_inflight_async_load(ctx, error_buffer, error_buffer_len,
+                                  "dpu_sync(flush before pim_quantized_run_many)") != 0) {
+        return -1;
+    }
     bool all_batch_one = true;
     for (uint32_t i = 0; i < call_count; ++i) {
         if (batch_sizes[i] != 1) {
@@ -1230,6 +1292,13 @@ pim_quantized_shutdown(void *handle)
     pim_q_ctx_t *ctx = (pim_q_ctx_t *)handle;
     if (ctx == NULL) {
         return;
+    }
+
+    /* ADR-002 M-17.2: drain any outstanding async weight pushes
+     * before tearing down the DPU set. */
+    if (ctx->inflight_async_load) {
+        (void)dpu_sync(ctx->set);
+        ctx->inflight_async_load = false;
     }
 
     free(ctx->valid_rows);
