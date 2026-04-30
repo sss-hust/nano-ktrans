@@ -1,0 +1,73 @@
+milestone_id = "M-17"
+title = "Reduce PIM load/preload cost by caching host-precomputed LUT and skipping C-side recompute"
+
+prerequisites = ["M-16"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M16_offload92.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_lut_cache_offload92.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_lut_cache_offload92.json"
+
+suggested_commands = [
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 92 --max-new-tokens 32 --json-out benchmarks/results/e2e_gptq_cuda_pim_M17_lut_cache_offload92.json",
+]
+
+next_tasks = [
+    "M-17.2: overlap weight DMA push (qweight/scale/lut) with kernel launch by exploring DPU_XFER_ASYNC + dpu_sync.",
+    "M-17.3: in PIMMoEBackend._run_quantized_experts_batched_on_dpu, pre-issue down preload while gate+up infer_many_raw is still running on the DPU.",
+    "M-17.4: explore routing-aware GPU residency to reduce CPU-side active experts beyond uniform first-N.",
+]
+
+# M-17.1 conclusion (this milestone):
+#   - Add pim_quantized_load_weights_with_lut(): host can pass a
+#     [padded_output_dim, num_groups, 16] int16 LUT and skip the
+#     C-side nested (q-8) * scale * 256 + clamp loop entirely.
+#   - PIMQuantizedRuntime now caches the LUT keyed by
+#     (expert_id, padded_in, padded_out, group_size, kernel_mode) so
+#     LRU-driven cache-miss reloads of the same expert never recompute
+#     the LUT (in either Python or C).
+#   - All hot-path entries (preload, preload_concat_and_get_slot) route
+#     through the new _native_load_weights() helper so the legacy
+#     C entry pim_quantized_load_weights() is now only kept for the
+#     legacy non-residency .linear() path.
+
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-17 lut-cache e2e run must complete."
+
+[[acceptance_checks]]
+path     = "results[0].num_device_experts"
+op       = "=="
+value    = 92
+reason   = "M-17 primary artifact must use the M-16 offload=92 default for an apples-to-apples comparison."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget in M-17 primary run."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.66
+reason   = "M-17 must not regress below the M-16 offload=92 baseline (~0.67 TPS)."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M17_lut_cache_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M16_offload92.json"
+path              = "results[0].runs[0].decode_tokens_per_second"
+op                = ">="
+value             = 1.0
+reason            = "LUT cache change must not regress decode TPS vs M-16 offload=92 baseline."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M17_lut_cache_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M16_offload92.json"
+path              = "results[0].scheduler_summary.quantized_profile_load_total_seconds_sum"
+op                = "<="
+value             = 1.02
+reason            = "LUT cache should not raise total host-load time (small noise tolerance only)."

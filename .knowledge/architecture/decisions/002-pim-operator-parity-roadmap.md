@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-16 closed (offload=92 promoted as default to target remaining PIM load/run-call bottleneck; default TPS 0.672, short peak offload=94 reaches 0.700); M-17 active (direct load/preload reduction or routing-aware GPU residency)
+status: M-17.1 closed (host-precomputed LUT cache + new pim_quantized_load_weights_with_lut entry: load_total_seconds_sum 12.50s -> 10.88s, decode TPS 0.672 -> 0.681 at offload=92, +1.30%); M-17.2 active (overlap weight DMA with kernel launch, async push, pre-issue down preload during gate+up infer)
 created: 2026-04-22
 updated: 2026-04-29
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1667,3 +1667,81 @@ M-16 不是 kernel 深工程，而是基于 M-15 profile 的 targeted configurat
 1. **直接减少 load/preload cost**：M-16 后 `load_total_seconds_sum` 仍有 12.5s（offload=92）/11.15s（offload=94）。
 2. **routing-aware GPU residency**：当前 GPU experts 是 uniform first-N；如果按真实 router hotness 选择 GPU resident experts，可能在不增加显存的情况下进一步减少 CPU-side active experts。
 3. **更长 OOM envelope**：`offload=92` 还需验证 128 tokens；`offload=94` 若要作为 peak profile，需要 long prompt 安全边界更清晰。
+
+---
+
+## 25. M-17.1 执行结论（2026-04-29）：host 预算 LUT + 新 C 入口，砍掉 load 时间 13%
+
+### 25.1 背景
+
+M-16 把默认 offload 提到 92 后，profile 显示剩余主要 PIM 时间花在 `load_total_seconds_sum ≈ 12.5s`（远高于 `launch_seconds_sum 8.8s`），其中 `load_qweight_transfer ≈ 2.1s` + `load_scale_transfer ≈ 0.5s` 只占一小部分，剩余 ~9.9s 是 host 侧 LUT 的 nested compute（`(q-8)*scale*256 + clamp`，对每个 expert reload 都要重跑一遍）。
+
+这是一个标准的 “每次 cache miss 都重算同一份只读派生数据” 模式，自然适合 host-side cache + 新 C 入口跳过重算。
+
+### 25.2 实装
+
+**C 端** (`host_quantized_bridge.c`)
+
+- 抽出 `static int load_weights_inner(...)` 作为 load 的统一核心，新增第三参数 `const int16_t *precomputed_lut_full`：
+  - `precomputed_lut_full == NULL` 时走原 nested loop（旧行为，保持 backward-compat）。
+  - 非 NULL 时按行直接 `memcpy` 一段 `[num_groups * 16] int16` 进 shard，跳过 4-bit decode 表的乘加 + clamp。
+- `pim_quantized_load_weights(...)` 退化为薄包装。
+- 新增公共入口：
+
+  ```c
+  int pim_quantized_load_weights_with_lut(
+      void *handle,
+      uint32_t input_dim, uint32_t output_dim,
+      uint32_t group_size, uint32_t kernel_mode,
+      const void *packed_qweights,
+      const void *scales,
+      const void *precomputed_lut,   /* [output_dim, num_groups, 16] int16 row-major */
+      uint32_t slot_id,
+      char *error_buffer, size_t error_buffer_len);
+  ```
+
+**Python 端** (`pim_quantized_runtime.py`)
+
+- `_lut_cache: dict[(expert_id, padded_in, padded_out, group_size, kernel_mode), torch.Tensor]`：缓存 `[padded_output_dim, num_groups, 16] int16` 张量。
+- `_compute_lut_int16(scales)`：用 PyTorch 一次性矢量化算 LUT（替代 C 的 nested loop）。
+- `_get_or_compute_lut(...)`：cache hit 直接返回，miss 时算并保存。
+- `_native_load_weights(...)`：所有 hot path（`preload`、`preload_concat_and_get_slot`）的统一新 helper，**永远走 `pim_quantized_load_weights_with_lut`**，每次 ctypes 调用前都先查 LUT cache。
+- 旧 `pim_quantized_load_weights` ctypes 调用只剩 legacy `linear()` 一处（非 hot path）。
+
+### 25.3 真机数据
+
+| artifact | 配置 | status | decode_tps | decode_seconds | load_count | load_total_sum | load_qweight_sum | load_scale_sum | launch_sum | runtime_total_sum |
+|----------|------|--------|------------|----------------|------------|----------------|------------------|----------------|------------|-------------------|
+| `e2e_gptq_cuda_pim_M16_offload92.json` | M-16 baseline | ok | 0.6721 | 47.62s | 6630 | 12.496s | 2.112s | 0.502s | 8.804s | 10.129s |
+| `e2e_gptq_cuda_pim_M17_lut_cache_offload92.json` | M-17.1 LUT cache | ok | **0.6808** | **47.01s** | 6630 | **10.876s** | 2.138s | 0.527s | 8.785s | 10.112s |
+
+### 25.4 结论
+
+- **decode TPS：`0.6721 → 0.6808，+1.30%`**（同 offload=92、同 prompt/32 tokens、同硬件、同分钟内连续运行）。
+- **`load_total_seconds_sum: 12.50s → 10.88s，−1.62s（−13.0%）`**：核心是 host LUT nested loop 被消除。注意 `load_qweight_transfer` / `load_scale_transfer` 几乎不变（DMA 推送本身不变），减少的全是 host CPU 的 LUT compute 时间。
+- **`launch_sum / input / output / runtime_total_sum` 几乎不变**：M-15/M-16 已优化的 launch 路径不被影响，预期之内。
+- **`load_count` 不变**（6630）：本里程碑只降单次 load 的 host 端代价，不减少 load 调用数。
+
+### 25.5 为什么提升只有 +1.30%
+
+profile 显示：
+
+- 节省的 1.62s 是 host CPU 时间，且部分发生在 PIM `dpu_push_xfer` 等待 DMA 完成的 pre-DMA 准备阶段，不是“纯阻塞 critical path”。
+- decode 总耗时 47.62s 中，CPU 端 routing/gather/index_add/silu*up/quantize 等 Python 工作量没变；Python GIL 下这些与 PIM 是部分重叠但不完全。
+- 因此 `load_total` 下降 13% 不会等比例反映到 e2e TPS。要继续放大收益，下一步应该让 weight DMA 与 kernel launch 在 DPU 侧也异步重叠（M-17.2）。
+
+### 25.6 M-17.1 验收
+
+- `M-17 dev_gate PASS 6/6`
+  - `decode_tps ≥ 0.66` 实测 0.6808
+  - vs M-16 比例 ≥ 1.0 实测 1.013
+  - `load_total_sum` 比例 ≤ 1.02 实测 0.870（远好于阈值）
+- 全量 pytest：`258 passed, 1 warning`（含新增 `TestPIMQuantizedHostLutCacheM17` 4 个用例）。
+
+### 25.7 M-17.2 / M-17.3 方向
+
+剩余可挖掘点：
+
+1. **DMA × launch overlap（M-17.2）**：当前 lut/qweight/scale 三段 `dpu_push_xfer` 与之后的 `dpu_launch` 严格串行。`DPU_XFER_ASYNC` + `dpu_sync` 让 push 与上一轮 launch 重叠是直接候选。
+2. **gate+up 与 down preload 流水（M-17.3）**：在 `_run_quantized_experts_batched_on_dpu` 中，down 的 preload 当前发生在 gate+up `infer_many_raw` *之后*；可以提前到之前发起，使 down weight DMA 与 gate+up DPU launch 重叠。
+3. **routing-aware GPU residency**：M-16 后的低风险 envelope 增长项；和上面两条工程优化正交，可以并行推进。

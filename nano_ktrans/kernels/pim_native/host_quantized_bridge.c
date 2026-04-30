@@ -259,8 +259,19 @@ pim_quantized_init(
     return ctx;
 }
 
-int
-pim_quantized_load_weights(
+/* ADR-002 M-17.1: shared core for both legacy
+ * pim_quantized_load_weights() (which still computes the LUT inside the
+ * shard loop) and the new pim_quantized_load_weights_with_lut() entry
+ * point that takes a host-precomputed [output_dim, num_groups, 16] LUT
+ * tensor and only does shard memcpy + DMA push.
+ *
+ * If ``precomputed_lut_full`` is non-NULL, it must point to a
+ * row-major int16 tensor of shape (output_dim, num_groups, 16) and the
+ * inner LUT loop is skipped.  Otherwise the legacy nested computation
+ * (centered * scale * 256, clamped to int16) runs per-shard.
+ */
+static int
+load_weights_inner(
     void *handle,
     uint32_t input_dim,
     uint32_t output_dim,
@@ -268,6 +279,7 @@ pim_quantized_load_weights(
     uint32_t kernel_mode,
     const void *packed_qweights,
     const void *scales,
+    const int16_t *precomputed_lut_full,
     uint32_t slot_id,
     char *error_buffer,
     size_t error_buffer_len)
@@ -381,20 +393,36 @@ pim_quantized_load_weights(
                 scale_ptr + (local_row * (size_t)num_groups),
                 scale_src + (((row_start + local_row) * (size_t)num_groups)),
                 (size_t)num_groups * sizeof(float));
-            for (size_t group_idx = 0; group_idx < (size_t)num_groups; ++group_idx) {
-                const float scale =
-                    scale_src[((row_start + local_row) * (size_t)num_groups) + group_idx];
+            if (precomputed_lut_full != NULL) {
+                /* M-17.1: copy the row's slice of the host-precomputed
+                 * LUT directly; no per-q multiplication on the host
+                 * critical path. */
+                const int16_t *lut_src_row = precomputed_lut_full
+                    + (((row_start + local_row) * (size_t)num_groups)
+                       * (1u << BITS_PER_WEIGHT));
                 int16_t *group_lut = lut_ptr
-                    + (((local_row * (size_t)num_groups) + group_idx) * (1u << BITS_PER_WEIGHT));
-                for (uint32_t q = 0; q < (1u << BITS_PER_WEIGHT); ++q) {
-                    const int32_t centered = (int32_t)q - (int32_t)(1u << (BITS_PER_WEIGHT - 1));
-                    int32_t value = (int32_t)(centered * scale * 256.0f);
-                    if (value > INT16_MAX) {
-                        value = INT16_MAX;
-                    } else if (value < INT16_MIN) {
-                        value = INT16_MIN;
+                    + ((local_row * (size_t)num_groups)
+                       * (1u << BITS_PER_WEIGHT));
+                memcpy(
+                    group_lut,
+                    lut_src_row,
+                    (size_t)num_groups * (1u << BITS_PER_WEIGHT) * sizeof(int16_t));
+            } else {
+                for (size_t group_idx = 0; group_idx < (size_t)num_groups; ++group_idx) {
+                    const float scale =
+                        scale_src[((row_start + local_row) * (size_t)num_groups) + group_idx];
+                    int16_t *group_lut = lut_ptr
+                        + (((local_row * (size_t)num_groups) + group_idx) * (1u << BITS_PER_WEIGHT));
+                    for (uint32_t q = 0; q < (1u << BITS_PER_WEIGHT); ++q) {
+                        const int32_t centered = (int32_t)q - (int32_t)(1u << (BITS_PER_WEIGHT - 1));
+                        int32_t value = (int32_t)(centered * scale * 256.0f);
+                        if (value > INT16_MAX) {
+                            value = INT16_MAX;
+                        } else if (value < INT16_MIN) {
+                            value = INT16_MIN;
+                        }
+                        group_lut[q] = (int16_t)value;
                     }
-                    group_lut[q] = (int16_t)value;
                 }
             }
         }
@@ -494,6 +522,57 @@ pim_quantized_load_weights(
 
 cleanup:
     return rc;
+}
+
+int
+pim_quantized_load_weights(
+    void *handle,
+    uint32_t input_dim,
+    uint32_t output_dim,
+    uint32_t group_size,
+    uint32_t kernel_mode,
+    const void *packed_qweights,
+    const void *scales,
+    uint32_t slot_id,
+    char *error_buffer,
+    size_t error_buffer_len)
+{
+    return load_weights_inner(
+        handle, input_dim, output_dim, group_size, kernel_mode,
+        packed_qweights, scales,
+        /* precomputed_lut_full = */ NULL,
+        slot_id, error_buffer, error_buffer_len);
+}
+
+/* ADR-002 M-17.1: take a host-precomputed LUT (shape
+ * [output_dim, num_groups, 16] int16 row-major) and load weights
+ * without recomputing the LUT in C.  All other layout invariants are
+ * identical to pim_quantized_load_weights() so callers may freely mix
+ * the two entry points across calls. */
+int
+pim_quantized_load_weights_with_lut(
+    void *handle,
+    uint32_t input_dim,
+    uint32_t output_dim,
+    uint32_t group_size,
+    uint32_t kernel_mode,
+    const void *packed_qweights,
+    const void *scales,
+    const void *precomputed_lut,
+    uint32_t slot_id,
+    char *error_buffer,
+    size_t error_buffer_len)
+{
+    if (precomputed_lut == NULL) {
+        set_error(error_buffer, error_buffer_len,
+                  "precomputed_lut must be non-null; use pim_quantized_load_weights() to skip");
+        return -1;
+    }
+    return load_weights_inner(
+        handle, input_dim, output_dim, group_size, kernel_mode,
+        packed_qweights, scales,
+        (const int16_t *)precomputed_lut,
+        slot_id, error_buffer, error_buffer_len);
 }
 
 int

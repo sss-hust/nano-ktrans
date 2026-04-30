@@ -94,6 +94,23 @@ class PIMQuantizedRuntime:
             ctypes.c_size_t,
         ]
         self._lib.pim_quantized_load_weights.restype = ctypes.c_int
+        # ADR-002 M-17.1: alternate load entry that takes a host-side
+        # precomputed LUT [output_dim, num_groups, 16] int16 row-major
+        # and skips the C-side nested mul/clamp loop.
+        self._lib.pim_quantized_load_weights_with_lut.argtypes = [
+            ctypes.c_void_p,   # handle
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,   # packed_qweights
+            ctypes.c_void_p,   # scales
+            ctypes.c_void_p,   # precomputed_lut int16
+            ctypes.c_uint32,   # slot_id
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
+        self._lib.pim_quantized_load_weights_with_lut.restype = ctypes.c_int
         self._lib.pim_quantized_run.argtypes = [
             ctypes.c_void_p,   # handle
             ctypes.c_uint32,
@@ -154,6 +171,17 @@ class PIMQuantizedRuntime:
 
         # Cached pre-padded quantized weights: expert_id → (qweight_i32, scales_f32, padded_input_dim, padded_output_dim, group_size, kernel_mode, original_output_dim)
         self._weight_cache: dict[int, tuple[torch.Tensor, torch.Tensor, int, int, int, int, int]] = {}
+
+        # ADR-002 M-17.1: cache the host-precomputed int16 LUT
+        # [padded_output_dim, num_groups, 16] keyed by (expert_id,
+        # padded_input_dim, padded_output_dim, group_size, kernel_mode).
+        # When a slot LRU eviction forces a re-load of the same expert,
+        # the LUT does not have to be recomputed (in either Python or
+        # the C bridge nested loop) — we pass it straight through to
+        # ``pim_quantized_load_weights_with_lut``.
+        self._lut_cache: dict[
+            tuple[int, int, int, int, int], torch.Tensor
+        ] = {}
 
         # ADR-002 M-6.1: per-slot residency + LRU bookkeeping.
         #
@@ -358,6 +386,82 @@ class PIMQuantizedRuntime:
 
     # ── NEW: preload — load quantized weights to DPU MRAM ──────────────
 
+    # ADR-002 M-17.1 helpers: vectorised LUT precompute + cached load.
+
+    @staticmethod
+    def _compute_lut_int16(scales_f32: torch.Tensor) -> torch.Tensor:
+        """Vectorised host-side LUT precompute.
+
+        Mirrors the C-bridge inner loop:
+            value = clamp_int16((q - 8) * scale * 256)
+        Input  scales_f32: [padded_output_dim, num_groups] float32 (CPU)
+        Output:            [padded_output_dim, num_groups, 16] int16 (CPU, contiguous)
+        """
+        # q in [0, 16) → centered in [-8, 8)
+        q_centered = (
+            torch.arange(16, dtype=torch.float32) - 8.0
+        ).view(1, 1, 16)
+        scaled = (
+            scales_f32.to(dtype=torch.float32, copy=False).unsqueeze(-1)
+            * q_centered
+            * 256.0
+        )
+        clamped = scaled.clamp_(min=-32768.0, max=32767.0)
+        return clamped.to(dtype=torch.int16).contiguous()
+
+    def _get_or_compute_lut(
+        self,
+        cache_key: tuple[int, int, int, int, int],
+        scales_f32: torch.Tensor,
+    ) -> torch.Tensor:
+        cached = self._lut_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        lut = self._compute_lut_int16(scales_f32)
+        self._lut_cache[cache_key] = lut
+        return lut
+
+    def _native_load_weights(
+        self,
+        *,
+        expert_id: int,
+        padded_input_dim: int,
+        padded_output_dim: int,
+        group_size: int,
+        kernel_mode: int,
+        qweight_i32: torch.Tensor,
+        scales_f32: torch.Tensor,
+        slot: int,
+    ) -> None:
+        """ADR-002 M-17.1: unified wrapper around the C bridge load.
+
+        Always goes through ``pim_quantized_load_weights_with_lut`` and
+        feeds it a host-precomputed int16 LUT cached by ``_lut_cache``.
+        Cache hits eliminate both the Python-side LUT compute and the
+        C-side nested mul/clamp loop on every cache-miss preload.
+        """
+        cache_key = (
+            expert_id, padded_input_dim, padded_output_dim, group_size, kernel_mode,
+        )
+        lut_i16 = self._get_or_compute_lut(cache_key, scales_f32)
+        error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
+        rc = self._lib.pim_quantized_load_weights_with_lut(
+            self._handle,
+            ctypes.c_uint32(padded_input_dim),
+            ctypes.c_uint32(padded_output_dim),
+            ctypes.c_uint32(group_size),
+            ctypes.c_uint32(kernel_mode),
+            ctypes.c_void_p(qweight_i32.data_ptr()),
+            ctypes.c_void_p(scales_f32.data_ptr()),
+            ctypes.c_void_p(lut_i16.data_ptr()),
+            ctypes.c_uint32(slot),
+            error_buffer,
+            len(error_buffer),
+        )
+        if rc != 0:
+            raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+        self._record_load_profile()
+
     def _touch_slot(self, slot: int) -> None:
         """Bump LRU tick on a slot (called on hit and on fresh load)."""
         self._lru_counter += 1
@@ -444,27 +548,21 @@ class PIMQuantizedRuntime:
         qweight_i32, scales_f32, padded_input_dim, padded_output_dim, group_size, km, _orig = \
             self._weight_cache[expert_id]
 
-        error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
-        rc = self._lib.pim_quantized_load_weights(
-            self._handle,
-            ctypes.c_uint32(padded_input_dim),
-            ctypes.c_uint32(padded_output_dim),
-            ctypes.c_uint32(group_size),
-            ctypes.c_uint32(km),
-            ctypes.c_void_p(qweight_i32.data_ptr()),
-            ctypes.c_void_p(scales_f32.data_ptr()),
-            ctypes.c_uint32(slot),
-            error_buffer,
-            len(error_buffer),
+        self._native_load_weights(
+            expert_id=expert_id,
+            padded_input_dim=padded_input_dim,
+            padded_output_dim=padded_output_dim,
+            group_size=group_size,
+            kernel_mode=km,
+            qweight_i32=qweight_i32,
+            scales_f32=scales_f32,
+            slot=slot,
         )
-        if rc != 0:
-            raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
 
         # Legacy single-slot fields — kept for backward compatibility
         # with anything that still reads them.  Semantics change
         # slightly: ``_resident_expert_id`` is now the most-recently
         # preloaded expert rather than the single occupant.
-        self._record_load_profile()
         self._loaded_signature = (padded_input_dim, padded_output_dim, group_size, km, expert_id)
         self._resident_expert_id = expert_id
         self.preload_misses += 1
@@ -588,22 +686,16 @@ class PIMQuantizedRuntime:
         slot, was_resident = self._allocate_slot(expert_id)
         self._last_touched_slot = slot
         if not was_resident:
-            error_buffer = ctypes.create_string_buffer(self.ERROR_BUFFER_SIZE)
-            rc = self._lib.pim_quantized_load_weights(
-                self._handle,
-                ctypes.c_uint32(padded_in),
-                ctypes.c_uint32(concat_rows),
-                ctypes.c_uint32(lhs.group_size),
-                ctypes.c_uint32(kernel_mode),
-                ctypes.c_void_p(concat_qw.data_ptr()),
-                ctypes.c_void_p(concat_sc.data_ptr()),
-                ctypes.c_uint32(slot),
-                error_buffer,
-                len(error_buffer),
+            self._native_load_weights(
+                expert_id=expert_id,
+                padded_input_dim=padded_in,
+                padded_output_dim=concat_rows,
+                group_size=lhs.group_size,
+                kernel_mode=kernel_mode,
+                qweight_i32=concat_qw,
+                scales_f32=concat_sc,
+                slot=slot,
             )
-            if rc != 0:
-                raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
-            self._record_load_profile()
             self._resident_expert_id = expert_id
             self._loaded_signature = (padded_in, concat_rows, lhs.group_size, kernel_mode, expert_id)
             self.preload_misses += 1

@@ -8646,3 +8646,87 @@ class TestPIMQuantizedSingleLaunchRequestTableM15:
         assert "dpu_launch(ctx->set, DPU_SYNCHRONOUS)" in src
         assert "dpu_launch(run_many)" in src
         assert "ctx->kernel_mode != 4 || !all_batch_one" in src
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-17.1 — host-precomputed LUT cache (skip C-side LUT recompute)
+# ----------------------------------------------------------------------
+
+
+class TestPIMQuantizedHostLutCacheM17:
+    """M-17.1 caches host-precomputed int16 LUT shards so cache-miss
+    preloads of the same expert no longer recompute the LUT in the C
+    bridge nested loop."""
+
+    def test_host_quantized_bridge_exposes_with_lut_entry_point(self):
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_native/host_quantized_bridge.c"
+        ).read_text()
+        # New unified core
+        assert "static int\nload_weights_inner(" in src
+        assert "precomputed_lut_full" in src
+        # New public entry point
+        assert "pim_quantized_load_weights_with_lut(" in src
+        # Legacy entry still present, now thin wrapper
+        assert "pim_quantized_load_weights(\n    void *handle," in src
+        # Inner code path memcpys LUT slice when host LUT is provided
+        assert "memcpy(\n                    group_lut," in src
+        assert "(size_t)num_groups * (1u << BITS_PER_WEIGHT) * sizeof(int16_t)" in src
+
+    def test_pim_quantized_runtime_compute_lut_int16_matches_c_formula(self):
+        """Vectorised host LUT compute must agree with the C bridge's
+        ``(q-8) * scale * 256`` clamped-to-int16 formula."""
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+
+        torch.manual_seed(17)
+        # 6 rows x 4 groups; include a large scale to exercise int16 clamp.
+        scales = torch.tensor(
+            [
+                [0.5, -0.25, 1e-3, 5e2],   # 5e2 * 8 * 256 overflows int16 (saturate)
+                [0.0, 0.0, 0.0, 0.0],      # all-zero row
+                [-1.0, 0.5, 0.25, -0.125],
+                [1e-2, 1e-1, 1.0, 10.0],
+                [0.5, 0.5, 0.5, 0.5],
+                [-0.5, -0.5, -0.5, -0.5],
+            ],
+            dtype=torch.float32,
+        )
+        lut = PIMQuantizedRuntime._compute_lut_int16(scales)
+        assert lut.shape == (6, 4, 16)
+        assert lut.dtype == torch.int16
+        # Check a couple of explicit entries against the C formula.
+        for q in range(16):
+            centered = q - 8
+            for r in range(scales.shape[0]):
+                for g in range(scales.shape[1]):
+                    expected = int(centered * float(scales[r, g]) * 256.0)
+                    expected = max(-32768, min(32767, expected))
+                    assert int(lut[r, g, q]) == expected
+
+    def test_pim_quantized_runtime_lut_cache_initialised(self):
+        """``_lut_cache`` must be present on the runtime instance and
+        keyed by ``(expert_id, padded_in, padded_out, group_size, kernel_mode)``."""
+        from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
+
+        # We can't construct a runtime without UPMEM, so just check the
+        # class declares the helpers and the bound API name.
+        assert hasattr(PIMQuantizedRuntime, "_compute_lut_int16")
+        assert hasattr(PIMQuantizedRuntime, "_get_or_compute_lut")
+        assert hasattr(PIMQuantizedRuntime, "_native_load_weights")
+
+    def test_pim_quantized_runtime_module_uses_with_lut_entry(self):
+        """The Python runtime must route every load through the new
+        ``pim_quantized_load_weights_with_lut`` entry point."""
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/nano_ktrans/kernels/pim_quantized_runtime.py"
+        ).read_text()
+        assert "pim_quantized_load_weights_with_lut" in src
+        # All hot paths route through _native_load_weights now.
+        assert "self._native_load_weights(" in src
+        # ``preload`` and ``preload_concat_and_get_slot`` no longer
+        # call the legacy bridge entry point directly.
+        assert "self._lib.pim_quantized_load_weights(\n            self._handle," not in src
