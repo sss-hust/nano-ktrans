@@ -1,0 +1,81 @@
+milestone_id = "M-18"
+title = "Routing-aware GPU residency: replace uniform first-N with empirically-hottest-N from a calibration routing histogram"
+
+prerequisites = ["M-17.3"]
+
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json",
+    "benchmarks/results/routing_freq_qwen3_30b_calibration.json",
+    "benchmarks/results/e2e_gptq_cuda_pim_M18_routing_aware_offload92.json",
+]
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M18_routing_aware_offload92.json"
+
+suggested_commands = [
+    "python benchmarks/profile_expert_routing.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --device cuda --num-gpu-experts 92 --offload-backend pim --max-new-tokens 32 --json-out benchmarks/results/routing_freq_qwen3_30b_calibration.json",
+    "python benchmarks/benchmark_inference.py --model-path /home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4 --backends cuda_pim --offload-device-experts 92 --max-new-tokens 32 --routing-freq-json benchmarks/results/routing_freq_qwen3_30b_calibration.json --json-out benchmarks/results/e2e_gptq_cuda_pim_M18_routing_aware_offload92.json",
+]
+
+next_tasks = [
+    "M-18.1: validate the empirically-hottest-92 stays stable across different prompts (calibration generalisation).  If not, may need rolling EMA or per-prompt-class profiles.",
+    "M-19: lift offload to 88/84 with M-18: now that hottest-92 captures 97.6% of routing mass, the marginal cost of demoting cold experts to PIM is much smaller; lower offload may stay safe with even less PIM traffic.",
+    "M-20: combine M-18 with M-17.x dynamic optimisations (the wins are orthogonal; M-18 cuts call count, M-17 cuts per-call latency).",
+]
+
+# M-18 conclusion:
+#   - profile_expert_routing.py runs the calibration prompt under
+#     cuda+92gpu+pim mode (full 128-expert visibility to the router)
+#     and dumps a [num_layers=48, num_experts=128] activation-freq
+#     table to JSON.
+#   - benchmark_inference.py grew --routing-freq-json which loads
+#     the table and threads it through to LLM(activation_freq=...),
+#     reusing the existing generate_gpu_experts_masks infra.
+#   - Calibration showed Qwen3-30B-A3B routing has STRONG per-layer
+#     skew: hottest-92 captures 97.6% of routing mass vs first-92
+#     captures 72.3%, leaving PIM with only 2.4% of work instead of
+#     27.7%.
+
+[[acceptance_checks]]
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-18 routing-aware e2e run must complete."
+
+[[acceptance_checks]]
+path     = "results[0].num_device_experts"
+op       = "=="
+value    = 92
+reason   = "M-18 must use the same offload=92 budget as the M-17.3 baseline for an apples-to-apples comparison."
+
+[[acceptance_checks]]
+path     = "results[0].routing_aware_residency"
+op       = "=="
+value    = true
+reason   = "The benchmark must confirm it actually loaded and used the calibration freq table (not silently fell back to uniform first-N)."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].generated_tokens"
+op       = ">="
+value    = 32
+reason   = "full token budget in M-18 primary run."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.90
+reason   = "M-18 should clear 0.9 TPS — a major step up from the M-17.3 plateau at 0.7456."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M18_routing_aware_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json"
+path              = "results[0].runs[0].decode_tokens_per_second"
+op                = ">="
+value             = 1.20
+reason            = "M-18 must improve M-17.3 decode TPS by at least 20% — anything less means the routing skew assumption is too weak."
+
+[[acceptance_checks]]
+artifact          = "benchmarks/results/e2e_gptq_cuda_pim_M18_routing_aware_offload92.json"
+ratio_vs_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json"
+path              = "results[0].scheduler_summary.quantized_profile_load_count"
+op                = "<="
+value             = 0.70
+reason            = "M-18 should reduce PIM load_count by at least 30% (mechanism check: hottest-92 mask must actually reduce CPU-side active expert traffic)."

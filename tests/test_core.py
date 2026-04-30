@@ -8876,3 +8876,82 @@ class TestPIMQuantizedDownPreloadOverlapM17_3:
         # Source still keeps a per-entry preload_and_get_slot inside
         # the down loop for the single-ctx fallback.
         assert src.count("rt_down.preload_and_get_slot(") >= 2
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-18 — routing-aware GPU residency selection
+# ----------------------------------------------------------------------
+
+
+class TestRoutingAwareResidencyM18:
+    """M-18 replaces the uniform first-N GPU expert selection with
+    empirically-hottest-N from a calibration routing histogram."""
+
+    def test_generate_gpu_experts_masks_picks_topk_per_layer(self):
+        from nano_ktrans.utils.expert_selection import generate_gpu_experts_masks
+
+        # Two layers, 8 experts; per-layer hottest is different.
+        freq = torch.tensor(
+            [
+                [0.40, 0.05, 0.30, 0.05, 0.15, 0.02, 0.02, 0.01],   # L0 hot: 0,2,4
+                [0.05, 0.35, 0.05, 0.25, 0.05, 0.20, 0.03, 0.02],   # L1 hot: 1,3,5
+            ]
+        )
+        masks = generate_gpu_experts_masks(freq, num_gpu_experts=3)
+        assert len(masks) == 2
+        assert masks[0].tolist() == [True, False, True, False, True, False, False, False]
+        assert masks[1].tolist() == [False, True, False, True, False, True, False, False]
+
+    def test_benchmark_inference_accepts_routing_freq_json(self):
+        """The CLI must declare --routing-freq-json and the benchmark
+        backend signature must accept routing_freq_tensor."""
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/benchmarks/benchmark_inference.py"
+        ).read_text()
+        assert "--routing-freq-json" in src
+        assert "routing_freq_tensor:" in src
+        assert "activation_freq=routing_freq_tensor" in src
+        # Surface in result JSON so reviewers can see it landed.
+        assert "\"routing_aware_residency\": routing_freq_tensor is not None" in src
+
+    def test_profile_expert_routing_script_exists_and_is_self_contained(self):
+        """The companion profile script must exist and at least
+        declare the calibration entry points it needs."""
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/benchmarks/profile_expert_routing.py"
+        ).read_text()
+        # This script DUMPS the calibration JSON; it does not consume
+        # one (only the docstring may reference --routing-freq-json as
+        # the consumer flag).  What it MUST contain is its own --json-out.
+        assert "--json-out" in src
+        assert "register_forward_pre_hook" in src
+        assert "activation_freq" in src
+        assert "raw_counts" in src
+        assert "from nano_ktrans.layers.hybrid_moe import HybridMoE" in src
+
+    def test_benchmark_inference_envelope_load_routing_json(self):
+        """The CLI loader must accept either a raw 2D list or an
+        ``{"activation_freq": ...}`` envelope from
+        profile_expert_routing.py."""
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/benchmarks/benchmark_inference.py"
+        ).read_text()
+        assert "isinstance(payload, dict) and \"activation_freq\" in payload" in src
+        assert "routing_freq_tensor.ndim != 2" in src
+
+    def test_llm_already_supports_activation_freq_constructor_arg(self):
+        """LLM(activation_freq=...) is the existing infra M-18 reuses;
+        a regression that removes the kwarg would silently disable
+        M-18 from the benchmark side."""
+        import inspect
+
+        from nano_ktrans.llm import LLM
+
+        sig = inspect.signature(LLM.__init__)
+        assert "activation_freq" in sig.parameters
