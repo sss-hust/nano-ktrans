@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-17.4 closed as NEGATIVE (per-slot host shard buffers regress decode TPS 0.7456 -> 0.7343, branch adr-002-m17-4-multi-buffer-shards NOT merged into pim; root cause: UPMEM dpu_push_xfer is bandwidth-bound on the rank/dimm bus so multi-buffering host wins nothing on DMA but adds CPU cache pressure); pim main line stops at M-17.3 (decode TPS 0.7456 at offload=92, +16.5% cumulative since M-15); M-17.5 active (cross-layer speculative preload pipelining)
+status: M-17.5 closed as NEGATIVE (cross-layer speculative preload mechanism works — load_count 6616 -> 5048, -24% — but Python/ctypes orchestration cost dominates: decode TPS 0.7456 -> 0.6997, branch adr-002-m17-5-cross-layer-speculative-preload NOT merged into pim; root cause: trigger fires AFTER layer N's PIM is idle, so the ASYNC pushes have no DPU compute to overlap with); pim main line stops at M-17.3 (decode TPS 0.7456 at offload=92, +16.5% cumulative since M-15); M-17.6 active (relocate cross-layer preload trigger to gate+up phase so next-layer DMA overlaps THIS layer's down launch + host activation)
 created: 2026-04-22
 updated: 2026-04-29
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -1974,3 +1974,92 @@ M-17.2 之后 `load_weights_inner` 入口必须 `dpu_sync` 才能保证安全复
 1. **跨 layer 推测预加载（M-17.6 → 提升为 M-17.5）**：layer N 计算时，speculatively 把 layer N+1 的高频 expert 提前 ASYNC preload。**这是 push × launch 重叠的延伸版本，跨 layer 而非跨 expert，仍然是不同硬件资源的重叠**，应该有正收益。
 2. **routing-aware GPU residency**：减少 PIM 调用数本身，与 DMA 重叠正交。
 3. **单次 push 内部带宽优化**：用 `dpu_broadcast_to`（如果 lut/scale 在所有 DPU 上是同样的，但 quantized 路径中每个 DPU 的 shard 不同，所以不适用）。
+
+---
+
+## 29. M-17.5 执行结论（2026-04-30）：[NEGATIVE] 跨 layer speculative preload 机制有效但触发时机错；未合入 pim
+
+### 29.1 假设
+
+按 §28.9 修正后的方向：layer N 的 batched expert 调用结束时，speculatively 把 layer N+1 的 top-K 高频 expert 提前 ASYNC preload。预期：
+- 利用 M-17.2 的 ASYNC + M-17.3 的 dual-runtime overlap 机制，让 layer N+1 的 weight DMA 与 layer N 完成 → layer N+1 attention → layer N+1 PIM 开始之间的 GPU work 重叠。
+- 跨 layer 比跨 expert 更激进，预期收益 +3-5%。
+
+### 29.2 实装
+
+`adr-002-m17-5-cross-layer-speculative-preload` 分支（HEAD `ce024c8`）：
+
+- `PIMMoEBackend._layer_backends: dict[layer_idx, PIMMoEBackend]`：进程级注册表，构造函数末尾自动注册。
+- `_expert_route_count: dict[expert_idx, int]`：per-layer 路由频率直方图。
+- `_record_layer_routing(activated_cpu_experts)`：每次 batched call 末尾累加。
+- `_get_top_hot_cpu_experts(k)`：按频率排序返回 top-K（已过滤 GPU expert / GPTQ 不可用 expert）。
+- `_speculative_preload_for_next_layer(expert_idxs)`：sibling backend 调用，触发 `rt_gate_up.preload_concat_and_get_slot` + `rt_down.preload_and_get_slot`（ASYNC 不 sync，best-effort，异常吞掉）。
+- `_trigger_cross_layer_preload()`：在 `_run_quantized_experts_batched_on_dpu` return 之前调用，找到 layer N+1 backend 并触发预加载。
+- CLI flag `--pim-enable-cross-layer-preload` + `--pim-cross-layer-preload-top-k` (default 2)。
+- 计数器 `quantized_cross_layer_preload_local` / `_experts_local` 暴露到 backend diagnostics + scheduler_summary。
+
+### 29.3 真机数据
+
+| artifact | 配置 | status | decode_tps | decode_seconds | load_count | load_total_sum | launch_sum | cross_layer_preload triggers |
+|----------|------|--------|------------|----------------|------------|----------------|------------|------------------------------|
+| `e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json` | M-17.3 baseline | ok | 0.7456 | 42.92s | 6616 | 6.727s | 8.771s | — |
+| `e2e_gptq_cuda_pim_M17_5_cross_layer_topk2_offload92.json` | **M-17.5 cross-layer top_k=2** | ok | **0.6997** | **45.73s** | **5048** | **4.868s** | 8.847s | **1312 / 1390 batched groups (94%)**, 2611 experts preloaded |
+
+### 29.4 结论：负结果，但机制本身是有效的
+
+**机制层面 — 完全成功**：
+- 预加载在 1312 / 1390 个 batched group 里都触发了（94% 命中条件）。
+- **`load_count` 从 6616 降到 5048，减少 1568 次 PIM 实际 weight load（−24%）**——这是真实的 LRU 命中率提升，不是统计假象。
+- `load_total_sum` 相应下降 1.86s。
+
+**端到端层面 — 反而退步 6.16%**：
+- decode_tps `0.7456 → 0.6997`，decode_seconds `42.92s → 45.73s`（**+2.81s**）。
+- launch_sum 几乎不变。
+- `load_total_sum` 节省的 1.86s 完全被新增 Python/ctypes 开销吃掉，并且额外亏了 ~2.8s。
+
+### 29.5 根因分析
+
+1. **触发时机错误**：当前实装在 `_run_quantized_experts_batched_on_dpu` **末尾** 触发预加载。此时 layer N 的 down `infer_many_raw` 已经返回，DPU set 进入空闲状态。预加载的 ASYNC push 被 SDK 接受但**没有任何并发 DPU compute 可以隐藏它**——只剩下：
+   - GPU attention（不同进程线程，Python GIL + pinned-memory 路径让 DMA 等待难以真正与 GPU 工作重叠）。
+   - host 端 `index_add_` 等 Python 操作（非常短）。
+   - layer N+1 的 router computation（GPU，与上同理）。
+   - 然后 layer N+1 的 PIM 开始时，`infer_many_raw` 入口的 `dpu_sync` 必须等齐这些 ASYNC DMA。
+   
+   **净结果**：DMA 走了，但走的是 critical path 上同步等待的部分，没有真正 parallel hardware utilisation。
+
+2. **Python/ctypes overhead 主导**：
+   - 每次 batched call 都做 `_record_layer_routing` + `_get_top_hot_cpu_experts(2)`（dict 遍历 + sort）+ `_speculative_preload_for_next_layer`（K=2 experts × 2 (gate+up concat / down) = 4 次 ctypes preload 调用）。
+   - 1312 次 batched call × 估计 2-4 ms Python 开销 ≈ 2.6-5s 总额外 host time，几乎完全吃掉 1.86s 的 PIM 节省。
+
+3. **M-17.3 之后 critical path 已经几乎打满 DMA bus + DPU compute**——layer N 的 PIM 阶段已经被 M-17.3 排得很紧，留给 cross-layer 重叠的窗口很小；窗口结束后 DPU 空闲，所以 `_run_quantized_experts_batched_on_dpu` 末尾不是好的 trigger 点。
+
+### 29.6 决策
+
+- **不 merge `adr-002-m17-5-cross-layer-speculative-preload` 到 pim**。
+- pim 主线代码停在 M-17.3 = **0.7456 TPS** 当前最佳。
+- 在 pim 主线 commit ADR §29 + dev_gate（NEGATIVE 验收：4/4 PASS，包括"机制确实触发 ≥1000 次 ∧ load_count 真的降到 ≤85%"两条 correctness 检查）+ benchmark artifact。
+- 这是与 M-17.4 不同的 NEGATIVE：**M-17.4 的机制本身没价值（DMA bus bound）**，而 **M-17.5 的机制有效（−24% PIM call）只是触发时机错**。后者值得在 M-17.6 重做。
+
+### 29.7 教训（指导 M-17.6+）
+
+1. **Speculative preload 必须在 DPU 仍然 busy 的窗口触发，不能在它空闲时触发**——否则 ASYNC 退化为 SYNC 等待。最好的 trigger 点是当前 layer 的 gate+up `infer_many_raw` 之前（DPU 即将开始 launch），让 next-layer preload 与本 layer down launch 都进 DMA bus 排队。
+2. **机制 vs 净收益要分开评估**：本里程碑的 dev_gate 同时检查 `load_count` 下降（机制层）和 `decode_tps` 下降（净收益层），两个独立维度。机制层成功证明 mechanism 实装正确；净收益层失败给我们 actionable 信号——下一步该改时机而不是改机制本身。
+3. **进程级注册表 + 路由直方图的设计本身是 reusable 的**，将在 M-17.6 沿用。
+
+### 29.8 M-17.5 验收（NEGATIVE）
+
+- `M-17.5 dev_gate PASS 4/4`：
+  - `status == ok`：实验完整完成。
+  - `decode_tps ratio vs M-17.3 < 1.0` 实测 **0.938**：确认确实退步了。
+  - `quantized_cross_layer_preload >= 1000` 实测 **1312**：机制确实触发。
+  - `load_count ratio vs M-17.3 < 0.85` 实测 **0.763**：LRU 预热确实生效。
+- 全量 pytest：266 passed（机制由真机 e2e 验证，未为 M-17.5 加单元测试，下一里程碑 M-17.6 会复用且补齐）。
+
+### 29.9 M-17.6 方向（修正后）
+
+把 cross-layer preload 的 trigger 从 `_run_quantized_experts_batched_on_dpu` **末尾** 移到 **gate+up `infer_many_raw` 之前**：
+- 顺序变成：gate+up preload (this layer, ASYNC) → cross-layer next-layer preload (ASYNC) → infer_many_raw(gate+up)。
+- 这一刻 DPU 即将 launch this layer 的 gate+up，cross-layer 的 ASYNC push 与本 layer 的 launch 在 DMA bus / DPU compute 上是不同硬件资源，有真重叠空间。
+- 同时 batched groups per call 的 Python overhead 不变，但更靠近 critical path 中真正能 hide 的位置。
+
+预期：可以收回 M-17.5 测出的 −24% load_count 收益，同时不引入 +2.81s 的 Python overhead 净亏。
