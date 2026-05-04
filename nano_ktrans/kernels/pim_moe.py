@@ -74,6 +74,7 @@ class PIMMoEBackend(CPUMoEBackend):
         enable_async_pim_submit: bool = False,
         enable_c_fused_kernel: bool = False,
         enable_c_async_submit: bool = False,
+        enable_m25_pinned_d2h: bool = False,
     ):
         self.pim_rank_count = pim_rank_count
         self.pim_bytes_per_dpu = pim_bytes_per_dpu
@@ -170,6 +171,23 @@ class PIMMoEBackend(CPUMoEBackend):
         # currently a no-op because the submit path still goes through
         # the Python (or M-10) async infrastructure.
         self.enable_c_async_submit: bool = bool(enable_c_async_submit)
+        # ADR-002 M-25 Stage A: replace blocking ``.to("cpu")`` in the
+        # decode hot path with pinned + non_blocking copies so the GPU
+        # expert loop does not serialise behind every submit_forward.
+        # Only active when CUDA is actually available and the caller
+        # goes through ``_submit_forward_c_async`` (the M-24 Stage A
+        # path); sync real path still uses ``.to("cpu")`` directly
+        # because it doesn't interleave with GPU work anyway.
+        self.enable_m25_pinned_d2h: bool = bool(enable_m25_pinned_d2h)
+        # Lazy pinned-buffer cache keyed by (batch_size, hidden_size,
+        # top_k).  Each slot holds three pinned tensors sized for
+        # (flat_cpu, topk_ids_cpu, topk_weights_cpu).  We only allocate
+        # on first use to avoid paying pin cost on backends that never
+        # hit the M-25 path.
+        self._m25_pinned_cache: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        # M-25 Stage B: pinned staging buffer for sync_forward_c_async's
+        # H2D of the per-layer output.  Keyed by shape tuple.
+        self._m25_output_pinned_cache: dict[tuple[int, ...], torch.Tensor] = {}
         # Counters for the C fused path (M-24 Stage B diagnostics).
         self.c_fused_calls: int = 0
         self.c_fused_experts_processed: int = 0
@@ -551,6 +569,58 @@ class PIMMoEBackend(CPUMoEBackend):
         self.last_kernel_cycles = rt_down.last_cycles()
         return output
 
+    def _acquire_pinned_submit_buffers(
+        self,
+        *,
+        batch_size: int,
+        hidden_size: int,
+        top_k: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """ADR-002 M-25 Stage A: fetch (and lazily allocate) pinned
+        CPU buffers for the submit_forward D2H pipeline.
+
+        Returns a ``(flat_cpu, topk_ids_cpu, topk_weights_cpu)`` tuple
+        dimensioned identically to the tensors that ``.to("cpu", ...)``
+        would otherwise produce:
+          * flat_cpu         [batch_size, hidden_size]  float32
+          * topk_ids_cpu     [batch_size, top_k]        long
+          * topk_weights_cpu [batch_size, top_k]        float32
+
+        Buffers are reused across decode steps; pin cost is paid once
+        per distinct (batch, hidden, top_k) shape.  For Qwen3 decode
+        this cache only ever holds a single entry (batch=1).
+        """
+        key = (int(batch_size), int(hidden_size), int(top_k))
+        cached = self._m25_pinned_cache.get(key)
+        if cached is not None:
+            return cached
+        flat_cpu = torch.empty(
+            batch_size, hidden_size, dtype=torch.float32, pin_memory=True
+        )
+        topk_ids_cpu = torch.empty(
+            batch_size, top_k, dtype=torch.long, pin_memory=True
+        )
+        topk_weights_cpu = torch.empty(
+            batch_size, top_k, dtype=torch.float32, pin_memory=True
+        )
+        buffers = (flat_cpu, topk_ids_cpu, topk_weights_cpu)
+        self._m25_pinned_cache[key] = buffers
+        return buffers
+
+    def _acquire_pinned_output_buffer(self, shape: torch.Size) -> torch.Tensor:
+        """M-25 Stage B pinned staging buffer for the output H2D path.
+
+        Returns a float32 pinned tensor with the given shape; cached
+        across calls keyed by the shape tuple.
+        """
+        key = tuple(int(d) for d in shape)
+        cached = self._m25_output_pinned_cache.get(key)
+        if cached is not None:
+            return cached
+        buffer = torch.empty(shape, dtype=torch.float32, pin_memory=True)
+        self._m25_output_pinned_cache[key] = buffer
+        return buffer
+
     def _submit_forward_c_async(
         self,
         hidden_states: torch.Tensor,
@@ -577,9 +647,61 @@ class PIMMoEBackend(CPUMoEBackend):
         batch_size = flat.shape[0]
         cpu_mask = ~self.gpu_experts_mask.bool()
 
-        flat_cpu = flat.to("cpu", dtype=torch.float32)
-        topk_ids_cpu = topk_ids.to("cpu", dtype=torch.long)
-        topk_weights_cpu = topk_weights.to("cpu", dtype=torch.float32)
+        # ADR-002 M-25 Stage A: pinned-buffer + non_blocking D2H.
+        #
+        # Before M-25 these three copies were plain `.to("cpu", ...)`
+        # which are synchronous D2H transfers — they block Python
+        # until the CUDA queue drains, serialising the subsequent GPU
+        # expert loop (92 experts × 48 layers × 32 tokens) behind
+        # every submit_forward entry.  Profiling (ADR-002 §35) showed
+        # ~11s of the 26.82s M-24 A decode came from this serialisation.
+        #
+        # We now:
+        #   1. Allocate (once per batch size) pinned host buffers that
+        #      hold the D2H shadows (flat / topk_ids / topk_weights).
+        #   2. Issue ``copy_(..., non_blocking=True)`` so CUDA queues
+        #      the copy on the caller's stream and Python returns
+        #      immediately.  The HybridMoE.forward GPU expert loop
+        #      can now overlap fully with the D2H transfer + PIM work.
+        #   3. Sync the cuda_stream exactly once before handing the
+        #      pinned buffers to the PIM C worker.  This is the only
+        #      place Python blocks on GPU work in the hot path; M-24
+        #      Stage A's c_async_wait already covers PIM completion.
+        #
+        # Falls back to the pre-M-25 synchronous `.to("cpu")` path when
+        # CUDA is unavailable (test harness) or hidden_states is already
+        # on CPU.
+        use_pinned_path = (
+            hidden_states.is_cuda
+            and torch.cuda.is_available()
+            and self.enable_m25_pinned_d2h
+        )
+        if use_pinned_path:
+            flat_cpu, topk_ids_cpu, topk_weights_cpu = self._acquire_pinned_submit_buffers(
+                batch_size=batch_size,
+                hidden_size=flat.shape[-1],
+                top_k=topk_ids.shape[-1],
+            )
+            flat_cpu.copy_(flat.to(dtype=torch.float32), non_blocking=True)
+            topk_ids_cpu.copy_(topk_ids.to(dtype=torch.long), non_blocking=True)
+            topk_weights_cpu.copy_(topk_weights.to(dtype=torch.float32), non_blocking=True)
+            # Only now do we need the data on the host side for Python-
+            # driven preload + request assembly below.  Sync the default
+            # CUDA stream exactly once; HybridMoE.forward already holds
+            # the stream handle used by the submit/sync pair.
+            torch.cuda.current_stream().synchronize()
+        else:
+            flat_cpu = flat.to("cpu", dtype=torch.float32)
+            topk_ids_cpu = topk_ids.to("cpu", dtype=torch.long)
+            topk_weights_cpu = topk_weights.to("cpu", dtype=torch.float32)
+
+        # ADR-002 M-25 Stage A: diagnostic counters now computed on
+        # CPU-materialised tensors (free — the D2H already happened
+        # above, and .item() on a CPU tensor is not a CUDA sync).
+        # Preserves pim_compute_participation_ratio semantics.
+        routed_cpu = cpu_mask[topk_ids_cpu]
+        self.offloaded_pairs += int(routed_cpu.sum().item())
+        self.offloaded_tokens += int(routed_cpu.any(dim=1).sum().item())
 
         # Collect activated CPU experts.  Same logic as _submit_forward_real.
         activated_cpu_experts: list[tuple[int, int, torch.Tensor, torch.Tensor]] = []
@@ -763,6 +885,31 @@ class PIMMoEBackend(CPUMoEBackend):
         self.c_fused_experts_processed += n
 
         hidden_shape = meta["hidden_shape"]
+        # ADR-002 M-25 Stage B: non_blocking H2D of the layer output.
+        #
+        # The old code did ``output.view(hidden_shape).to(device, dtype)``
+        # which on CUDA is a blocking H2D — it serialises the final
+        # add in HybridMoE.forward (``final_gpu_states + cpu_output``)
+        # behind a host-side wait.  By pinning ``output`` (allocated
+        # as pin_memory above — see _m25_output_buffer_cache) and
+        # using non_blocking=True, the copy is queued on the current
+        # CUDA stream and returns immediately; the subsequent GPU add
+        # on the same stream will naturally wait for the copy to
+        # complete, with no Python sync.
+        if (
+            self.enable_m25_pinned_d2h
+            and torch.cuda.is_available()
+            and isinstance(device, torch.device)
+            and device.type == "cuda"
+        ):
+            # Use a pinned staging buffer that matches `output`'s shape.
+            staging = self._acquire_pinned_output_buffer(output.shape)
+            staging.copy_(output)  # host-to-host, fast on pinned dest
+            result = torch.empty(
+                output.shape, dtype=hidden_dtype, device=device
+            )
+            result.copy_(staging.to(dtype=hidden_dtype), non_blocking=True)
+            return result.view(hidden_shape)
         return output.view(hidden_shape).to(device=device, dtype=hidden_dtype)
 
     def _run_quantized_experts_c_fused(
@@ -1354,6 +1501,14 @@ class PIMMoEBackend(CPUMoEBackend):
         topk_weights_cpu = topk_weights.to("cpu", dtype=torch.float32)
         cpu_mask = ~self.gpu_experts_mask.bool()
 
+        # ADR-002 M-25 Stage A: diagnostic counters moved out of
+        # submit_forward (which used GPU .item() and caused a CUDA
+        # sync every layer every step).  Non-async / fallback path
+        # computes them here on CPU-materialised tensors.
+        routed_cpu = cpu_mask[topk_ids_cpu]
+        self.offloaded_pairs += int(routed_cpu.sum().item())
+        self.offloaded_tokens += int(routed_cpu.any(dim=1).sum().item())
+
         output = torch.zeros(batch_size, self.hidden_size, dtype=torch.float32, device="cpu")
 
         # ── Collect activated CPU experts ──────────────────────────────
@@ -1474,11 +1629,27 @@ class PIMMoEBackend(CPUMoEBackend):
         topk_weights: torch.Tensor,
         cuda_stream: int | None,
     ) -> None:
-        cpu_mask = (~self.gpu_experts_mask.bool()).to(topk_ids.device)
-        routed_to_offload = cpu_mask[topk_ids]
-        self.offloaded_pairs += int(routed_to_offload.sum().item())
-        self.offloaded_tokens += int(routed_to_offload.any(dim=1).sum().item())
-
+        # ADR-002 M-25 Stage A: eliminate GPU-side sync points in the
+        # submit_forward hot path.
+        #
+        # The two removed ``.item()`` calls here used to run on the GPU
+        # topk_ids tensor on every decode step of every layer (48*32 =
+        # 1536 CUDA syncs per run), each one forcing the GPU expert
+        # loop's first matmul to wait for router tensors to cross D2H.
+        # M-24 profiling showed ~0.1 s of this 26-27 s decode was
+        # ``.item()`` dispatch overhead and the rest was serialisation
+        # of the GPU expert loop behind blocking host reads.
+        #
+        # offloaded_pairs / offloaded_tokens are diagnostic counters
+        # only (they feed pim_compute_participation_ratio and ADR
+        # science-integrity guards); they have zero effect on the
+        # numerical result.  We therefore defer the accumulation to
+        # ``_submit_forward_c_async`` (the hot path), which already
+        # materialises topk_ids on CPU and can compute the same
+        # counters without paying an extra sync.  Non-async fallback
+        # paths (real/shadow sync, M-10 Python thread) still pay the
+        # sync via ``_submit_forward_real``; see the counter update
+        # co-located with its cpu_mask slice around line 1355.
         context = get_context()
 
         # ADR-002 M-24 Stage A: C-level async submit.
@@ -1817,6 +1988,11 @@ class PIMMoEBackend(CPUMoEBackend):
                     if self.c_async_sync_wait_seconds_count > 0
                     else None
                 ),
+                # ADR-002 M-25 Stage A/B: pinned-buffer D2H/H2D to
+                # eliminate GPU-side sync points in the hot path.
+                "enable_m25_pinned_d2h": self.enable_m25_pinned_d2h,
+                "m25_pinned_submit_cache_shapes": list(self._m25_pinned_cache.keys()),
+                "m25_pinned_output_cache_shapes": list(self._m25_output_pinned_cache.keys()),
                 # PIM real-compute participation ratio.  Offloaded experts
                 # are those routed to a non-GPU-resident slot; PIM-computed
                 # experts are those handled by one of the DPU paths
