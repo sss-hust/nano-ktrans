@@ -1,0 +1,35 @@
+{
+  "model_path": "/home/yangfu/models/Qwen--Qwen3-30B-A3B-GPTQ-Int4",
+  "device": "cuda",
+  "num_gpu_experts": 92,
+  "offload_backend": "pim",
+  "max_new_tokens": 32,
+  "load_seconds": 219.41366952471435,
+  "entries": [
+    {
+      "name": "story",
+      "path": "benchmarks/results/m23_calibrations/routing_freq_story.json",
+      "calibration_seconds": 75.94906091317534
+    },
+    {
+      "name": "code",
+      "path": "benchmarks/results/m23_calibrations/routing_freq_code.json",
+      "calibration_seconds": 72.85334875620902
+    },
+    {
+      "name": "math",
+      "path": "benchmarks/results/m23_calibrations/routing_freq_math.json",
+      "calibration_seconds": 71.27757747285068
+    },
+    {
+      "name": "dialogue",
+      "path": "benchmarks/results/m23_calibrations/routing_freq_dialogue.json",
+      "calibration_seconds": 73.34900335222483
+    },
+    {
+      "name": "multilingual",
+      "path": "benchmarks/results/m23_calibrations/routing_freq_multilingual.json",
+      "calibration_seconds": 68.35461108759046
+    }
+  ]
+}

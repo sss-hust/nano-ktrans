@@ -1,0 +1,22 @@
+[
+  {
+    "name": "story",
+    "prompt": "Once upon a time, in a small village by the sea, there lived a young scholar who spent her evenings cataloguing the names of stars. Each constellation had its own folklore, and she enjoyed weaving them into the local children's bedtime stories."
+  },
+  {
+    "name": "code",
+    "prompt": "def binary_search(arr, target):\n    low, high = 0, len(arr) - 1\n    while low <= high:\n        mid = (low + high) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            low = mid + 1\n        else:\n            high = mid - 1\n    return -1\n\nWrite a Python function that finds the first element greater than a target in a sorted list, handling duplicates correctly. Then discuss its complexity and edge cases."
+  },
+  {
+    "name": "math",
+    "prompt": "Prove that for every integer n greater than or equal to 2, the sum of the first n positive integers is n(n+1)/2. Use mathematical induction. First, establish the base case. Then assume the hypothesis holds for k and show that it implies the claim for k+1. Conclude with a short remark on why this identity is also the number of edges in a complete graph on n+1 vertices."
+  },
+  {
+    "name": "dialogue",
+    "prompt": "User: I keep getting tired in the afternoon even though I sleep eight hours a night. What could be wrong?\nAssistant: There are several common culprits behind afternoon fatigue even with adequate sleep. Let me walk you through them. First, sleep quality matters more than duration — untreated sleep apnea, frequent awakenings, or irregular bed times can leave you feeling unrested. Second, blood sugar swings after a high-carb lunch are a classic post-lunch slump trigger. Third, dehydration, iron deficiency, and thyroid issues all commonly present as persistent tiredness. Would you like to talk through which of these seems most likely given your routine?"
+  },
+  {
+    "name": "multilingual",
+    "prompt": "中文：人工智能正在改变世界，但我们还需要谨慎面对它带来的伦理挑战。\nEnglish: Artificial intelligence is reshaping the world, yet we must approach its ethical challenges with care.\n日本語：人工知能は世界を変えつつありますが、その倫理的な課題には慎重に向き合う必要があります。\nFrançais: L'intelligence artificielle transforme le monde, mais nous devons aborder ses défis éthiques avec prudence.\n请用中文总结以上四段文字的共同观点，并说明你认为最重要的一个伦理挑战是什么。"
+  }
+]

@@ -8955,3 +8955,96 @@ class TestRoutingAwareResidencyM18:
 
         sig = inspect.signature(LLM.__init__)
         assert "activation_freq" in sig.parameters
+
+
+# ----------------------------------------------------------------------
+# ADR-002 M-23 — calibration generalisation + M-23.1 mean-mask
+# ----------------------------------------------------------------------
+
+
+class TestCalibrationGeneralisationM23:
+    """M-23 quantifies how M-18's hottest-N mask generalises across
+    different prompts, and M-23.1 shows that averaging calibration
+    freqs across diverse prompts produces a single static mask that
+    MATCHES or BEATS self-calibration on real-hw decode TPS."""
+
+    def test_analysis_script_exists_and_is_self_contained(self):
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/benchmarks/analyze_calibration_generalisation.py"
+        ).read_text()
+        # Key analysis entry points.
+        assert "def _load_calibrations" in src
+        assert "def _hottest_mask" in src
+        assert "def _pim_share" in src
+        # M-23 core comparisons.
+        assert "pim_share_matrix" in src
+        assert "first_n_pim_share" in src
+        # M-23.1 mean-mask addition.
+        assert "mean_mask_pim_share" in src
+        assert "mean_mask_overlap_vs_self" in src
+        assert "mean_mask_vs_cross_calib_pp" in src
+
+    def test_profile_expert_routing_batch_mode_contract(self):
+        """profile_expert_routing.py must accept --prompts-json /
+        --json-out-dir to produce a calibration sweep without paying
+        the ~220s LLM load cost once per prompt."""
+        from pathlib import Path
+
+        src = Path(
+            "/home/yangfu/nano-ktrans/benchmarks/profile_expert_routing.py"
+        ).read_text()
+        assert "--prompts-json" in src
+        assert "--json-out-dir" in src
+        # Must also be backwards-compatible with single-prompt mode.
+        assert "--json-out" in src
+        # Hooks are installed ONCE and counts are reset between prompts,
+        # so batch mode amortises the expensive load.
+        assert "counts.zero_()" in src
+        # Batch mode dumps a manifest so downstream tools know the set.
+        assert "manifest.json" in src
+
+    def test_m23_calibration_prompts_json_covers_diverse_domains(self):
+        """The shipped M-23 prompt set must contain the 5 named
+        domains used in ADR-002 §33 so the artefact is reproducible."""
+        import json
+        from pathlib import Path
+
+        path = Path("/home/yangfu/nano-ktrans/benchmarks/m23_calibration_prompts.json")
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        assert isinstance(entries, list)
+        names = {e["name"] for e in entries}
+        assert names == {"story", "code", "math", "dialogue", "multilingual"}
+
+    def test_hottest_mask_matches_generate_gpu_experts_masks(self):
+        """The M-23 analysis hottest-mask path must produce the same
+        selection as M-18's generate_gpu_experts_masks on identical
+        freq input, so e2e benchmark with M-23.1 mean_freq
+        reproduces the same residency decisions."""
+        from nano_ktrans.utils.expert_selection import generate_gpu_experts_masks
+
+        # Import the analysis helper lazily via importlib since the
+        # script is not a package.
+        import importlib.util
+        from pathlib import Path
+
+        spec = importlib.util.spec_from_file_location(
+            "m23_analyze",
+            Path("/home/yangfu/nano-ktrans/benchmarks/analyze_calibration_generalisation.py"),
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        torch.manual_seed(23)
+        freq = torch.rand(4, 16, dtype=torch.float32)
+        k = 6
+
+        # M-23 hottest mask.
+        m23_mask = mod._hottest_mask(freq, k)
+        # M-18 utility path returns a List[Tensor] of bool masks.
+        m18_masks = generate_gpu_experts_masks(freq, num_gpu_experts=k)
+
+        for layer_idx in range(freq.shape[0]):
+            assert torch.equal(m23_mask[layer_idx], m18_masks[layer_idx])
