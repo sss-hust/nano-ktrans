@@ -174,6 +174,16 @@ class PIMMoEBackend(CPUMoEBackend):
         self.c_fused_calls: int = 0
         self.c_fused_experts_processed: int = 0
         self.c_fused_fallback_count: int = 0
+        # Stage A C-async state.  A submit stashes the handle + per-
+        # expert metadata; the matching sync_forward joins the handle
+        # and fills the output via index_add_.  Strictly one in-flight
+        # job per PIMMoEBackend instance (per-layer).
+        self._c_async_handle: Any = None
+        self._c_async_meta: Optional[dict[str, Any]] = None
+        self.c_async_submit_count: int = 0
+        self.c_async_fallback_count: int = 0
+        self.c_async_sync_wait_seconds_sum: float = 0.0
+        self.c_async_sync_wait_seconds_count: int = 0
         self._async_thread: Optional[threading.Thread] = None
         self._async_exc: Optional[BaseException] = None
         # Latency telemetry (decode only).  submit_to_sync_wait_seconds
@@ -540,6 +550,220 @@ class PIMMoEBackend(CPUMoEBackend):
         self.real_dpu_expert_calls += 1
         self.last_kernel_cycles = rt_down.last_cycles()
         return output
+
+    def _submit_forward_c_async(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> bool:
+        """ADR-002 M-24 Stage A: submit the fused op to a C pthread worker.
+
+        Returns True on successful submission (handle stashed in
+        ``self._c_async_handle`` + metadata in ``self._c_async_meta``).
+        Returns False when the path is unavailable (caller should fall
+        back to the synchronous real path).
+
+        PIM still performs the gate_up and down matvecs — this is purely
+        an orchestration-overlap change so that ``HybridMoE.forward``'s
+        subsequent GPU expert loop runs concurrently with DPU work.
+        """
+        rt_gate_up = self.quantized_runtime
+        rt_down = self.quantized_runtime_down or self.quantized_runtime
+        if rt_gate_up is None or rt_down is None:
+            return False
+
+        flat = hidden_states.view(-1, hidden_states.shape[-1])
+        batch_size = flat.shape[0]
+        cpu_mask = ~self.gpu_experts_mask.bool()
+
+        flat_cpu = flat.to("cpu", dtype=torch.float32)
+        topk_ids_cpu = topk_ids.to("cpu", dtype=torch.long)
+        topk_weights_cpu = topk_weights.to("cpu", dtype=torch.float32)
+
+        # Collect activated CPU experts.  Same logic as _submit_forward_real.
+        activated_cpu_experts: list[tuple[int, int, torch.Tensor, torch.Tensor]] = []
+        for expert_idx in range(self.num_experts):
+            if not cpu_mask[expert_idx]:
+                continue
+            cpu_slot = self.cpu_expert_lookup.get(int(expert_idx))
+            if cpu_slot is None:
+                continue
+            match = topk_ids_cpu == expert_idx
+            token_indices = torch.where(match.any(dim=1))[0]
+            if len(token_indices) == 0:
+                continue
+            if cpu_slot not in self._gptq_experts:
+                # Fused path requires GPTQ weights for every activated expert.
+                return False
+            activated_cpu_experts.append(
+                (expert_idx, cpu_slot, token_indices, match)
+            )
+
+        if not activated_cpu_experts:
+            # No PIM work to submit; mark output as zeros so sync_forward
+            # has something to return.
+            self._fallback_output = torch.zeros_like(hidden_states)
+            return True
+
+        kernel_mode = 4
+        # Preload every expert's bundles + build the request list, same
+        # as the sync fused path.
+        requests: list[
+            tuple[torch.Tensor, int, int, int, int, int, int, int, int]
+        ] = []
+        per_expert_records: list[dict[str, Any]] = []
+        pre_hits_gu = rt_gate_up.preload_hits
+        pre_miss_gu = rt_gate_up.preload_misses
+        pre_profile_gu = self._snapshot_quantized_profile(rt_gate_up)
+        pre_hits_dn = rt_down.preload_hits
+        pre_miss_dn = rt_down.preload_misses
+        pre_profile_dn = self._snapshot_quantized_profile(rt_down)
+        for expert_idx, cpu_slot, token_indices, match in activated_cpu_experts:
+            gptq = self._gptq_experts.get(cpu_slot)
+            if gptq is None:
+                return False
+            states = flat_cpu[token_indices]
+            base_eid = self._expert_id(cpu_slot)
+            gate_up_eid = base_eid ^ 0x1212121212121212
+            down_eid = base_eid ^ 0x3333333333333333
+            gu_slot, gu_padded_in, gu_concat, gate_cols, up_cols = \
+                rt_gate_up.preload_concat_and_get_slot(
+                    gate_up_eid, gptq["gate"], gptq["up"], kernel_mode=kernel_mode,
+                )
+            dn_slot, dn_padded_in, dn_padded_out, dn_orig_out = \
+                rt_down.preload_and_get_slot(
+                    down_eid, gptq["down"], kernel_mode,
+                )
+            if gate_cols != up_cols or dn_padded_in != up_cols:
+                return False
+            requests.append(
+                (states, gu_slot, gu_padded_in, gu_concat,
+                 gate_cols, up_cols, dn_slot, dn_padded_in, dn_padded_out)
+            )
+            per_expert_records.append(
+                {
+                    "token_indices": token_indices,
+                    "match": match,
+                    "dn_orig_out": dn_orig_out,
+                }
+            )
+
+        handle = PIMQuantizedRuntime.submit_many_fused_silu_async(
+            rt_gate_up, rt_down, requests,
+        )
+        self._c_async_handle = handle
+        self._c_async_meta = {
+            "per_expert_records": per_expert_records,
+            "topk_weights_cpu": topk_weights_cpu,
+            "batch_size": batch_size,
+            "hidden_size": self.hidden_size,
+            "device": hidden_states.device,
+            "hidden_dtype": hidden_states.dtype,
+            "hidden_shape": hidden_states.shape,
+            "rt_gate_up": rt_gate_up,
+            "rt_down": rt_down,
+            "pre_hits_gu": pre_hits_gu,
+            "pre_miss_gu": pre_miss_gu,
+            "pre_profile_gu": pre_profile_gu,
+            "pre_hits_dn": pre_hits_dn,
+            "pre_miss_dn": pre_miss_dn,
+            "pre_profile_dn": pre_profile_dn,
+            "n": len(per_expert_records),
+        }
+        self.c_async_submit_count += 1
+        return True
+
+    def _sync_forward_c_async(self) -> Optional[torch.Tensor]:
+        """Join the C pthread worker started by ``_submit_forward_c_async``
+        and assemble the per-layer output tensor.
+
+        Returns the fallback output tensor (GPU/CPU dtype-matching), or
+        None if no C-async handle is pending (caller falls back to the
+        super().sync_forward path).
+        """
+        handle = self._c_async_handle
+        meta = self._c_async_meta
+        if handle is None or meta is None:
+            return None
+        self._c_async_handle = None
+        self._c_async_meta = None
+
+        import time as _time
+        wait_start = _time.perf_counter()
+        try:
+            down_outputs = handle.wait()
+        except Exception:
+            self._record_fallback("c_async_wait_failed")
+            self.c_async_fallback_count += 1
+            # Re-raise so sync_forward surfaces the error to the caller.
+            raise
+        wait_s = _time.perf_counter() - wait_start
+        self.c_async_sync_wait_seconds_sum += wait_s
+        self.c_async_sync_wait_seconds_count += 1
+
+        batch_size = meta["batch_size"]
+        hidden_size = meta["hidden_size"]
+        device = meta["device"]
+        hidden_dtype = meta["hidden_dtype"]
+        per_expert_records = meta["per_expert_records"]
+        topk_weights_cpu = meta["topk_weights_cpu"]
+
+        output = torch.zeros(
+            batch_size, hidden_size, dtype=torch.float32, device="cpu"
+        )
+        for rec, down_output in zip(per_expert_records, down_outputs):
+            dn_orig_out = rec["dn_orig_out"]
+            expert_output = down_output[:, :dn_orig_out].contiguous()
+            token_indices = rec["token_indices"]
+            match = rec["match"]
+            row_idx, col_idx = torch.where(match[token_indices])
+            weights = (
+                topk_weights_cpu[token_indices[row_idx], col_idx]
+                .to(dtype=expert_output.dtype)
+                .unsqueeze(1)
+            )
+            output.index_add_(
+                0, token_indices[row_idx], expert_output[row_idx] * weights
+            )
+
+        # Profile accounting (deferred from submit to wait).
+        rt_gate_up = meta["rt_gate_up"]
+        rt_down = meta["rt_down"]
+        self.quantized_preload_hits_local += (
+            rt_gate_up.preload_hits - meta["pre_hits_gu"]
+        )
+        self.quantized_preload_misses_local += (
+            rt_gate_up.preload_misses - meta["pre_miss_gu"]
+        )
+        self._accumulate_quantized_profile_delta(
+            meta["pre_profile_gu"],
+            self._snapshot_quantized_profile(rt_gate_up),
+        )
+        if rt_down is not rt_gate_up:
+            self.quantized_preload_hits_local += (
+                rt_down.preload_hits - meta["pre_hits_dn"]
+            )
+            self.quantized_preload_misses_local += (
+                rt_down.preload_misses - meta["pre_miss_dn"]
+            )
+            self._accumulate_quantized_profile_delta(
+                meta["pre_profile_dn"],
+                self._snapshot_quantized_profile(rt_down),
+            )
+
+        n = meta["n"]
+        self.real_dpu_quantized_calls += 2 * n
+        self.real_dpu_expert_calls += n
+        self.last_kernel_cycles = rt_down.last_cycles()
+        self.quantized_batched_expert_groups_local += 1
+        self.quantized_batched_experts_local += n
+        # Treat the C async path as a fused-call variant for counter parity.
+        self.c_fused_calls += 1
+        self.c_fused_experts_processed += n
+
+        hidden_shape = meta["hidden_shape"]
+        return output.view(hidden_shape).to(device=device, dtype=hidden_dtype)
 
     def _run_quantized_experts_c_fused(
         self,
@@ -1257,6 +1481,39 @@ class PIMMoEBackend(CPUMoEBackend):
 
         context = get_context()
 
+        # ADR-002 M-24 Stage A: C-level async submit.
+        #
+        # When enabled and the layer qualifies (decode, GPTQ, real mode,
+        # has CPU-side experts), push the whole gate_up+silu*up+down op
+        # to a C pthread worker.  Python returns immediately; the GIL
+        # stays released throughout DPU work so HybridMoE.forward's GPU
+        # expert loop runs truly concurrently.  sync_forward later joins
+        # the worker via _sync_forward_c_async.
+        #
+        # Falls back transparently to the legacy path on any failure.
+        c_async_eligible = (
+            self.enable_c_async_submit
+            and self.pim_execution_mode == "real"
+            and self.has_cpu_experts
+            and self.is_gptq
+            and not context.is_prefill
+            and self.quantized_runtime is not None
+        )
+        if c_async_eligible:
+            try:
+                ok = self._submit_forward_c_async(
+                    hidden_states, topk_ids, topk_weights
+                )
+                if ok:
+                    return
+                self.c_async_fallback_count += 1
+            except Exception:
+                self._record_fallback("c_async_submit_failed")
+                self.c_async_fallback_count += 1
+                # Drop any partial handle and fall through.
+                self._c_async_handle = None
+                self._c_async_meta = None
+
         # ADR-002 M-10: async PIM submit.
         #
         # When enabled and in decode (not prefill), spawn a background
@@ -1336,11 +1593,22 @@ class PIMMoEBackend(CPUMoEBackend):
         then delegate to the CPU/GPTQ sync path which reads
         ``self._fallback_output``.
 
-        If async was not used this call (prefill, or
-        enable_async_pim_submit=False), this is a straight
-        delegate with zero overhead — we pay only one branch check
-        plus the no-op ``_async_thread is None`` test.
+        ADR-002 M-24 Stage A: if a C-level async handle is pending, join
+        its pthread worker and return the assembled output directly.
+        This keeps the GPU expert loop running in parallel with PIM DPU
+        work on real hardware.
+
+        If neither async path was used this call, the straight delegate
+        pays only one branch check.
         """
+        # Prefer C async path when a handle is pending (Stage A).
+        if self._c_async_handle is not None:
+            out = self._sync_forward_c_async()
+            if out is not None:
+                return out
+            # _sync_forward_c_async returned None only if the handle was
+            # cleared concurrently (not expected); fall through.
+
         t = self._async_thread
         if t is not None:
             import time as _time
@@ -1540,6 +1808,15 @@ class PIMMoEBackend(CPUMoEBackend):
                 # ADR-002 M-24 Stage A: reserved flag (wired but inactive
                 # until the C async submit path lands).
                 "enable_c_async_submit": self.enable_c_async_submit,
+                "c_async_submit_count": self.c_async_submit_count,
+                "c_async_fallback_count": self.c_async_fallback_count,
+                "c_async_sync_wait_seconds_sum": self.c_async_sync_wait_seconds_sum,
+                "c_async_sync_wait_seconds_count": self.c_async_sync_wait_seconds_count,
+                "c_async_sync_wait_seconds_mean": (
+                    (self.c_async_sync_wait_seconds_sum / self.c_async_sync_wait_seconds_count)
+                    if self.c_async_sync_wait_seconds_count > 0
+                    else None
+                ),
                 # PIM real-compute participation ratio.  Offloaded experts
                 # are those routed to a non-GPU-resident slot; PIM-computed
                 # experts are those handled by one of the DPU paths
