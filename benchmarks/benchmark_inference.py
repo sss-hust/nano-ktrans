@@ -103,6 +103,7 @@ def benchmark_backend(
     pim_enable_async_submit: bool,
     pim_enable_c_fused: bool,
     pim_enable_c_async: bool,
+    pim_enable_m25_pinned: bool,
     enable_dynamic_expert_scheduler: bool,
     scheduler_prefill_force_gpu_budget_per_layer: int | None,
     scheduler_prefill_collect_only: bool | None,
@@ -151,6 +152,7 @@ def benchmark_backend(
             "enable_async_pim_submit": pim_enable_async_submit,
             "enable_c_fused_kernel": pim_enable_c_fused,
             "enable_c_async_submit": pim_enable_c_async,
+            "enable_m25_pinned_d2h": pim_enable_m25_pinned,
         }
     elif backend == "cuda_pim_shadow":
         if not torch.cuda.is_available():
@@ -170,6 +172,7 @@ def benchmark_backend(
             "enable_async_pim_submit": pim_enable_async_submit,
             "enable_c_fused_kernel": pim_enable_c_fused,
             "enable_c_async_submit": pim_enable_c_async,
+            "enable_m25_pinned_d2h": pim_enable_m25_pinned,
         }
     else:
         raise ValueError(f"Unsupported backend: {backend}")
@@ -430,6 +433,29 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Force --pim-enable-c-async OFF.",
     )
+    # ADR-002 M-25: pinned-buffer + non_blocking D2H/H2D in submit/sync.
+    parser.add_argument(
+        "--pim-enable-m25-pinned",
+        dest="pim_enable_m25_pinned",
+        action="store_true",
+        default=False,
+        help=(
+            "ADR-002 M-25 Stage A+B: replace the 3 blocking .to('cpu') "
+            "in submit_forward_c_async and the final .to(cuda) in "
+            "sync_forward_c_async with pinned-memory + non_blocking "
+            "copies, and remove the 2 .item() diagnostic sync points "
+            "that used to run on every submit_forward entry.  PIM "
+            "still does all matvec work; this flag only closes the "
+            "GPU-side serialisation gap identified after M-24.  "
+            "Default OFF."
+        ),
+    )
+    parser.add_argument(
+        "--no-pim-m25-pinned",
+        dest="pim_enable_m25_pinned",
+        action="store_false",
+        help="Force --pim-enable-m25-pinned OFF.",
+    )
     # ADR-002 M-18: routing-aware GPU residency.
     parser.add_argument(
         "--routing-freq-json",
@@ -560,6 +586,7 @@ def main() -> None:
                 pim_enable_async_submit=args.pim_enable_async_submit,
                 pim_enable_c_fused=args.pim_enable_c_fused,
                 pim_enable_c_async=args.pim_enable_c_async,
+                pim_enable_m25_pinned=args.pim_enable_m25_pinned,
                 enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
                 scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
                 scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,
