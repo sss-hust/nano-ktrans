@@ -1,0 +1,337 @@
+{
+  "calibration_dir": "benchmarks/results/m23_calibrations",
+  "num_gpu_experts": 92,
+  "prompts": [
+    "code",
+    "dialogue",
+    "math",
+    "multilingual",
+    "story"
+  ],
+  "first_n_overlap": {
+    "code": {
+      "mean_intersection_per_layer": 65.9375,
+      "mean_intersection_fraction": 0.7167119565217391,
+      "min_intersection": 61,
+      "max_intersection": 71,
+      "k": 92
+    },
+    "dialogue": {
+      "mean_intersection_per_layer": 66.27083587646484,
+      "mean_intersection_fraction": 0.72033517257027,
+      "min_intersection": 63,
+      "max_intersection": 72,
+      "k": 92
+    },
+    "math": {
+      "mean_intersection_per_layer": 65.875,
+      "mean_intersection_fraction": 0.7160326086956522,
+      "min_intersection": 61,
+      "max_intersection": 70,
+      "k": 92
+    },
+    "multilingual": {
+      "mean_intersection_per_layer": 66.35416412353516,
+      "mean_intersection_fraction": 0.7212409143862517,
+      "min_intersection": 61,
+      "max_intersection": 73,
+      "k": 92
+    },
+    "story": {
+      "mean_intersection_per_layer": 65.08333587646484,
+      "mean_intersection_fraction": 0.7074275638746179,
+      "min_intersection": 59,
+      "max_intersection": 69,
+      "k": 92
+    }
+  },
+  "mask_overlap_matrix": {
+    "code": {
+      "code": {
+        "mean_intersection_per_layer": 92.0,
+        "mean_intersection_fraction": 1.0,
+        "min_intersection": 92,
+        "max_intersection": 92,
+        "k": 92
+      },
+      "dialogue": {
+        "mean_intersection_per_layer": 77.95833587646484,
+        "mean_intersection_fraction": 0.8473732160485309,
+        "min_intersection": 73,
+        "max_intersection": 83,
+        "k": 92
+      },
+      "math": {
+        "mean_intersection_per_layer": 77.66666412353516,
+        "mean_intersection_fraction": 0.8442028709079908,
+        "min_intersection": 70,
+        "max_intersection": 82,
+        "k": 92
+      },
+      "multilingual": {
+        "mean_intersection_per_layer": 78.22916412353516,
+        "mean_intersection_fraction": 0.8503170013427734,
+        "min_intersection": 71,
+        "max_intersection": 86,
+        "k": 92
+      },
+      "story": {
+        "mean_intersection_per_layer": 76.875,
+        "mean_intersection_fraction": 0.8355978260869565,
+        "min_intersection": 70,
+        "max_intersection": 81,
+        "k": 92
+      }
+    },
+    "dialogue": {
+      "code": {
+        "mean_intersection_per_layer": 77.95833587646484,
+        "mean_intersection_fraction": 0.8473732160485309,
+        "min_intersection": 73,
+        "max_intersection": 83,
+        "k": 92
+      },
+      "dialogue": {
+        "mean_intersection_per_layer": 92.0,
+        "mean_intersection_fraction": 1.0,
+        "min_intersection": 92,
+        "max_intersection": 92,
+        "k": 92
+      },
+      "math": {
+        "mean_intersection_per_layer": 79.75,
+        "mean_intersection_fraction": 0.8668478260869565,
+        "min_intersection": 72,
+        "max_intersection": 84,
+        "k": 92
+      },
+      "multilingual": {
+        "mean_intersection_per_layer": 79.83333587646484,
+        "mean_intersection_fraction": 0.8677536508311396,
+        "min_intersection": 73,
+        "max_intersection": 85,
+        "k": 92
+      },
+      "story": {
+        "mean_intersection_per_layer": 78.29166412353516,
+        "mean_intersection_fraction": 0.8509963491688604,
+        "min_intersection": 72,
+        "max_intersection": 86,
+        "k": 92
+      }
+    },
+    "math": {
+      "code": {
+        "mean_intersection_per_layer": 77.66666412353516,
+        "mean_intersection_fraction": 0.8442028709079908,
+        "min_intersection": 70,
+        "max_intersection": 82,
+        "k": 92
+      },
+      "dialogue": {
+        "mean_intersection_per_layer": 79.75,
+        "mean_intersection_fraction": 0.8668478260869565,
+        "min_intersection": 72,
+        "max_intersection": 84,
+        "k": 92
+      },
+      "math": {
+        "mean_intersection_per_layer": 92.0,
+        "mean_intersection_fraction": 1.0,
+        "min_intersection": 92,
+        "max_intersection": 92,
+        "k": 92
+      },
+      "multilingual": {
+        "mean_intersection_per_layer": 78.75,
+        "mean_intersection_fraction": 0.8559782608695652,
+        "min_intersection": 73,
+        "max_intersection": 85,
+        "k": 92
+      },
+      "story": {
+        "mean_intersection_per_layer": 77.5,
+        "mean_intersection_fraction": 0.842391304347826,
+        "min_intersection": 71,
+        "max_intersection": 82,
+        "k": 92
+      }
+    },
+    "multilingual": {
+      "code": {
+        "mean_intersection_per_layer": 78.22916412353516,
+        "mean_intersection_fraction": 0.8503170013427734,
+        "min_intersection": 71,
+        "max_intersection": 86,
+        "k": 92
+      },
+      "dialogue": {
+        "mean_intersection_per_layer": 79.83333587646484,
+        "mean_intersection_fraction": 0.8677536508311396,
+        "min_intersection": 73,
+        "max_intersection": 85,
+        "k": 92
+      },
+      "math": {
+        "mean_intersection_per_layer": 78.75,
+        "mean_intersection_fraction": 0.8559782608695652,
+        "min_intersection": 73,
+        "max_intersection": 85,
+        "k": 92
+      },
+      "multilingual": {
+        "mean_intersection_per_layer": 92.0,
+        "mean_intersection_fraction": 1.0,
+        "min_intersection": 92,
+        "max_intersection": 92,
+        "k": 92
+      },
+      "story": {
+        "mean_intersection_per_layer": 77.83333587646484,
+        "mean_intersection_fraction": 0.846014520396357,
+        "min_intersection": 72,
+        "max_intersection": 84,
+        "k": 92
+      }
+    },
+    "story": {
+      "code": {
+        "mean_intersection_per_layer": 76.875,
+        "mean_intersection_fraction": 0.8355978260869565,
+        "min_intersection": 70,
+        "max_intersection": 81,
+        "k": 92
+      },
+      "dialogue": {
+        "mean_intersection_per_layer": 78.29166412353516,
+        "mean_intersection_fraction": 0.8509963491688604,
+        "min_intersection": 72,
+        "max_intersection": 86,
+        "k": 92
+      },
+      "math": {
+        "mean_intersection_per_layer": 77.5,
+        "mean_intersection_fraction": 0.842391304347826,
+        "min_intersection": 71,
+        "max_intersection": 82,
+        "k": 92
+      },
+      "multilingual": {
+        "mean_intersection_per_layer": 77.83333587646484,
+        "mean_intersection_fraction": 0.846014520396357,
+        "min_intersection": 72,
+        "max_intersection": 84,
+        "k": 92
+      },
+      "story": {
+        "mean_intersection_per_layer": 92.0,
+        "mean_intersection_fraction": 1.0,
+        "min_intersection": 92,
+        "max_intersection": 92,
+        "k": 92
+      }
+    }
+  },
+  "pim_share_matrix": {
+    "code": {
+      "code": 0.024245694279670715,
+      "dialogue": 0.08166730403900146,
+      "math": 0.08320092409849167,
+      "multilingual": 0.0775323212146759,
+      "story": 0.080078125
+    },
+    "dialogue": {
+      "code": 0.07817887514829636,
+      "dialogue": 0.033239513635635376,
+      "math": 0.06777455657720566,
+      "multilingual": 0.06828304380178452,
+      "story": 0.06611327081918716
+    },
+    "math": {
+      "code": 0.08200430124998093,
+      "dialogue": 0.07099184393882751,
+      "math": 0.028712039813399315,
+      "multilingual": 0.07331177592277527,
+      "story": 0.07076822221279144
+    },
+    "multilingual": {
+      "code": 0.07343748956918716,
+      "dialogue": 0.06945522129535675,
+      "math": 0.07351254671812057,
+      "multilingual": 0.035219110548496246,
+      "story": 0.06930337101221085
+    },
+    "story": {
+      "code": 0.08595546334981918,
+      "dialogue": 0.07928959280252457,
+      "math": 0.08348781615495682,
+      "multilingual": 0.07984914630651474,
+      "story": 0.023177077993750572
+    }
+  },
+  "first_n_pim_share": {
+    "code": 0.2702406644821167,
+    "dialogue": 0.27764299511909485,
+    "math": 0.28171345591545105,
+    "multilingual": 0.27467671036720276,
+    "story": 0.27369794249534607
+  },
+  "mean_mask_pim_share": {
+    "code": 0.04561781510710716,
+    "dialogue": 0.0494791716337204,
+    "math": 0.046477749943733215,
+    "multilingual": 0.051167383790016174,
+    "story": 0.046321600675582886
+  },
+  "mean_mask_overlap_vs_self": {
+    "code": {
+      "mean_intersection_per_layer": 82.375,
+      "mean_intersection_fraction": 0.8953804347826086,
+      "min_intersection": 79,
+      "max_intersection": 89,
+      "k": 92
+    },
+    "dialogue": {
+      "mean_intersection_per_layer": 83.54166412353516,
+      "mean_intersection_fraction": 0.9080615665601648,
+      "min_intersection": 78,
+      "max_intersection": 88,
+      "k": 92
+    },
+    "math": {
+      "mean_intersection_per_layer": 83.35416412353516,
+      "mean_intersection_fraction": 0.9060235230819039,
+      "min_intersection": 79,
+      "max_intersection": 87,
+      "k": 92
+    },
+    "multilingual": {
+      "mean_intersection_per_layer": 83.41666412353516,
+      "mean_intersection_fraction": 0.9067028709079908,
+      "min_intersection": 78,
+      "max_intersection": 89,
+      "k": 92
+    },
+    "story": {
+      "mean_intersection_per_layer": 81.5625,
+      "mean_intersection_fraction": 0.8865489130434783,
+      "min_intersection": 78,
+      "max_intersection": 86,
+      "k": 92
+    }
+  },
+  "summary": {
+    "self_calib_pim_share_mean": 0.028918687254190445,
+    "cross_calib_pim_share_mean": 0.07570976056158543,
+    "mean_mask_pim_share_mean": 0.04781274423003197,
+    "first_n_pim_share_mean": 0.2755943536758423,
+    "generalisation_gap_pp": 4.679107330739499,
+    "vs_uniform_improvement_static_pp": 19.988459311425686,
+    "mean_mask_vs_cross_calib_pp": 2.7897016331553464,
+    "mean_mask_vs_self_calib_pp": 1.8894056975841524,
+    "k": 92,
+    "num_prompts": 5,
+    "num_layers": 48,
+    "num_experts": 128
+  }
+}

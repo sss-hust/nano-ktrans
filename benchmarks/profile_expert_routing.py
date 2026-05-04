@@ -86,7 +86,7 @@ def _install_router_hooks(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="ADR-002 M-18: profile per-layer expert routing frequency."
+        description="ADR-002 M-18/M-23: profile per-layer expert routing frequency."
     )
     parser.add_argument("--model-path", required=True)
     parser.add_argument(
@@ -95,6 +95,22 @@ def main() -> None:
         "young scholar who spent her evenings cataloguing the names of stars. "
         "Each constellation had its own folklore, and she enjoyed weaving them "
         "into the local children's bedtime stories.",
+        help="Single-prompt mode.  Ignored when --prompts-json is provided.",
+    )
+    parser.add_argument(
+        "--prompts-json",
+        default=None,
+        help=(
+            "ADR-002 M-23: batch mode.  Path to a JSON file with a list of "
+            "{'name': ..., 'prompt': ...} entries.  One activation_freq file is "
+            "dumped per entry into --json-out-dir.  A shared LLM instance is "
+            "reused across prompts to amortise the ~220s load cost."
+        ),
+    )
+    parser.add_argument(
+        "--json-out-dir",
+        default=None,
+        help="ADR-002 M-23: output directory for --prompts-json batch mode.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=32)
     parser.add_argument(
@@ -122,8 +138,34 @@ def main() -> None:
         "reasonable.  Either way the routing counts are identical because "
         "the router itself sees all experts.",
     )
-    parser.add_argument("--json-out", required=True)
+    parser.add_argument(
+        "--json-out",
+        default=None,
+        help="Single-prompt mode output.  Required when --prompts-json is NOT set.",
+    )
     args = parser.parse_args()
+
+    # Resolve prompt list up front so we fail fast on bad config.
+    batch_mode = args.prompts_json is not None
+    if batch_mode:
+        if not args.json_out_dir:
+            raise SystemExit("--json-out-dir is required with --prompts-json")
+        with open(args.prompts_json, "r", encoding="utf-8") as f:
+            prompt_entries = json.load(f)
+        if not isinstance(prompt_entries, list) or not prompt_entries:
+            raise SystemExit(
+                "--prompts-json must contain a non-empty list of "
+                "{'name': ..., 'prompt': ...} entries"
+            )
+        for entry in prompt_entries:
+            if not isinstance(entry, dict) or "name" not in entry or "prompt" not in entry:
+                raise SystemExit(
+                    "every --prompts-json entry must have 'name' and 'prompt' fields"
+                )
+    else:
+        if not args.json_out:
+            raise SystemExit("--json-out is required in single-prompt mode")
+        prompt_entries = [{"name": "default", "prompt": args.prompt}]
 
     print(f"[profile] loading {args.model_path} on {args.device} ...", flush=True)
     t0 = time.perf_counter()
@@ -139,8 +181,11 @@ def main() -> None:
     config = llm.model.model.config
     num_layers = int(config.num_hidden_layers)
     num_experts = int(config.num_local_experts)
-    counts = torch.zeros(num_layers, num_experts, dtype=torch.float64)
 
+    # Per-prompt loop — reuse the same LLM instance across prompts to
+    # amortise the model load cost (~220s on Qwen3-30B-A3B-GPTQ).
+    # Install hooks ONCE, reset counts between prompts.
+    counts = torch.zeros(num_layers, num_experts, dtype=torch.float64)
     handles = _install_router_hooks(llm, counts)
     if not handles:
         raise SystemExit(
@@ -149,40 +194,77 @@ def main() -> None:
         )
     print(f"[profile] hooked {len(handles)} HybridMoE layers", flush=True)
 
-    print(f"[profile] running calibration generate ...", flush=True)
-    t1 = time.perf_counter()
-    # LLM.generate() re-tokenises a str prompt itself; just pass it through.
-    _ = llm.generate(args.prompt, max_new_tokens=args.max_new_tokens)
-    gen_seconds = time.perf_counter() - t1
-    print(f"[profile] calibration done in {gen_seconds:.2f}s", flush=True)
+    out_dir = Path(args.json_out_dir) if batch_mode else None
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    all_entries: list[dict[str, Any]] = []
+    for entry in prompt_entries:
+        name = str(entry["name"])
+        prompt = str(entry["prompt"])
+        counts.zero_()
+        print(f"[profile] calibrating prompt name={name!r} len={len(prompt)} chars ...", flush=True)
+        t1 = time.perf_counter()
+        _ = llm.generate(prompt, max_new_tokens=args.max_new_tokens)
+        gen_seconds = time.perf_counter() - t1
+        total = float(counts.sum().item())
+        if total <= 0:
+            raise SystemExit(
+                f"Routing counts for prompt {name!r} are all zero — hooks did not fire."
+            )
+        # Per-layer row sum == n_tokens * top_k; normalise to per-layer freq.
+        freq = counts / counts.sum(dim=1, keepdim=True).clamp_min(1.0)
+        payload: dict[str, Any] = {
+            "model_path": args.model_path,
+            "device": args.device,
+            "calibration_prompt_name": name,
+            "calibration_prompt": prompt,
+            "max_new_tokens": args.max_new_tokens,
+            "num_layers": num_layers,
+            "num_experts": num_experts,
+            "load_seconds": load_seconds,
+            "calibration_seconds": gen_seconds,
+            "total_routing_decisions": int(total),
+            "raw_counts": counts.to(torch.float32).tolist(),
+            "activation_freq": freq.to(torch.float32).tolist(),
+        }
+        if batch_mode:
+            assert out_dir is not None
+            out_path = out_dir / f"routing_freq_{name}.json"
+        else:
+            out_path = Path(args.json_out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(
+            f"[profile] wrote {out_path}  "
+            f"(prompt={name!r}, {gen_seconds:.1f}s, "
+            f"{num_layers} layers x {num_experts} experts)",
+            flush=True,
+        )
+        all_entries.append({"name": name, "path": str(out_path), "calibration_seconds": gen_seconds})
 
     for h in handles:
         h.remove()
 
-    total = float(counts.sum().item())
-    if total <= 0:
-        raise SystemExit("Routing counts are all zero — hooks did not fire.")
-    # Normalise to per-token frequency per layer.  Each token activates
-    # top_k experts per layer, so per-layer row sum == n_tokens * top_k.
-    freq = counts / counts.sum(dim=1, keepdim=True).clamp_min(1.0)
-
-    payload: dict[str, Any] = {
-        "model_path": args.model_path,
-        "device": args.device,
-        "calibration_prompt": args.prompt,
-        "max_new_tokens": args.max_new_tokens,
-        "num_layers": num_layers,
-        "num_experts": num_experts,
-        "load_seconds": load_seconds,
-        "calibration_seconds": gen_seconds,
-        "total_routing_decisions": int(total),
-        "raw_counts": counts.to(torch.float32).tolist(),
-        "activation_freq": freq.to(torch.float32).tolist(),
-    }
-    out = Path(args.json_out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"[profile] wrote {out}  ({num_layers} layers x {num_experts} experts)")
+    if batch_mode:
+        assert out_dir is not None
+        manifest_path = out_dir / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "model_path": args.model_path,
+                    "device": args.device,
+                    "num_gpu_experts": args.num_gpu_experts,
+                    "offload_backend": args.offload_backend,
+                    "max_new_tokens": args.max_new_tokens,
+                    "load_seconds": load_seconds,
+                    "entries": all_entries,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"[profile] wrote manifest {manifest_path}", flush=True)
 
 
 if __name__ == "__main__":

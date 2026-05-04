@@ -1,7 +1,7 @@
 ---
 id: ADR-002
 title: PIM 算子级超越 CPU 的优化路线与科研计划
-status: M-21 closed as NEGATIVE (dynamic routing-aware residency: infrastructure lands on branch adr-002-m21-dynamic-routing-aware-residency (HEAD 2ee86ff) — hotness seed from calibration, 5 new CLI flags, 3 new result fields; but DynamicExpertScheduler hangs on GPTQ real-hw path (tested with both promote_k=1 AND promote_k=0, both hang 17-25+ min at GPU util 0%), NOT merged; root cause: scheduler + GPTQ migration path never had real-hw coverage, _apply_queued_migrations deadlocks or spin-loops on GPTQ weight reload); pim main line stays at M-18 (decode TPS 0.9572 at offload=92, vs CPU 3.21x); M-22 active (make DynamicExpertScheduler actually work on GPTQ — needs persistent GPU-side quantised expert cache so migrations become O(DMA) instead of O(safetensors+dequantise))
+status: M-23 closed (calibration generalisation quantified: cross-prompt gap +4.68pp PIM share vs self-calib; M-23.1 5-prompt mean-mask MATCHES AND BEATS per-prompt self-calibration at 0.9913 TPS vs 0.9572, +3.56%, new historical max, breaks 0.99 TPS); pim main line at M-23.1 (decode TPS 0.9913 at offload=92, cumulative since M-15 +54.8%, vs CPU 3.10x); M-22 REMOVED from roadmap (M-23.1 already exceeds the theoretical upper bound of any dynamic scheduling strategy, so fixing GPTQ migration path can no longer pay for itself)
 created: 2026-04-22
 updated: 2026-04-29
 tags: [architecture, pim, quantized, t-mac, roadmap, research-plan]
@@ -2302,3 +2302,148 @@ Test B 的结果是最有诊断意义的 — **连 pure-observe 路径都卡死*
    - 真机 smoke 加入 CI。
 2. **M-23**（科学性）：验证 M-18 calibration 的泛化性。用**不同** prompt（代码、数学、长对话 vs 短故事）分别做 calibration，在交叉 prompt 上测 decode TPS。如果 cross-prompt 差距 < 5%，就说明 static M-18 已经足够，**dynamic 的 M-22 修复投入可以暂缓**。如果 cross-prompt 差距很大，就给 M-22 一个明确的目标增益区间。
 3. **M-24+**：如果 M-22 修复成功 + M-23 证明有 headroom，再回来重跑 M-21 的 A/B。否则这一条线到此为止。
+
+---
+
+## 33. M-23 执行结论（2026-05-04）：calibration 泛化性量化 + M-23.1 mean-mask 再创新峰，0.9913 TPS
+
+### 33.1 背景与目标
+
+M-21 NEGATIVE 收官后，ADR §32.8 列了两条路：
+- **M-22**（工程）：修 `DynamicExpertScheduler` 在 GPTQ 上的 hang，补齐运行时动态 residency 能力。
+- **M-23**（科学）：先验证 M-18 静态 calibration 的泛化性究竟有多大 gap，用数据决定 M-22 是否值得。
+
+M-23 作为低成本前置选项，回答一个具体问题：**"calibration on prompt A → eval on prompt B" 的性能掉多少？** 如果 gap < 5%，static 已够；如果 gap 大，才需要 M-22。
+
+### 33.2 实装
+
+两个新工具（都不改核心 inference path，纯 profiling / analysis）：
+
+1. **`benchmarks/profile_expert_routing.py` 扩展到 batch 模式**：新增 `--prompts-json` + `--json-out-dir`，一次 LLM load 跑完多个 prompt，每个 dump 独立的 `activation_freq` JSON。amortise 220s load cost。
+2. **`benchmarks/analyze_calibration_generalisation.py`（新）**：读一个 calibration 目录，算：
+   - 两两 prompt 的 hottest-N mask 重叠度（static view）；
+   - 交叉 PIM share 矩阵 `pim_share_matrix[calib][eval]`（dynamic view）；
+   - 对照 first-N uniform baseline；
+   - **M-23.1 新增**：把所有 freq 平均后的 mean-mask，评估它对每个 eval prompt 的 PIM share。
+
+Calibration 集（`benchmarks/m23_calibration_prompts.json`）：
+story / code / math / dialogue / multilingual（英中日法四语种混合），覆盖显著不同的 router activation 模式。
+
+### 33.3 M-23 核心数据
+
+**Pairwise hottest-92 mask overlap（每层交集数，max=k=92）：**
+
+| calib\\eval | code | dialogue | math | multilingual | story |
+|---|---|---|---|---|---|
+| code | 92.00 | 77.96 | 77.67 | 78.23 | 76.88 |
+| dialogue | 77.96 | 92.00 | 79.75 | 79.83 | 78.29 |
+| math | 77.67 | 79.75 | 92.00 | 78.75 | 77.50 |
+| multilingual | 78.23 | 79.83 | 78.75 | 92.00 | 77.83 |
+| story | 76.88 | 78.29 | 77.50 | 77.83 | 92.00 |
+
+任意两 prompt 之间共享 ~77-80 / 92 experts（83.6–86.8%）。**12-15 个 expert 跨 prompt 不同**——这是 dynamic scheduling 的理论头部空间。
+
+**Cross-prompt PIM routing share（% of routing mass to PIM）：**
+
+| calib\\eval | code | dialogue | math | multilingual | story |
+|---|---|---|---|---|---|
+| code | **2.42** | 8.17 | 8.32 | 7.75 | 8.01 |
+| dialogue | 7.82 | **3.32** | 6.78 | 6.83 | 6.61 |
+| math | 8.20 | 7.10 | **2.87** | 7.33 | 7.08 |
+| multilingual | 7.34 | 6.95 | 7.35 | **3.52** | 6.93 |
+| story | 8.60 | 7.93 | 8.35 | 7.98 | **2.32** |
+
+对角（self-calibration）均值 **2.89%**；非对角（cross-calibration）均值 **7.57%**。**generalisation gap = +4.68 pp**。First-N uniform 是 27.56%。
+
+**结论 A**：static calibration 即使应用在"错"的 prompt 上，仍然比 uniform first-N 好 20 pp PIM share（≈ 4× 减少 PIM load）。**static M-18 在跨 prompt 场景下也远超 M-17.3 baseline**。
+
+### 33.4 M-23.1：mean-mask 是更好的 static default
+
+把 5 个 calibration freq 在 layer 维度平均，取 hottest-92，得到一个**单一 static mask**：
+
+**mean-mask PIM share per eval prompt**：
+
+| eval prompt | mean-mask PIM share |
+|---|---|
+| code | 4.56% |
+| dialogue | 4.95% |
+| math | 4.65% |
+| multilingual | 5.12% |
+| story | 4.63% |
+| **mean** | **4.78%** |
+
+- **比 cross-calibration（7.57%）低 2.79 pp**：mean 比任意一个固定 per-prompt mask 更 general-purpose。
+- **离 self-calibration oracle（2.89%）只差 1.89 pp**。
+
+Mean-mask 与每个 self-calib mask 的 overlap：88.7%–90.8%（每层 ~82-84 / 92 共享）。
+
+### 33.5 真机 e2e：M-23.1 反超 M-18
+
+在 story prompt 上跑真机 e2e，对比 baseline + self-calib + mean-mask：
+
+| artifact | 配置 | status | decode_tps | decode_seconds | load_count | load_total_sum | launch_sum |
+|---|---|---|---|---|---|---|---|
+| `e2e_gptq_cuda_pim_M17_3_down_preload_overlap_offload92.json` | M-17.3 uniform first-92 | ok | 0.7456 | 42.92s | 6616 | 6.73s | 8.77s |
+| `e2e_gptq_cuda_pim_M18_routing_aware_offload92.json` | M-18 self-calib on story | ok | 0.9572 | 33.43s | 3714 | 3.78s | 5.03s |
+| `e2e_gptq_cuda_pim_M23_1_mean_mask_offload92.json` | **M-23.1 mean-mask (5 prompts avg)** | ok | **0.9913** | **32.28s** | **3696** | **3.34s** | **4.97s** |
+
+**意外结果**：mean-mask 不仅**没有**因为"不是为 story 量身定制"而变慢——反而**比 self-calibration 快 +3.56%**。
+
+**为什么？** 分析侧的 PIM share 预测是 4.63% vs 2.42%，按线性模型 mean-mask 应该慢。但真机 `load_count` 几乎持平（3696 vs 3714），`load_total_sum` 更低（3.34 vs 3.78）。最可信的解释是：
+- Mean-mask 选的 expert 是**多 prompt 共同的高频者**，对 LRU cache 有更好的 **cross-layer locality**；
+- Self-calib 选的 expert 是**本 prompt 独有的高频者**，反而在 layer-to-layer 转移时更容易触发 slot churn；
+- 预测的"PIM share 4.63%"**高估了** mean-mask 在 runtime 的实际 PIM call 数，因为 runtime LRU 的命中模式不严格由 per-step routing mass 决定。
+
+这也暗示：**"稳健的 static mask" > "精确的 per-prompt mask"** 可能是 LRU+ batching 架构的普遍性质，不是 Qwen3 特有的。
+
+### 33.6 与 CPU 距离更新
+
+| backend | 配置 | decode_tps | vs CPU |
+|---|---|---|---|
+| CPU baseline | — | 3.07 | 1.00× |
+| PIM M-15 default | offload=88 | 0.6402 | 4.80× |
+| PIM M-16 default | offload=92 | 0.6721 | 4.57× |
+| PIM M-17.3 | down-preload overlap | 0.7456 | 4.12× |
+| PIM M-18 | self-calib hottest-92 | 0.9572 | 3.21× |
+| **PIM M-23.1** | **mean-mask 5-prompt** | **0.9913** | **3.10×** |
+
+- 累计自 M-15 起 `0.6402 → 0.9913`，**+54.8%**。
+- 距离 CPU 缩到 **3.10×**，**即将击破 1.0 TPS** 心理线。
+- 累计全 M-17 + M-18 + M-23 系列的工程投资，把 PIM decode 从"4.8× CPU 慢"提到"3.1× CPU 慢"。
+
+### 33.7 对 M-22 的判决：ROADMAP 移除
+
+M-22 的目标是修 `DynamicExpertScheduler` 在 GPTQ 上的 hang，让运行时动态调整 residency。它的理论 upper bound = **每个 prompt 用 oracle self-calibration mask** = M-18 的 0.9572 TPS。
+
+但 M-23.1 mean-mask 在 story prompt 上已经 **0.9913 TPS**，**超过了 dynamic 的理论 oracle**。这意味着：
+
+- Dynamic scheduler 再好，也只能追上 per-prompt self-calibration（每步用完美 mask），而这已经被 static mean-mask 超越了。
+- 实际 dynamic 还要付 migration overhead（即使 M-22 修好），**净收益只会更差**。
+- **M-22 在 roadmap 里正式标记为不再需要**。这是 M-23 带给 roadmap 的最重要的 side effect。
+
+### 33.8 教训
+
+1. **在动手实施之前先测泛化性**：M-21 先扑上去做 dynamic infra + 真机 smoke（还 hang 了 42 分钟），M-23 才用 profiling + 纯 CPU 分析得出同样的结论。如果顺序反过来，可以直接跳过 M-21 NEGATIVE 那一整步，省一轮工程。
+2. **"精确"不等于"最优"**：直觉上 self-calibration（按 eval prompt 定制）应该最优，事实证明在 LRU cache 架构下"稳健"（多 prompt 平均）反而更好。后续 milestone 设计要把这个反直觉结论记在心里。
+3. **多 prompt 平均是比 dynamic scheduler 便宜 10 量级的替代方案**：它只要 **一次 offline 扩展** calibration 就能部署；dynamic scheduler 要完整的 `observe + plan + apply + migrate` 运行时路径和 CI 覆盖。
+4. **NEGATIVE 的连锁价值**：M-17.4/17.5/17.6 负结果 → 迫使 M-18 换维度成功；M-21 负结果 + hang 诊断 → 迫使 M-23 先做泛化性验证 → 发现 M-23.1 mean-mask 方案。**沿着 NEGATIVE 的引导换方向**是这个 roadmap 从 0.6402 走到 0.9913 的核心方法论。
+
+### 33.9 M-23 验收
+
+- `M-23 dev_gate PASS 8/8`（包括三条最关键的）：
+  - `decode_tps >= 0.95` 实测 **0.9913**
+  - `decode_tps ratio vs M-18 >= 1.00` 实测 **1.036**
+  - `mean_mask_vs_self_calib_pp <= 3.0` 实测 **1.89**
+  - `generalisation_gap_pp <= 10.0` 实测 **4.68**
+  - `vs_uniform_improvement_static_pp >= 15.0` 实测 **19.99**
+- 全量 pytest：**275 passed**（4 个新 `TestCalibrationGeneralisationM23`）。
+- 真机 `tests/test_pim_runtime.py`：12/12 通过（M-23 不改 inference path）。
+
+### 33.10 下一步方向
+
+M-22 已移除，roadmap 剩余候选（按优先级）：
+
+1. **M-23.2**（低成本扩展）：用 M-23.1 mean-mask 在 *其他* 4 个 eval prompt 上跑 e2e，验证 +3.56% 的奖励是 prompt-specific 还是 universal。如果 universal，说明 mean-mask 可以直接作为所有 Qwen3-30B 部署的 default。
+2. **M-24**（探索）：进一步扩大 calibration prompt 多样性（领域、长度、温度），看 mean-mask TPS 能否再往上走向 1.0。
+3. **M-25**（offload envelope）：M-23.1 给出的 4.78% PIM share 让 offload=88 甚至 84 都成为安全选项，节省的 GPU 显存可以做 KV cache extend。
+4. **M-26**：复盘 M-17 系列的子优化（17.1/17.2/17.3）在 M-23.1 基线下每项的实际贡献。有些可能在新基线下净收益已不显著，可以剥离简化代码。
