@@ -101,6 +101,8 @@ def benchmark_backend(
     pim_layer_group_size: int,
     pim_enable_speculative_preload_gptq: bool,
     pim_enable_async_submit: bool,
+    pim_enable_c_fused: bool,
+    pim_enable_c_async: bool,
     enable_dynamic_expert_scheduler: bool,
     scheduler_prefill_force_gpu_budget_per_layer: int | None,
     scheduler_prefill_collect_only: bool | None,
@@ -147,6 +149,8 @@ def benchmark_backend(
             "pim_layer_group_size": pim_layer_group_size,
             "enable_speculative_preload_gptq": pim_enable_speculative_preload_gptq,
             "enable_async_pim_submit": pim_enable_async_submit,
+            "enable_c_fused_kernel": pim_enable_c_fused,
+            "enable_c_async_submit": pim_enable_c_async,
         }
     elif backend == "cuda_pim_shadow":
         if not torch.cuda.is_available():
@@ -164,6 +168,8 @@ def benchmark_backend(
             "pim_layer_group_size": pim_layer_group_size,
             "enable_speculative_preload_gptq": pim_enable_speculative_preload_gptq,
             "enable_async_pim_submit": pim_enable_async_submit,
+            "enable_c_fused_kernel": pim_enable_c_fused,
+            "enable_c_async_submit": pim_enable_c_async,
         }
     else:
         raise ValueError(f"Unsupported backend: {backend}")
@@ -385,6 +391,45 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Force async PIM submit OFF (default is already OFF)."
     )
+    # ADR-002 M-24 Stage B: C-level fused gate_up + silu*up + down.
+    parser.add_argument(
+        "--pim-enable-c-fused",
+        dest="pim_enable_c_fused",
+        action="store_true",
+        default=False,
+        help=(
+            "ADR-002 M-24 Stage B: collapse gate_up + Python silu*up + down "
+            "into a single C ctypes call via pim_quantized_run_many_fused_silu.  "
+            "PIM still performs all matvecs — this flag only reduces Python↔C "
+            "round-trip and middleman tensor overhead.  Default OFF."
+        ),
+    )
+    parser.add_argument(
+        "--no-pim-c-fused",
+        dest="pim_enable_c_fused",
+        action="store_false",
+        help="Force --pim-enable-c-fused OFF.",
+    )
+    # ADR-002 M-24 Stage A: C-level pthread async submit.
+    parser.add_argument(
+        "--pim-enable-c-async",
+        dest="pim_enable_c_async",
+        action="store_true",
+        default=False,
+        help=(
+            "ADR-002 M-24 Stage A: submit the fused op to a C pthread worker "
+            "so HybridMoE.forward's GPU expert loop runs concurrently with "
+            "DPU work.  Avoids the Python GIL contention that sank M-10.  "
+            "Only effective during decode + GPTQ + real mode + has CPU-side "
+            "experts; falls back to legacy sync path on any failure.  Default OFF."
+        ),
+    )
+    parser.add_argument(
+        "--no-pim-c-async",
+        dest="pim_enable_c_async",
+        action="store_false",
+        help="Force --pim-enable-c-async OFF.",
+    )
     # ADR-002 M-18: routing-aware GPU residency.
     parser.add_argument(
         "--routing-freq-json",
@@ -513,6 +558,8 @@ def main() -> None:
                 pim_layer_group_size=args.pim_layer_group_size,
                 pim_enable_speculative_preload_gptq=args.pim_enable_speculative_preload_gptq,
                 pim_enable_async_submit=args.pim_enable_async_submit,
+                pim_enable_c_fused=args.pim_enable_c_fused,
+                pim_enable_c_async=args.pim_enable_c_async,
                 enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
                 scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
                 scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,

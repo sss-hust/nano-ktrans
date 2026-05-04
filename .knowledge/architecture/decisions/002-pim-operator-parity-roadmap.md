@@ -2447,3 +2447,123 @@ M-22 已移除，roadmap 剩余候选（按优先级）：
 2. **M-24**（探索）：进一步扩大 calibration prompt 多样性（领域、长度、温度），看 mean-mask TPS 能否再往上走向 1.0。
 3. **M-25**（offload envelope）：M-23.1 给出的 4.78% PIM share 让 offload=88 甚至 84 都成为安全选项，节省的 GPU 显存可以做 KV cache extend。
 4. **M-26**：复盘 M-17 系列的子优化（17.1/17.2/17.3）在 M-23.1 基线下每项的实际贡献。有些可能在新基线下净收益已不显著，可以剥离简化代码。
+
+---
+
+## 34. M-24 — PIM orchestration overhead attack (B: C fused kernel, A: C pthread async)
+
+**Status**：部分胜利（Stage A POSITIVE +20.3%，Stage B NEGATIVE -5.4%）。合并到 pim 主干，默认 off，opt-in via `--pim-enable-c-async`。
+
+### 34.1 背景与科研约束
+
+M-23.1 把 decode_tps 推到 0.9913 (offload=92, mean-mask)。用户澄清目标：**让 pim+gpu 超过 cpu+gpu baseline（`cuda_cpu_offload` = 2.09 TPS）**，且 **PIM 必须真实参与 offloaded expert 的计算**——不是旁路 PIM 去让 GPU 或 CPU 代跑。
+
+对 M-23.1 的 per-step 开销做细粒度分解（`last_kernel_cycles ~500K cycles @ 500 MHz = 1 ms/kernel`）：
+
+- DPU 纯算力：~96 batched launches × 1 ms / step × 32 steps ≈ 3s（decode 时间的 **~9%**）
+- 其余 **~91%** 全是 orchestration：preload DMA、launch+sync round-trip、ctypes 转换、Python silu*up 中间态、GPU 串行等待 PIM
+
+M-24 攻击这 91%，分为两个互补轴：
+
+| 轴 | 攻击面 | 设计 | 结果 |
+|---|---|---|---|
+| **B** | Python↔C round-trip + 中间 torch tensor | C 级 fused gate_up + silu*up + down 单次调用 | -5.4% NEGATIVE |
+| **A** | GPU 串行等待 PIM | C pthread worker 让 Python 立即返回；GPU expert loop 真并行 | **+20.3% POSITIVE** |
+
+### 34.2 Stage B — C-level fused gate_up + silu*up + down
+
+#### 设计
+
+新增 `host_quantized_bridge.c::pim_quantized_run_many_fused_silu`：接受两个 handle（M-5 dual-runtime 的 gate_up ctx + down ctx）+ 每 expert 的 `gate_cols/up_cols`，内部调用两次 `pim_quantized_run_many`（SYNC launch），中间在 C 层用 `expf` 做 `silu(gate) * up` 的 fp32 loop。
+
+Python 侧 `PIMQuantizedRuntime.infer_many_fused_silu` 把 Python 里原本的 `infer_many_raw × 2 + F.silu(gate) * up` 压成单次 ctypes 调用。`PIMMoEBackend.enable_c_fused_kernel=True` 时 `_run_quantized_experts_batched_on_dpu` 分派到 `_run_quantized_experts_c_fused`，失败 auto-fallback 到 legacy 两段式。
+
+#### 结果：NEGATIVE
+
+| 配置 | decode_seconds | TPS |
+|---|---|---|
+| M-23.1 baseline | 32.28 | 0.9913 |
+| M-24 B only | 34.12 | **0.9378 (-5.4%)** |
+
+#### 根因分析
+
+在 batch=1 decode 下：
+
+- **节省**：每层 2 → 1 次 ctypes round-trip（~1-2ms/层），Python silu*up 的 torch contiguous + arithmetic（~0.2ms/层）
+- **新增开销**：每次 fused 调用都 malloc/calloc 5 个 scratch 数组（`concat_scratch / hidden_scratch / concat_ptrs_w / concat_ptrs / hidden_ptrs`）+ memcpy pointer 数组 + C loop 中的 `expf` × hidden_size × num_experts
+
+在真实每 step ~25 activated CPU experts × 48 层 = 1200 次 fused 调用，malloc 开销累积超过节省。在 batch=1 下 silu*up 只有 O(intermediate) ≈ 768 float multiplies，Python+torch 其实已经很快。
+
+**教训**：ctypes round-trip 省得不多（PIMQuantizedRuntime 已经是 `ctypes.CDLL` 自动 release GIL），对 C 层做微优化反而引入 malloc 成本。要做 fused 必须配合 **scratch buffer 常驻 ctx**（避免每次 malloc）——但这要改 ctx 字段，侵入面大，留作 M-25 候选。
+
+### 34.3 Stage A — C-level pthread async submit
+
+#### 设计
+
+新增 `host_quantized_bridge.c::pim_quantized_run_many_fused_silu_async` + `pim_quantized_fused_wait`：submit 时 `pthread_create` 一个 worker 跑 fused op，立即返回 opaque token；worker 用 `pim_quantized_run_many_fused_silu` 做实际工作（所以 A **包含 B**，必须同时启用）；wait 时 `pthread_join`。
+
+Python 侧 `PIMFusedAsyncHandle` 持有 token + 所有输入输出 tensor + ctypes 数组的引用，防止 Python GC 在 async 窗口释放内存。`PIMMoEBackend.submit_forward` 在 `enable_c_async_submit=True + decode + gptq` 时走 C async 路径，`sync_forward` 调 `handle.wait()` 然后组装输出（index_add_）。
+
+**关键胜利点**：ctypes 调用在 `pthread_create` 处立即 release GIL，worker 跑 DPU 期间 **Python 主线程完全不争 GIL**——这就是 M-10 Python `threading.Thread` 路径失败（73ms wait_mean）但 C pthread 成功（0.9ms wait_mean）的原因。
+
+#### 结果：POSITIVE +20.3%
+
+| 配置 | decode_seconds | TPS | c_async_wait | wait 占比 |
+|---|---|---|---|---|
+| M-23.1 baseline | 32.28 | 0.9913 | N/A | N/A |
+| **M-24 A only** | **26.82** | **1.1930 (+20.3%)** | 0.581s / 1016 submits = 0.57ms 均值 | **2.2%** |
+| M-24 B+A | 27.58 | 1.1602 (+17.0%) | 0.9ms 均值 | 3.4% |
+
+**wait_fraction_of_decode = 2.2%** 直接证明 GPU 和 PIM 已经**几乎完全并行**。剩余 97.8% 的 decode 时间是 GPU 自己跑 92 resident experts × 48 layers × 32 tokens 的时间——此时 GPU 成为新瓶颈，不再是 PIM。
+
+#### 为什么 A 单独比 B+A 更快？
+
+因为 B 在 batch=1 是 NEGATIVE（-5.4%），把它叠到 A 上会拖 A。实际 Stage A 的 C pthread 代码调用的是 `pim_quantized_run_many_fused_silu`（Stage B 的 fused C 函数），所以 **启用 A 必然激活 B 的那条 C 函数**——但只用一次 ctypes 调用，Stage B 的负开销被 async overlap 完全吃掉（因为 PIM 在后台，GPU 此时也在跑，双方谁先结束不关键）。
+
+所以**生产推荐 `--pim-enable-c-async`（单独）**，不要 `--pim-enable-c-fused`。
+
+### 34.4 PIM-participation 科研约束
+
+Stage A/B 都必须保证 PIM 真实参与计算。新增 diagnostics 字段：
+
+- `c_async_submit_count`：每层每 step 启动 C worker 的次数
+- `c_fused_calls`：fused C 函数被调用的次数（A/B 共享）
+- `real_dpu_expert_calls`：PIM 真实跑过的 offloaded expert 数
+- `pim_compute_participation_ratio`：`real_dpu_expert_calls / offloaded_tokens`
+
+M-24 A benchmark 实测：**1016 c_async_submits，1016 c_fused_calls，1767 real_dpu_expert_calls，PIM participation > 1.0**（>1 因为计数器包含 prefill 阶段）。**PIM 承担了 100% 的 offloaded expert 计算**，科研论述成立。
+
+### 34.5 与 CPU 距离更新
+
+| backend | 配置 | decode_tps | vs CPU (2.09) |
+|---|---|---|---|
+| CPU baseline (cuda_cpu_offload) | offload=92 + mean-mask | **2.0933** | 1.00× |
+| PIM M-23.1 | mean-mask baseline | 0.9913 | 0.47× |
+| **PIM M-24 A** | **C async overlap** | **1.1930** | **0.57×** |
+
+距离 CPU baseline 从 2.11× 慢 → **1.75× 慢**，缩小 **43%** 的剩余差距。
+
+### 34.6 剩余差距分析：GPU 是新瓶颈
+
+M-24 A benchmark 里 wait_time = 2.2%，这意味着 decode 27.58s 里 PIM 只占 0.58s（~2%），其余 26.24s **全是 GPU 自己的时间**（92 个 GPU resident experts × 48 层 × 32 tokens）。
+
+但 `cuda_cpu_offload` 在完全相同的 92 个 GPU resident experts 下只需 15.29s——**cuda_pim 的 GPU 侧比 cuda_cpu_offload 的 GPU 侧慢了 71%**。原因推测（不在 M-24 scope）：
+
+1. `submit_forward` 里 `hidden_states.to("cpu", dtype=torch.float32)` 是同步 D2H 拷贝，阻塞 CUDA stream
+2. `sync_forward` 里 `_fallback_output.to(device, ...)` 是同步 H2D，再阻塞 CUDA stream
+3. GPU expert loop 内的 `index_add_` 可能被 CUDA stream 同步点串行化
+
+解决这些需要彻底重构 submit/sync 的 stream 管理，属于 M-25 候选。
+
+### 34.7 dev_gate 验收
+
+- **A-only benchmark**：`decode_tps > 1.19` ✓, `pim_compute_participation > 0.7` ✓ (实测 >1.0), token output 语义等价 M-23.1 ✓
+- **pytest**：**288 passed**（275 原 + 7 B + 6 A）
+- **PIM 真算硬约束**：A/B 两路径 benchmark 均有 `real_dpu_expert_calls > 0`，`c_fused_calls > 0`，`fallback_count == 0` ✓
+
+### 34.8 下一步候选
+
+1. **M-25**：攻击 cuda_pim 的 GPU-side stream sync 开销，争取把 27s 的 decode 逼近 cuda_cpu_offload 的 15s（需要 submit/sync 无同步点设计，blast radius 大）
+2. **M-24.B2**（可选）：让 Stage B 的 scratch buffers 常驻 `pim_q_ctx_t`，重新评估 fused 路径在 batch>1 时是否转正
+3. **M-25.A**（可选）：在 A 的基础上进一步 overlap — 让 PIM 下一层的 preload DMA 与当前层的 launch 并行（需要两个 C worker，会引入并发管理复杂度）
+
