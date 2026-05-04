@@ -72,6 +72,8 @@ class PIMMoEBackend(CPUMoEBackend):
         pim_layer_group_size: int = 48,
         enable_speculative_preload_gptq: bool = False,
         enable_async_pim_submit: bool = False,
+        enable_c_fused_kernel: bool = False,
+        enable_c_async_submit: bool = False,
     ):
         self.pim_rank_count = pim_rank_count
         self.pim_bytes_per_dpu = pim_bytes_per_dpu
@@ -155,6 +157,23 @@ class PIMMoEBackend(CPUMoEBackend):
         # and the best case is 100 ms+/tok savings when GPU attention
         # is substantial.
         self.enable_async_pim_submit: bool = bool(enable_async_pim_submit)
+        # ADR-002 M-24 Stage B: C-level fused gate_up + silu*up + down.
+        # When True, `_run_quantized_experts_batched_on_dpu` dispatches
+        # to the single-ctypes-call fused path (`_run_quantized_experts_c_fused`)
+        # which collapses the Python-side two-RT + silu*up middleman into
+        # one C function, reducing per-layer Python↔C overhead.
+        # Falls back to the legacy batched path on any failure.  Default
+        # off to keep the M-23.1 production path bit-identical.
+        self.enable_c_fused_kernel: bool = bool(enable_c_fused_kernel)
+        # ADR-002 M-24 Stage A: reserved for upcoming C-level async submit.
+        # Wired here so __init__ signatures stay stable once Stage A lands;
+        # currently a no-op because the submit path still goes through
+        # the Python (or M-10) async infrastructure.
+        self.enable_c_async_submit: bool = bool(enable_c_async_submit)
+        # Counters for the C fused path (M-24 Stage B diagnostics).
+        self.c_fused_calls: int = 0
+        self.c_fused_experts_processed: int = 0
+        self.c_fused_fallback_count: int = 0
         self._async_thread: Optional[threading.Thread] = None
         self._async_exc: Optional[BaseException] = None
         # Latency telemetry (decode only).  submit_to_sync_wait_seconds
@@ -522,6 +541,160 @@ class PIMMoEBackend(CPUMoEBackend):
         self.last_kernel_cycles = rt_down.last_cycles()
         return output
 
+    def _run_quantized_experts_c_fused(
+        self,
+        activated_cpu_experts: list[tuple[int, int, torch.Tensor, torch.Tensor]],
+        flat_cpu: torch.Tensor,
+        topk_weights_cpu: torch.Tensor,
+        output: torch.Tensor,
+    ) -> bool:
+        """ADR-002 M-24 Stage B: single-ctypes-call fused gate_up + silu*up + down.
+
+        PIM still performs all the matvec work (this method never bypasses
+        the DPU).  The only orchestration change vs
+        ``_run_quantized_experts_batched_on_dpu``:
+
+          * Two ``infer_many_raw`` ctypes round-trips → one
+            ``infer_many_fused_silu``.
+          * ``F.silu(gate) * up`` in Python (+ ``.contiguous()`` slices)
+            → tight fp32 loop in C (see
+            ``host_quantized_bridge.c::pim_quantized_run_many_fused_silu``).
+
+        Returns True on success (``output`` is populated via index_add_),
+        False when the path is unavailable for this batch (caller should
+        fall back to the legacy per-phase path).
+        """
+        rt_gate_up = self.quantized_runtime
+        rt_down = self.quantized_runtime_down or self.quantized_runtime
+        if rt_gate_up is None or rt_down is None:
+            return False
+        if not activated_cpu_experts:
+            return False
+
+        kernel_mode = 4
+
+        # Phase A (Python): preload gate_up concat bundle + down bundle
+        # for every activated expert, collecting the per-expert
+        # (slot, padded shape) tuples needed to construct the fused C
+        # request.  Numerically identical to the legacy path's preload
+        # sequence.
+        requests: list[
+            tuple[torch.Tensor, int, int, int, int, int, int, int, int]
+        ] = []
+        per_expert_records: list[dict[str, Any]] = []
+        pre_hits_gu = rt_gate_up.preload_hits
+        pre_miss_gu = rt_gate_up.preload_misses
+        pre_profile_gu = self._snapshot_quantized_profile(rt_gate_up)
+        pre_hits_dn = rt_down.preload_hits
+        pre_miss_dn = rt_down.preload_misses
+        pre_profile_dn = self._snapshot_quantized_profile(rt_down)
+        for expert_idx, cpu_slot, token_indices, match in activated_cpu_experts:
+            gptq = self._gptq_experts.get(cpu_slot)
+            if gptq is None:
+                return False
+            states = flat_cpu[token_indices]
+            base_eid = self._expert_id(cpu_slot)
+            gate_up_eid = base_eid ^ 0x1212121212121212
+            down_eid = base_eid ^ 0x3333333333333333
+
+            gu_slot, gu_padded_in, gu_concat_rows, gate_cols, up_cols = \
+                rt_gate_up.preload_concat_and_get_slot(
+                    gate_up_eid,
+                    gptq["gate"],
+                    gptq["up"],
+                    kernel_mode=kernel_mode,
+                )
+            dn_slot, dn_padded_in, dn_padded_out, dn_orig_out = \
+                rt_down.preload_and_get_slot(
+                    down_eid,
+                    gptq["down"],
+                    kernel_mode,
+                )
+            # For SwiGLU gate_cols == up_cols (they are the two halves of
+            # the concat).  The fused C API enforces this; also guard here.
+            if gate_cols != up_cols:
+                return False
+            # The down input dim must equal up_cols (SwiGLU intermediate
+            # width).  If not, caller is using a non-Qwen3 shape — bail.
+            if dn_padded_in != up_cols:
+                return False
+
+            requests.append(
+                (
+                    states,
+                    gu_slot,
+                    gu_padded_in,
+                    gu_concat_rows,
+                    gate_cols,
+                    up_cols,
+                    dn_slot,
+                    dn_padded_in,
+                    dn_padded_out,
+                )
+            )
+            per_expert_records.append(
+                {
+                    "token_indices": token_indices,
+                    "match": match,
+                    "dn_orig_out": dn_orig_out,
+                }
+            )
+
+        # Phase B (C): single fused call.  The caller has already paid
+        # the preload DMAs above; this call does only input encode +
+        # gate_up launch + silu*up + down launch + output dequant.
+        down_outputs = PIMQuantizedRuntime.infer_many_fused_silu(
+            rt_gate_up,
+            rt_down,
+            requests,
+        )
+
+        # Phase C (Python): scatter per-expert down outputs into the
+        # layer's running output buffer using the routing weights, exactly
+        # as the legacy path does.  Same tensor shapes + dtypes, same
+        # index_add_ semantics.
+        for req_idx, (rec, down_output) in enumerate(zip(per_expert_records, down_outputs)):
+            dn_orig_out = rec["dn_orig_out"]
+            expert_output = down_output[:, :dn_orig_out].contiguous()
+            token_indices = rec["token_indices"]
+            match = rec["match"]
+            row_idx, col_idx = torch.where(match[token_indices])
+            weights = (
+                topk_weights_cpu[token_indices[row_idx], col_idx]
+                .to(dtype=expert_output.dtype)
+                .unsqueeze(1)
+            )
+            output.index_add_(
+                0, token_indices[row_idx], expert_output[row_idx] * weights
+            )
+
+        # Accounting: the fused path does the same number of DPU calls
+        # as the legacy path (2 per expert: gate_up + down), preload
+        # hits/misses via the same preload APIs, and the C kernel_cycles
+        # are still stamped on the down ctx (fused C calls run_many on
+        # down last).
+        self.quantized_preload_hits_local += (rt_gate_up.preload_hits - pre_hits_gu)
+        self.quantized_preload_misses_local += (rt_gate_up.preload_misses - pre_miss_gu)
+        self._accumulate_quantized_profile_delta(
+            pre_profile_gu, self._snapshot_quantized_profile(rt_gate_up)
+        )
+        if rt_down is not rt_gate_up:
+            self.quantized_preload_hits_local += (rt_down.preload_hits - pre_hits_dn)
+            self.quantized_preload_misses_local += (rt_down.preload_misses - pre_miss_dn)
+            self._accumulate_quantized_profile_delta(
+                pre_profile_dn, self._snapshot_quantized_profile(rt_down)
+            )
+
+        n = len(per_expert_records)
+        self.real_dpu_quantized_calls += 2 * n
+        self.real_dpu_expert_calls += n
+        self.last_kernel_cycles = rt_down.last_cycles()
+        self.quantized_batched_expert_groups_local += 1
+        self.quantized_batched_experts_local += n
+        self.c_fused_calls += 1
+        self.c_fused_experts_processed += n
+        return True
+
     def _run_quantized_experts_batched_on_dpu(
         self,
         activated_cpu_experts: list[tuple[int, int, torch.Tensor, torch.Tensor]],
@@ -535,6 +708,29 @@ class PIMMoEBackend(CPUMoEBackend):
             return False
         if not activated_cpu_experts:
             return False
+
+        # ADR-002 M-24 Stage B: if the C-fused kernel is enabled, try it
+        # first.  It collapses the two batched DPU launches plus the
+        # Python silu*up middleman into one C ctypes call, cutting per-
+        # layer Python↔C overhead.  On any failure we fall back to the
+        # legacy two-call path below so correctness is never at risk.
+        if self.enable_c_fused_kernel:
+            try:
+                ok = self._run_quantized_experts_c_fused(
+                    activated_cpu_experts,
+                    flat_cpu,
+                    topk_weights_cpu,
+                    output,
+                )
+                if ok:
+                    return True
+                # ok=False means fused path explicitly bailed — count and
+                # continue to legacy path below.
+                self.c_fused_fallback_count += 1
+            except Exception:
+                self._record_fallback("c_fused_path_failed")
+                self.c_fused_fallback_count += 1
+                # fall through to legacy path
 
         kernel_mode = 4
         gate_entries: list[dict[str, Any]] = []
@@ -1334,6 +1530,26 @@ class PIMMoEBackend(CPUMoEBackend):
                 "async_sync_wait_seconds_mean": (
                     (self.async_sync_wait_seconds_sum / self.async_sync_wait_seconds_count)
                     if self.async_sync_wait_seconds_count > 0
+                    else None
+                ),
+                # ADR-002 M-24 Stage B: C-level fused kernel diagnostics.
+                "enable_c_fused_kernel": self.enable_c_fused_kernel,
+                "c_fused_calls": self.c_fused_calls,
+                "c_fused_experts_processed": self.c_fused_experts_processed,
+                "c_fused_fallback_count": self.c_fused_fallback_count,
+                # ADR-002 M-24 Stage A: reserved flag (wired but inactive
+                # until the C async submit path lands).
+                "enable_c_async_submit": self.enable_c_async_submit,
+                # PIM real-compute participation ratio.  Offloaded experts
+                # are those routed to a non-GPU-resident slot; PIM-computed
+                # experts are those handled by one of the DPU paths
+                # (legacy batched, c_fused, or the per-expert quantized
+                # loop).  This is the science-integrity guard for M-24:
+                # benchmarks that accidentally bypass PIM will surface as
+                # this ratio dropping below 0.7 and fail dev_gate.
+                "pim_compute_participation_ratio": (
+                    (self.real_dpu_expert_calls / self.offloaded_tokens)
+                    if self.offloaded_tokens > 0
                     else None
                 ),
             }

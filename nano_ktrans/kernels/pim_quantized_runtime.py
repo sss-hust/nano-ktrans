@@ -132,6 +132,29 @@ class PIMQuantizedRuntime:
             ctypes.c_size_t,
         ]
         self._lib.pim_quantized_run_many.restype = ctypes.c_int
+        # ADR-002 M-24 Stage B: fused gate_up + silu*up + down single C call.
+        # Signature mirrors pim_quantized_run_many with an extra pair of
+        # (handle, slot/batch arrays) for the down phase plus per-expert
+        # gate/up column widths so the C layer can slice the concat output
+        # and run silu*up in a tight fp32 loop without round-tripping to
+        # Python.  See host_quantized_bridge.c::pim_quantized_run_many_fused_silu.
+        self._lib.pim_quantized_run_many_fused_silu.argtypes = [
+            ctypes.c_void_p,   # handle_gate_up
+            ctypes.c_void_p,   # handle_down
+            ctypes.c_uint32,   # call_count
+            ctypes.POINTER(ctypes.c_uint32),  # gate_up_batch_sizes
+            ctypes.POINTER(ctypes.c_uint32),  # gate_up_slot_ids
+            ctypes.POINTER(ctypes.c_void_p),  # gate_up_inputs
+            ctypes.POINTER(ctypes.c_uint32),  # gate_cols
+            ctypes.POINTER(ctypes.c_uint32),  # up_cols
+            ctypes.POINTER(ctypes.c_uint32),  # down_batch_sizes
+            ctypes.POINTER(ctypes.c_uint32),  # down_slot_ids
+            ctypes.POINTER(ctypes.c_void_p),  # down_outputs
+            ctypes.c_uint32,   # down_output_dim
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
+        self._lib.pim_quantized_run_many_fused_silu.restype = ctypes.c_int
         self._lib.pim_quantized_last_cycles.argtypes = [ctypes.c_void_p]
         self._lib.pim_quantized_last_cycles.restype = ctypes.c_uint64
         self._lib.pim_quantized_last_load_qweight_transfer_seconds.argtypes = [ctypes.c_void_p]
@@ -916,6 +939,163 @@ class PIMQuantizedRuntime:
             raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
         self._record_run_profile(count=n)
         return outputs
+
+    @staticmethod
+    def infer_many_fused_silu(
+        gate_up_runtime: "PIMQuantizedRuntime",
+        down_runtime: "PIMQuantizedRuntime",
+        requests: list[tuple[
+            torch.Tensor,  # gate_up inputs [batch, gate_up_padded_in]
+            int,           # gate_up slot_id
+            int,           # gate_up padded_input_dim
+            int,           # concat_rows (= padded gate_up output_dim)
+            int,           # gate_cols (lhs_orig)
+            int,           # up_cols (rhs_orig)
+            int,           # down slot_id
+            int,           # down padded_input_dim (= intermediate, must equal up_cols)
+            int,           # down padded_output_dim (= hidden_size)
+        ]],
+    ) -> list[torch.Tensor]:
+        """ADR-002 M-24 Stage B: single C-call fused path.
+
+        Runs gate_up batched PIM launch, silu(gate)*up in C, and down
+        batched PIM launch in one ctypes round-trip.  Returns the list of
+        down outputs, one per request, each padded to the down runtime's
+        ``padded_output_dim`` (caller slices back to the original
+        output_dim just like ``infer_many_raw``).
+
+        Numerics match ``_run_quantized_experts_batched_on_dpu``'s
+        separate phases: same padded-fp32 inputs, same per-request PIM
+        kernel, same silu formula (x * sigmoid(x)).  The gate / up split
+        of the gate_up concat output is done in C using ``concat_rows``
+        as stride and ``gate_cols / up_cols`` as widths.
+
+        This method is static because the fused call spans two distinct
+        runtime handles (the M-5 dual-runtime split).  When both handles
+        point to the same ctx the C layer still works correctly — it
+        simply serialises the gate_up and down launches on the same set.
+        """
+        if not requests:
+            return []
+        if gate_up_runtime is None or down_runtime is None:
+            raise ValueError("infer_many_fused_silu requires both runtimes")
+        # Both runtimes must share their ctypes library (same .so) — they
+        # always do in practice because PIMQuantizedRuntime.get_shared
+        # loads a single libpim_quantized_bridge.so per process.
+        lib = gate_up_runtime._lib
+
+        n = len(requests)
+        # Prepare per-request padded fp32 inputs + preallocated down outputs.
+        gate_up_inputs_prepared: list[torch.Tensor] = []
+        down_outputs: list[torch.Tensor] = []
+        gate_up_batch_sizes: list[int] = []
+        gate_up_slot_ids: list[int] = []
+        gate_cols_list: list[int] = []
+        up_cols_list: list[int] = []
+        down_batch_sizes: list[int] = []
+        down_slot_ids: list[int] = []
+        down_output_dim = 0
+        for req in requests:
+            (
+                inputs,
+                gu_slot,
+                gu_padded_in,
+                concat_rows,
+                gate_cols,
+                up_cols,
+                dn_slot,
+                dn_padded_in,
+                dn_padded_out,
+            ) = req
+            if inputs.ndim != 2:
+                raise ValueError("infer_many_fused_silu expects 2D input tensors.")
+            if gate_cols != up_cols:
+                raise ValueError(
+                    f"gate_cols ({gate_cols}) must equal up_cols ({up_cols}) for SwiGLU"
+                )
+            if dn_padded_in != up_cols:
+                # The down runtime must have been preloaded with input_dim
+                # matching the up_cols width; C layer does no extra pad.
+                raise ValueError(
+                    f"down padded_input_dim ({dn_padded_in}) must equal up_cols ({up_cols})"
+                )
+            gu_effective = int(gu_slot)
+            dn_effective = int(dn_slot)
+            if not (0 <= gu_effective < PIMQuantizedRuntime.NUM_SLOTS):
+                raise ValueError(f"gate_up slot_id out of range: {gu_effective}")
+            if not (0 <= dn_effective < PIMQuantizedRuntime.NUM_SLOTS):
+                raise ValueError(f"down slot_id out of range: {dn_effective}")
+
+            batch_size, input_dim = inputs.shape
+            inputs_f32 = (
+                inputs.detach()
+                .to(device="cpu", dtype=torch.float32, copy=True)
+                .contiguous()
+            )
+            if gu_padded_in != input_dim:
+                padded_inputs = torch.zeros(
+                    batch_size, gu_padded_in, dtype=torch.float32
+                )
+                padded_inputs[:, :input_dim] = inputs_f32
+                inputs_f32 = padded_inputs
+            gate_up_inputs_prepared.append(inputs_f32)
+            down_outputs.append(
+                torch.empty(batch_size, dn_padded_out, dtype=torch.float32)
+            )
+            gate_up_batch_sizes.append(int(batch_size))
+            gate_up_slot_ids.append(gu_effective)
+            gate_cols_list.append(int(gate_cols))
+            up_cols_list.append(int(up_cols))
+            down_batch_sizes.append(int(batch_size))
+            down_slot_ids.append(dn_effective)
+            if down_output_dim == 0:
+                down_output_dim = int(dn_padded_out)
+            elif down_output_dim != int(dn_padded_out):
+                raise ValueError(
+                    "fused: all requests must share the same down padded_output_dim"
+                )
+
+        gu_batch_arr = (ctypes.c_uint32 * n)(*gate_up_batch_sizes)
+        gu_slot_arr = (ctypes.c_uint32 * n)(*gate_up_slot_ids)
+        gu_input_ptrs = (ctypes.c_void_p * n)(
+            *[ctypes.c_void_p(t.data_ptr()) for t in gate_up_inputs_prepared]
+        )
+        gate_cols_arr = (ctypes.c_uint32 * n)(*gate_cols_list)
+        up_cols_arr = (ctypes.c_uint32 * n)(*up_cols_list)
+        dn_batch_arr = (ctypes.c_uint32 * n)(*down_batch_sizes)
+        dn_slot_arr = (ctypes.c_uint32 * n)(*down_slot_ids)
+        dn_output_ptrs = (ctypes.c_void_p * n)(
+            *[ctypes.c_void_p(t.data_ptr()) for t in down_outputs]
+        )
+        error_buffer = ctypes.create_string_buffer(
+            PIMQuantizedRuntime.ERROR_BUFFER_SIZE
+        )
+        rc = lib.pim_quantized_run_many_fused_silu(
+            gate_up_runtime._handle,
+            down_runtime._handle,
+            ctypes.c_uint32(n),
+            gu_batch_arr,
+            gu_slot_arr,
+            gu_input_ptrs,
+            gate_cols_arr,
+            up_cols_arr,
+            dn_batch_arr,
+            dn_slot_arr,
+            dn_output_ptrs,
+            ctypes.c_uint32(down_output_dim),
+            error_buffer,
+            len(error_buffer),
+        )
+        if rc != 0:
+            raise RuntimeError(error_buffer.value.decode("utf-8", errors="replace"))
+        # Record native profile for both runtimes.  The fused C function
+        # calls pim_quantized_run_many twice internally — once per ctx —
+        # and each call stamps ``last_*_seconds`` on its ctx, so a single
+        # profile snapshot here captures gate_up's and down's independently.
+        gate_up_runtime._record_run_profile(count=n)
+        if down_runtime is not gate_up_runtime:
+            down_runtime._record_run_profile(count=n)
+        return down_outputs
 
     def profile_counters(self) -> dict[str, float | int]:
         result: dict[str, float | int] = {

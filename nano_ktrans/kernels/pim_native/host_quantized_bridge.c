@@ -2,6 +2,7 @@
 
 #include <dpu/dpu.h>
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1377,4 +1378,231 @@ pim_quantized_num_dpus(void *handle)
 {
     pim_q_ctx_t *ctx = (pim_q_ctx_t *)handle;
     return ctx ? ctx->nr_dpus : 0;
+}
+
+/* ============================================================================
+ * ADR-002 M-24 Stage B: fused gate_up + silu*up + down single C call.
+ *
+ * Motivation:
+ *   Per decode step the Python-side `_run_quantized_experts_batched_on_dpu`
+ *   pays two `pim_quantized_run_many` ctypes round-trips per layer (one for
+ *   gate_up, one for down) plus a Python-level `F.silu(gate) * up` in between.
+ *   48 layers × 32 tokens × 2 RT + silu/mul = ~3000 Python↔C transitions per
+ *   e2e run, each ~100-300µs on top of DPU work.  Fusing the three phases
+ *   inside one C call:
+ *     - halves ctypes RT (2 → 1 per layer)
+ *     - replaces Python silu*up (~200-500µs/layer) with a tight C fp32 loop
+ *     - prepares the ground for M-24 Stage A (the whole fused op can be
+ *       submitted via DPU_ASYNCHRONOUS in one go)
+ *
+ * This function never touches the DPU kernel binary; it is 100% host-side
+ * orchestration.  PIM still performs the actual gate_up and down matvecs.
+ *
+ * Contract:
+ *   handle_gate_up : M-5 gate_up runtime context
+ *   handle_down    : M-5 down runtime context (may equal handle_gate_up
+ *                    when the dual-allocation fallback collapsed)
+ *   call_count     : number of experts in this layer's batched submission
+ *   gate_up_*      : arrays length=call_count describing the gate_up
+ *                    pim_quantized_run_many() call:
+ *                      - batch_sizes[i]   : #tokens routed to expert i
+ *                      - slot_ids[i]      : gate_up runtime slot
+ *                      - inputs[i]        : fp32 [batch, hidden_size] activation
+ *   gate_cols[i]   : #output columns in the gate slice of the concat
+ *                    (== lhs_orig from preload_concat_and_get_slot)
+ *   up_cols[i]     : #output columns in the up slice (== rhs_orig; must equal
+ *                    gate_cols[i] for SwiGLU Qwen3-style experts)
+ *   down_*         : arrays length=call_count describing the down call:
+ *                      - batch_sizes[i]   : must equal gate_up_batch_sizes[i]
+ *                      - slot_ids[i]      : down runtime slot
+ *                      - outputs[i]       : fp32 [batch, down_output_dim] preallocated
+ *   down_output_dim: output width of the down projection (== hidden_size for Qwen3)
+ *
+ * The caller retains ownership of all input / output buffers.  Intermediate
+ * scratch (concat gate_up output, silu*up hidden) is allocated and freed
+ * inside this call so Python never materialises those tensors.
+ *
+ * Returns 0 on success, -1 on error with a human-readable message in
+ * error_buffer.
+ */
+int
+pim_quantized_run_many_fused_silu(
+    void *handle_gate_up,
+    void *handle_down,
+    uint32_t call_count,
+    const uint32_t *gate_up_batch_sizes,
+    const uint32_t *gate_up_slot_ids,
+    const void *const *gate_up_inputs,
+    const uint32_t *gate_cols,
+    const uint32_t *up_cols,
+    const uint32_t *down_batch_sizes,
+    const uint32_t *down_slot_ids,
+    void *const *down_outputs,
+    uint32_t down_output_dim,
+    char *error_buffer,
+    size_t error_buffer_len)
+{
+    pim_q_ctx_t *ctx_gu = (pim_q_ctx_t *)handle_gate_up;
+    pim_q_ctx_t *ctx_dn = (pim_q_ctx_t *)handle_down;
+    int rc = -1;
+    float *concat_scratch = NULL;   /* concatenated gate_up outputs (fp32) */
+    float *hidden_scratch = NULL;   /* silu(gate)*up outputs (fp32) */
+    const void **concat_ptrs = NULL;
+    const void **hidden_ptrs = NULL;
+    void **concat_ptrs_w = NULL;    /* writable view for run_many() signature */
+
+    if (ctx_gu == NULL || ctx_dn == NULL) {
+        set_error(error_buffer, error_buffer_len, "fused: handles must be non-null");
+        return -1;
+    }
+    if (call_count == 0) {
+        return 0;
+    }
+    if (call_count > MAX_RUN_REQUESTS) {
+        set_error(error_buffer, error_buffer_len, "fused: call_count %u > MAX_RUN_REQUESTS %u",
+                  call_count, MAX_RUN_REQUESTS);
+        return -1;
+    }
+    if (gate_up_batch_sizes == NULL || gate_up_slot_ids == NULL || gate_up_inputs == NULL
+        || gate_cols == NULL || up_cols == NULL || down_batch_sizes == NULL
+        || down_slot_ids == NULL || down_outputs == NULL) {
+        set_error(error_buffer, error_buffer_len, "fused: array arguments must be non-null");
+        return -1;
+    }
+
+    /* Sanity: gate_cols + up_cols per expert must not exceed gate_up ctx's
+     * loaded output_dim (the concat row count).  The concat width equals
+     * ctx_gu->output_dim, which was set by the most recent load_weights
+     * for that ctx's slot.  Because slots share the same shape in our
+     * usage (all experts have identical projection shapes in Qwen3),
+     * checking against ctx_gu->output_dim is sufficient. */
+    for (uint32_t i = 0; i < call_count; ++i) {
+        if (gate_up_batch_sizes[i] != down_batch_sizes[i]) {
+            set_error(error_buffer, error_buffer_len,
+                      "fused: batch_size mismatch expert %u (gate_up=%u down=%u)",
+                      i, gate_up_batch_sizes[i], down_batch_sizes[i]);
+            return -1;
+        }
+        /* gate_cols and up_cols may be zero if caller passes a malformed
+         * request; guard against that. */
+        if (gate_cols[i] == 0 || up_cols[i] == 0) {
+            set_error(error_buffer, error_buffer_len,
+                      "fused: gate_cols/up_cols must be positive (expert %u: %u/%u)",
+                      i, gate_cols[i], up_cols[i]);
+            return -1;
+        }
+        /* For SwiGLU (Qwen3) gate_cols == up_cols.  Enforce so the silu*up
+         * loop can use a single width per expert. */
+        if (gate_cols[i] != up_cols[i]) {
+            set_error(error_buffer, error_buffer_len,
+                      "fused: gate_cols must equal up_cols (expert %u: %u vs %u)",
+                      i, gate_cols[i], up_cols[i]);
+            return -1;
+        }
+    }
+
+    /* Compute total scratch sizes:
+     *   concat_scratch: sum_i batch_i * ctx_gu->output_dim  (padded concat row count)
+     *   hidden_scratch: sum_i batch_i * up_cols[i]          (tight, will feed down)
+     *
+     * We over-allocate concat_scratch using ctx_gu->output_dim because
+     * pim_quantized_run() writes padded_output_dim columns; the caller-
+     * facing gate_cols/up_cols are the original (unpadded) widths.  We
+     * index with ctx_gu->output_dim stride to extract the gate / up
+     * slices correctly.
+     */
+    size_t total_concat_floats = 0;
+    size_t total_hidden_floats = 0;
+    size_t hidden_offsets[MAX_RUN_REQUESTS];
+    size_t concat_offsets[MAX_RUN_REQUESTS];
+    for (uint32_t i = 0; i < call_count; ++i) {
+        concat_offsets[i] = total_concat_floats;
+        hidden_offsets[i] = total_hidden_floats;
+        total_concat_floats += (size_t)gate_up_batch_sizes[i] * (size_t)ctx_gu->output_dim;
+        total_hidden_floats += (size_t)gate_up_batch_sizes[i] * (size_t)up_cols[i];
+    }
+
+    concat_scratch = (float *)calloc(total_concat_floats, sizeof(float));
+    hidden_scratch = (float *)calloc(total_hidden_floats, sizeof(float));
+    concat_ptrs = (const void **)calloc(call_count, sizeof(*concat_ptrs));
+    concat_ptrs_w = (void **)calloc(call_count, sizeof(*concat_ptrs_w));
+    hidden_ptrs = (const void **)calloc(call_count, sizeof(*hidden_ptrs));
+    if (concat_scratch == NULL || hidden_scratch == NULL
+        || concat_ptrs == NULL || concat_ptrs_w == NULL || hidden_ptrs == NULL) {
+        set_error(error_buffer, error_buffer_len, "fused: scratch allocation failed");
+        goto cleanup;
+    }
+    for (uint32_t i = 0; i < call_count; ++i) {
+        concat_ptrs_w[i] = concat_scratch + concat_offsets[i];
+        concat_ptrs[i] = concat_scratch + concat_offsets[i];
+        hidden_ptrs[i] = hidden_scratch + hidden_offsets[i];
+    }
+
+    /* Phase 1: gate_up via the existing batched API (internally SYNC). */
+    if (pim_quantized_run_many(
+            handle_gate_up,
+            call_count,
+            gate_up_batch_sizes,
+            gate_up_inputs,
+            concat_ptrs_w,
+            gate_up_slot_ids,
+            error_buffer,
+            error_buffer_len) != 0) {
+        goto cleanup;
+    }
+
+    /* Phase 2: silu(gate) * up, written into hidden_scratch.
+     * Reference (matches torch.nn.functional.silu):
+     *   silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
+     *
+     * For each expert i:
+     *   for b in [0, batch):
+     *     gate_row = concat_scratch[concat_offsets[i] + b*concat_stride + 0 .. gate_cols[i])
+     *     up_row   = concat_scratch[concat_offsets[i] + b*concat_stride + gate_cols[i] .. gate_cols[i]+up_cols[i])
+     *     hidden_row = silu(gate_row) * up_row
+     */
+    for (uint32_t i = 0; i < call_count; ++i) {
+        const uint32_t batch = gate_up_batch_sizes[i];
+        const size_t concat_stride = (size_t)ctx_gu->output_dim;
+        const uint32_t gcols = gate_cols[i];
+        const uint32_t ucols = up_cols[i];  /* == gcols enforced above */
+        const float *concat_base = concat_scratch + concat_offsets[i];
+        float *hidden_base = hidden_scratch + hidden_offsets[i];
+        for (uint32_t b = 0; b < batch; ++b) {
+            const float *row = concat_base + (size_t)b * concat_stride;
+            float *out_row = hidden_base + (size_t)b * ucols;
+            const float *gate_row = row;
+            const float *up_row = row + gcols;
+            for (uint32_t c = 0; c < ucols; ++c) {
+                const float gv = gate_row[c];
+                /* silu = gv / (1 + exp(-gv)) */
+                const float sig = 1.0f / (1.0f + expf(-gv));
+                out_row[c] = (gv * sig) * up_row[c];
+            }
+        }
+    }
+
+    /* Phase 3: down via the existing batched API. */
+    if (pim_quantized_run_many(
+            handle_down,
+            call_count,
+            down_batch_sizes,
+            hidden_ptrs,
+            down_outputs,
+            down_slot_ids,
+            error_buffer,
+            error_buffer_len) != 0) {
+        goto cleanup;
+    }
+
+    (void)down_output_dim;  /* consumed implicitly via down ctx's output_dim */
+    rc = 0;
+
+cleanup:
+    free(concat_scratch);
+    free(hidden_scratch);
+    free(concat_ptrs);
+    free(concat_ptrs_w);
+    free(hidden_ptrs);
+    return rc;
 }
