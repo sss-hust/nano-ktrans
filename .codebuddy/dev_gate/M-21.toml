@@ -1,0 +1,90 @@
+milestone_id = "M-21"
+title = "[NEGATIVE RESULT] Dynamic routing-aware residency: DynamicExpertScheduler hangs on GPTQ real-hw path; not merged"
+
+# Marker: this milestone is recorded for documentation only.  The
+# implementation lives on the un-merged branch
+# adr-002-m21-dynamic-routing-aware-residency (HEAD: 2ee86ff).
+# Closes the dynamic side of M-18 until M-22 fixes the GPTQ
+# migration path; pim main line stays at M-18 = 0.9572 TPS.
+status_marker = "negative"
+
+prerequisites = ["M-18"]
+
+# No primary artifact exists because the experiment did not complete;
+# the branch captures the infrastructure delta for future reference.
+primary_artifact = "benchmarks/results/e2e_gptq_cuda_pim_M18_routing_aware_offload92.json"
+required_artifacts = [
+    "benchmarks/results/e2e_gptq_cuda_pim_M18_routing_aware_offload92.json",
+]
+
+suggested_commands = [
+    "git checkout adr-002-m21-dynamic-routing-aware-residency   # infrastructure delta (hotness seed, CLI flags, result fields)",
+    "# DO NOT run on real GPTQ hardware until M-22 fixes the migration path — the scheduler hangs indefinitely.",
+]
+
+# M-21 conclusion (NEGATIVE):
+#
+# Hypothesis: let DynamicExpertScheduler observe per-forward routing,
+# EMA hotness, and promote/demote experts to adapt GPU residency
+# beyond the static M-18 hottest-92 mask.  Theoretical headroom is
+# bounded because M-18 already captures 97.6% of routing mass on
+# the calibration prompt.
+#
+# Infrastructure landed on the branch (kept, not merged into pim):
+#   - LLM: seed residency_plan.hotness from activation_freq so the
+#     scheduler starts from a calibrated prior instead of all-zero.
+#   - benchmark_inference.py: five new CLI flags (decode_promote_k,
+#     gpu_budget_per_layer, hotness_decay, hotness_mrs_alpha,
+#     hotness_top_p) and three new surfaced result fields.
+#
+# Real-hw smoke blocked:
+#   Test A (promote_k=1, cooldown=4, N=8 tokens) : hung 17+ min, GPU
+#          util 0%, had to kill -9.
+#   Test B (promote_k=0, cooldown=9999, N=32)    : hung 25+ min (!),
+#          even though no migration ops should be emitted.
+#
+# Root cause (inferred, not fully traced):
+#   The DynamicExpertScheduler -> HybridMoE._apply_queued_migrations
+#   -> ExpertMaterializationManager path has ~80 unit tests, ALL of
+#   them using fp16 dummy experts.  On real Qwen3-30B-A3B-GPTQ:
+#     - CPUMoEBackend.export_expert_weights() returns None in GPTQ
+#       mode (cpu_moe.py:378-396), so prefetch/promotion falls
+#       through to _build_runtime_expert which does
+#       safetensors read + dequantize per expert.
+#     - Something along that chain either deadlocks on a pipeline
+#       lock or spin-loops on a prefetch-readiness condition; the
+#       process reaches GPU memory saturation (47GB) but never emits
+#       a single token.
+#
+# Decision: NOT merging.  This isn't a design-level negative (like
+# M-17.4-17.6's "the optimisation itself doesn't buy anything") — it
+# IS a real missing feature: the dynamic scheduler was only ever
+# validated against fp16 and has an uncaught GPTQ-path bug.  Fixing
+# it is M-22's job and needs a persistent GPU-side quantised expert
+# cache so migrations become O(DMA) instead of O(safetensors read
+# + dequantize).
+#
+# What M-21 DOES deliver (for M-22 to reuse):
+#   1. hotness cold-start problem is already solved.
+#   2. CLI surface is already in place.
+#   3. We now know where to look: _apply_queued_migrations + the
+#      GPTQ branch of _resolve_promotion_module.
+
+next_tasks = [
+    "M-22: debug why DynamicExpertScheduler hangs on GPTQ.  Start by running the scheduler with Python tracing enabled on a tiny GPTQ fixture (test_pim_runtime.py:test_pim_moe_backend_real_mode_uses_dpu has the right scaffolding).  Likely fix requires implementing a PIMMoEBackend.export_expert_weights that serves GPTQ weights from CPU shadow copy so promotion can skip safetensors reload.",
+    "M-22.2: once M-22 makes the dynamic path work, re-run M-21's A/B (static M-18 hottest-92 vs dynamic with the same calibration seed) over short/medium/long prompts with different topic distributions to see if online adaptation actually pays for itself.",
+    "M-23: generalisation validation for M-18 — does hottest-92 from one calibration prompt still hold when the deployment prompt distribution is different?  This becomes the motivating measurement for whether M-22 is worth its complexity.",
+]
+
+[[acceptance_checks]]
+artifact = "benchmarks/results/e2e_gptq_cuda_pim_M18_routing_aware_offload92.json"
+path     = "results[0].status"
+op       = "=="
+value    = "ok"
+reason   = "M-18 baseline must still be valid — M-21 is recorded on top of it as a negative."
+
+[[acceptance_checks]]
+path     = "results[0].runs[0].decode_tokens_per_second"
+op       = ">="
+value    = 0.90
+reason   = "The pim main line stays at M-18's 0.9572 TPS; this acceptance is a sentinel that the static side of routing-aware residency has not regressed while the dynamic side is parked on the branch."
