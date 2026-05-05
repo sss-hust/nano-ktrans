@@ -2664,3 +2664,71 @@ decode 25.66s 中：
 关键观察：M-25 把 submit_forward 的**入口阻塞**消除了，但 `_submit_forward_c_async` 的 **Python 函数体**依然跑在主线程。下一个大胜利点是把整个 preload + request 组装也搬到 C pthread，让 submit 真正 fire-and-return（Python 函数总 latency → ~10µs）。这需要：
 - C 端扩展 `pim_quantized_run_many_fused_silu_async`，接收未 preload 的 expert weight ptrs，在 worker 线程里做 preload（或者维护 C 端 LRU cache，绕过 Python LRU）
 - 或者：让 Python 侧做极简 "just stage tensor pointers to a ring buffer and notify C worker" 的轻量入队，GPU loop 立即得到控制权
+
+---
+
+## 36. M-26 — Threaded Python submit body (NEGATIVE)
+
+**Status**：NEGATIVE −28.6%，**GIL 切换开销大于 overlap 收益**。代码保留为 opt-in（默认 off）作为实验对照；**生产路径保持 M-25**。本节重要的是把教训写下来。
+
+### 36.1 假设与设计
+
+M-25 已消除 `submit_forward` 入口的 GPU-side sync，但 `_submit_forward_c_async` 的 Python 函数体（128-expert 循环、~20 次 ctypes preload、ctypes 数组构造、`submit_many_fused_silu_async`）每层 ~300-500µs 还在主线程，GPU expert loop 等它返回才启动。
+
+**假设**：因为 ctypes 调用自动释放 GIL，把整个 Python 函数体丢到 `threading.Thread` 里，主线程立即返回，GPU expert loop 就能与 preload 真正并行。这是 M-24 Stage A（C pthread 真异步）成功的延伸想法。
+
+### 36.2 实现
+
+- `_submit_forward_c_async` 拆成 main-thread preamble（pinned D2H + cuda sync + diagnostic counter）+ `_do_c_async_submit_work` helper（expert loop + preload + submit_async）
+- `enable_m26_threaded_submit=True` 时 spawn `threading.Thread(daemon=True)` 跑 helper，主线程立即 return
+- `sync_forward` 先 join 该线程（M-26 wait）再等 C pthread handle（M-24 A wait）
+- flag `--pim-enable-m26-threaded`
+
+### 36.3 结果：NEGATIVE −28.6%
+
+| 配置 | decode_seconds | TPS | vs M-25 |
+|---|---|---|---|
+| M-25 (A + pinned) | 25.66 | 1.2470 | — |
+| **M-26 (M-25 + threaded submit)** | **35.93** | **0.8907** | **−28.6%** |
+
+关键诊断信号：
+- `m26_threaded_submit_count = 1488`（48 层 × 32 步，路径命中 ✓）
+- `m26_join_wait_mean = 4.61 ms`（远大于预期的 <0.5 ms）
+- `m26_join_wait_sum = 6.86 s` = **19.1% of decode**
+- `c_async_wait` 从 M-25 的 0.76s (3.0%) 膨胀到 **5.23s (14.6%)**
+
+**两个 wait 加起来 12.09 s，比 M-25 单一 c_async_wait 多 11.3 s**。
+
+### 36.4 根因：GIL 切换压垮了 overlap 收益
+
+这正是 **M-10 Python `threading.Thread`** 当年失败的根源（M-10 wait_mean=73ms），但范围更隐蔽：
+
+| 线程路径 | GIL 行为 | 结果 |
+|---|---|---|
+| **M-24 Stage A**（C pthread） | C worker 完全不争 GIL，主线程 100% 占有 | POSITIVE +20.3% |
+| **M-26**（Python threading.Thread） | 后台线程的 Python 代码（`cpu_mask[expert_idx]`, `torch.where(match.any)` 等）每次都 acquire GIL；CPython 默认 `sys.setswitchinterval=5ms` 会强制切换 | NEGATIVE −28.6% |
+
+即便 ctypes 调用本身 release GIL，**ctypes 调用之间的 Python 代码**（我们每层做 ~50-100 次）才是真正的热区。主线程的 CUDA kernel launch 虽然是 C，但 PyTorch 的 dispatch / autograd / device guard 代码依然需要 GIL——被后台线程每 5ms 抢走一次，主线程 GPU kernel launch 就卡住。
+
+### 36.5 教训与对比
+
+- **M-10 → M-24 A**：把 async 从 Python 线程搬到 C pthread，wait_mean 73ms → 0.6ms。
+- **M-25**：消除 GPU-side sync（纯 C 层优化，Python 主线程完全不阻塞）→ POSITIVE。
+- **M-26**：重新回到 Python 线程路径，重蹈 M-10 覆辙 → NEGATIVE。
+
+**教训**：任何优化，只要需要"Python 代码并发"，就必然被 GIL 切换拖慢；必须彻底用 C 代码承载并发逻辑。
+
+### 36.6 代码去向
+
+- 代码保留在 pim 分支（`enable_m26_threaded_submit` 默认 off），方便未来对照
+- benchmark json 归档：`e2e_gptq_cuda_pim_M26_threaded_offload92.json`
+- **生产路径：`--pim-enable-c-async --pim-enable-m25-pinned`**（不开 M-26）
+
+### 36.7 下一步候选（M-27）
+
+真正把 Python 函数体消除的唯一路径是**把 preload + expert 路由逻辑也搬到 C 层**：
+1. 扩展 `pim_quantized_run_many_fused_silu_async` 接收 **raw GPTQ weight 指针 + topk_ids/topk_weights CPU tensor 指针**
+2. C worker 里做：按 `cpu_mask` 筛选活跃 expert、调 `preload_concat_and_get_slot` / `preload_and_get_slot`、组装 request 表、run fused
+3. Python 主线程只做：pinned D2H + 单次 C 调用（fire-and-return <10µs）
+
+blast radius 更大（~500 行 C 代码、LRU 状态需要 C 端暴露），但架构上是唯一干净路线。放到 M-27 独立 milestone。

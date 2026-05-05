@@ -75,6 +75,7 @@ class PIMMoEBackend(CPUMoEBackend):
         enable_c_fused_kernel: bool = False,
         enable_c_async_submit: bool = False,
         enable_m25_pinned_d2h: bool = False,
+        enable_m26_threaded_submit: bool = False,
     ):
         self.pim_rank_count = pim_rank_count
         self.pim_bytes_per_dpu = pim_bytes_per_dpu
@@ -179,6 +180,28 @@ class PIMMoEBackend(CPUMoEBackend):
         # path); sync real path still uses ``.to("cpu")`` directly
         # because it doesn't interleave with GPU work anyway.
         self.enable_m25_pinned_d2h: bool = bool(enable_m25_pinned_d2h)
+        # ADR-002 M-26: move the Python body of _submit_forward_c_async
+        # (expert loop, preload, ctypes array construction, C async
+        # submit) onto a per-layer background Python thread.  The main
+        # thread only runs the D2H pinned copy + cuda_stream sync (M-25
+        # invariant), then spawns the thread and returns, letting the
+        # HybridMoE GPU expert loop start ~300-500us sooner per layer.
+        #
+        # Correctness contract:
+        #   - ctypes calls (preload, submit_async) auto-release the GIL,
+        #     so the background thread mostly does not compete with the
+        #     main GPU kernel launches.
+        #   - sync_forward joins the spawn thread first, then waits on
+        #     the handle as before.  Numerical output is bit-identical.
+        #   - PIM still performs 100% of offloaded-expert compute; this
+        #     is pure host-side orchestration.
+        self.enable_m26_threaded_submit: bool = bool(enable_m26_threaded_submit)
+        # Counters for the M-26 threaded-submit path (diagnostics only).
+        self.m26_threaded_submit_count: int = 0
+        self.m26_threaded_submit_wait_sum: float = 0.0
+        self.m26_threaded_submit_wait_count: int = 0
+        self.m26_threaded_submit_exc: Optional[BaseException] = None
+        self._m26_submit_thread: Optional[threading.Thread] = None
         # Lazy pinned-buffer cache keyed by (batch_size, hidden_size,
         # top_k).  Each slot holds three pinned tensors sized for
         # (flat_cpu, topk_ids_cpu, topk_weights_cpu).  We only allocate
@@ -703,6 +726,89 @@ class PIMMoEBackend(CPUMoEBackend):
         self.offloaded_pairs += int(routed_cpu.sum().item())
         self.offloaded_tokens += int(routed_cpu.any(dim=1).sum().item())
 
+        # ADR-002 M-26: optionally offload the remaining Python work
+        # (expert loop + preload + ctypes submit) to a background
+        # thread so the main thread returns to HybridMoE.forward ~300-
+        # 500us sooner per layer.  All ctypes calls in the offloaded
+        # section auto-release the GIL, so the main thread's GPU
+        # expert loop is not meaningfully blocked.
+        if self.enable_m26_threaded_submit:
+            # Clear any stale thread state before spawning (defensive;
+            # sync_forward should have joined previous layer's thread).
+            if self._m26_submit_thread is not None and self._m26_submit_thread.is_alive():
+                self._m26_submit_thread.join()
+            self.m26_threaded_submit_exc = None
+            hs_device = hidden_states.device
+            hs_dtype = hidden_states.dtype
+            hs_shape = hidden_states.shape
+
+            def _worker() -> None:
+                try:
+                    self._do_c_async_submit_work(
+                        flat_cpu=flat_cpu,
+                        topk_ids_cpu=topk_ids_cpu,
+                        topk_weights_cpu=topk_weights_cpu,
+                        cpu_mask=cpu_mask,
+                        rt_gate_up=rt_gate_up,
+                        rt_down=rt_down,
+                        batch_size=batch_size,
+                        hs_device=hs_device,
+                        hs_dtype=hs_dtype,
+                        hs_shape=hs_shape,
+                        hidden_states=hidden_states,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    self.m26_threaded_submit_exc = exc
+
+            t = threading.Thread(
+                target=_worker,
+                name=f"pim_m26_submit_L{self.layer_idx}",
+                daemon=True,
+            )
+            t.start()
+            self._m26_submit_thread = t
+            self.m26_threaded_submit_count += 1
+            return True
+
+        # Non-threaded (M-25) path: run the work inline on the main thread.
+        return self._do_c_async_submit_work(
+            flat_cpu=flat_cpu,
+            topk_ids_cpu=topk_ids_cpu,
+            topk_weights_cpu=topk_weights_cpu,
+            cpu_mask=cpu_mask,
+            rt_gate_up=rt_gate_up,
+            rt_down=rt_down,
+            batch_size=batch_size,
+            hs_device=hidden_states.device,
+            hs_dtype=hidden_states.dtype,
+            hs_shape=hidden_states.shape,
+            hidden_states=hidden_states,
+        )
+
+    def _do_c_async_submit_work(
+        self,
+        *,
+        flat_cpu: torch.Tensor,
+        topk_ids_cpu: torch.Tensor,
+        topk_weights_cpu: torch.Tensor,
+        cpu_mask: torch.Tensor,
+        rt_gate_up: PIMQuantizedRuntime,
+        rt_down: PIMQuantizedRuntime,
+        batch_size: int,
+        hs_device: torch.device,
+        hs_dtype: torch.dtype,
+        hs_shape: torch.Size,
+        hidden_states: torch.Tensor,
+    ) -> bool:
+        """ADR-002 M-26: the Python body of ``_submit_forward_c_async``
+        after the (main-thread-only) pinned D2H + cuda sync.
+
+        Extracted so it can run either inline on the main thread
+        (legacy M-24/M-25 path) or on a per-layer background Python
+        thread (M-26).  All ctypes calls here auto-release the GIL, so
+        when run in a background thread the main thread's GPU expert
+        loop continues almost uncontested.
+        """
         # Collect activated CPU experts.  Same logic as _submit_forward_real.
         activated_cpu_experts: list[tuple[int, int, torch.Tensor, torch.Tensor]] = []
         for expert_idx in range(self.num_experts):
@@ -724,8 +830,13 @@ class PIMMoEBackend(CPUMoEBackend):
 
         if not activated_cpu_experts:
             # No PIM work to submit; mark output as zeros so sync_forward
-            # has something to return.
-            self._fallback_output = torch.zeros_like(hidden_states)
+            # has something to return.  Allocate on the caller-requested
+            # device/dtype so both threaded and inline paths behave the
+            # same (hidden_states is only used for shape metadata here —
+            # it is NOT touched from the background thread for data).
+            self._fallback_output = torch.zeros(
+                hs_shape, dtype=hs_dtype, device=hs_device
+            )
             return True
 
         kernel_mode = 4
@@ -780,9 +891,9 @@ class PIMMoEBackend(CPUMoEBackend):
             "topk_weights_cpu": topk_weights_cpu,
             "batch_size": batch_size,
             "hidden_size": self.hidden_size,
-            "device": hidden_states.device,
-            "hidden_dtype": hidden_states.dtype,
-            "hidden_shape": hidden_states.shape,
+            "device": hs_device,
+            "hidden_dtype": hs_dtype,
+            "hidden_shape": hs_shape,
             "rt_gate_up": rt_gate_up,
             "rt_down": rt_down,
             "pre_hits_gu": pre_hits_gu,
@@ -1769,9 +1880,34 @@ class PIMMoEBackend(CPUMoEBackend):
         This keeps the GPU expert loop running in parallel with PIM DPU
         work on real hardware.
 
+        ADR-002 M-26: if a background Python submit thread is still
+        running (the thread that ran ``_do_c_async_submit_work`` in
+        parallel with the main-thread GPU expert loop), join it first
+        so ``self._c_async_handle`` is guaranteed populated before we
+        dispatch to ``_sync_forward_c_async``.
+
         If neither async path was used this call, the straight delegate
         pays only one branch check.
         """
+        # ADR-002 M-26: join the Python submit thread before touching
+        # the C async handle.  This is the only place the main thread
+        # waits for the preload + submit work to finish; if it is
+        # short (expected steady-state ~300-500us) it overlapped with
+        # the GPU expert loop.
+        t26 = self._m26_submit_thread
+        if t26 is not None:
+            import time as _time
+            wait_start = _time.perf_counter()
+            t26.join()
+            wait_s = _time.perf_counter() - wait_start
+            self.m26_threaded_submit_wait_sum += wait_s
+            self.m26_threaded_submit_wait_count += 1
+            self._m26_submit_thread = None
+            exc = self.m26_threaded_submit_exc
+            self.m26_threaded_submit_exc = None
+            if exc is not None:
+                raise exc
+
         # Prefer C async path when a handle is pending (Stage A).
         if self._c_async_handle is not None:
             out = self._sync_forward_c_async()
@@ -1993,6 +2129,16 @@ class PIMMoEBackend(CPUMoEBackend):
                 "enable_m25_pinned_d2h": self.enable_m25_pinned_d2h,
                 "m25_pinned_submit_cache_shapes": list(self._m25_pinned_cache.keys()),
                 "m25_pinned_output_cache_shapes": list(self._m25_output_pinned_cache.keys()),
+                # ADR-002 M-26: background submit thread diagnostics.
+                "enable_m26_threaded_submit": self.enable_m26_threaded_submit,
+                "m26_threaded_submit_count": self.m26_threaded_submit_count,
+                "m26_threaded_submit_wait_sum": self.m26_threaded_submit_wait_sum,
+                "m26_threaded_submit_wait_count": self.m26_threaded_submit_wait_count,
+                "m26_threaded_submit_wait_mean": (
+                    (self.m26_threaded_submit_wait_sum / self.m26_threaded_submit_wait_count)
+                    if self.m26_threaded_submit_wait_count > 0
+                    else None
+                ),
                 # PIM real-compute participation ratio.  Offloaded experts
                 # are those routed to a non-GPU-resident slot; PIM-computed
                 # experts are those handled by one of the DPU paths

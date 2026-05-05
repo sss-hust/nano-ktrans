@@ -104,6 +104,7 @@ def benchmark_backend(
     pim_enable_c_fused: bool,
     pim_enable_c_async: bool,
     pim_enable_m25_pinned: bool,
+    pim_enable_m26_threaded: bool,
     enable_dynamic_expert_scheduler: bool,
     scheduler_prefill_force_gpu_budget_per_layer: int | None,
     scheduler_prefill_collect_only: bool | None,
@@ -153,6 +154,7 @@ def benchmark_backend(
             "enable_c_fused_kernel": pim_enable_c_fused,
             "enable_c_async_submit": pim_enable_c_async,
             "enable_m25_pinned_d2h": pim_enable_m25_pinned,
+            "enable_m26_threaded_submit": pim_enable_m26_threaded,
         }
     elif backend == "cuda_pim_shadow":
         if not torch.cuda.is_available():
@@ -173,6 +175,7 @@ def benchmark_backend(
             "enable_c_fused_kernel": pim_enable_c_fused,
             "enable_c_async_submit": pim_enable_c_async,
             "enable_m25_pinned_d2h": pim_enable_m25_pinned,
+            "enable_m26_threaded_submit": pim_enable_m26_threaded,
         }
     else:
         raise ValueError(f"Unsupported backend: {backend}")
@@ -456,6 +459,28 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Force --pim-enable-m25-pinned OFF.",
     )
+    # ADR-002 M-26: threaded submit body (runs preload + ctypes submit
+    # on a background Python thread so GPU expert loop starts sooner).
+    parser.add_argument(
+        "--pim-enable-m26-threaded",
+        dest="pim_enable_m26_threaded",
+        action="store_true",
+        default=False,
+        help=(
+            "ADR-002 M-26: run the Python body of _submit_forward_c_async "
+            "(expert loop + ctypes preload + C async submit) on a per-"
+            "layer background Python thread.  ctypes calls auto-release "
+            "the GIL so the main thread's GPU expert loop overlaps with "
+            "preload.  Requires --pim-enable-c-async; recommended with "
+            "--pim-enable-m25-pinned.  Default OFF."
+        ),
+    )
+    parser.add_argument(
+        "--no-pim-m26-threaded",
+        dest="pim_enable_m26_threaded",
+        action="store_false",
+        help="Force --pim-enable-m26-threaded OFF.",
+    )
     # ADR-002 M-18: routing-aware GPU residency.
     parser.add_argument(
         "--routing-freq-json",
@@ -587,6 +612,7 @@ def main() -> None:
                 pim_enable_c_fused=args.pim_enable_c_fused,
                 pim_enable_c_async=args.pim_enable_c_async,
                 pim_enable_m25_pinned=args.pim_enable_m25_pinned,
+                pim_enable_m26_threaded=args.pim_enable_m26_threaded,
                 enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
                 scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
                 scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,
