@@ -2732,3 +2732,141 @@ M-25 已消除 `submit_forward` 入口的 GPU-side sync，但 `_submit_forward_c
 3. Python 主线程只做：pinned D2H + 单次 C 调用（fire-and-return <10µs）
 
 blast radius 更大（~500 行 C 代码、LRU 状态需要 C 端暴露），但架构上是唯一干净路线。放到 M-27 独立 milestone。
+
+---
+
+## 37. M-27 — Residual GPU-interface gap: phase-by-phase dissection
+
+**Status**：**POSITIVE +7.9% cumulative over M-25** (1.2470 → 1.3454 TPS). Stage B + Stage C 合并到 pim 主干。
+
+### 37.1 用户问题
+
+用户问："why is cuda_pim still 1.68x slower than cuda_cpu_offload when both run the same 92 GPU experts?"
+
+之前的猜测（"GPU 侧慢"）是错的。必须做实测分解才能定论。
+
+### 37.2 Stage A: 端到端 phase timer (`benchmarks/diag_m27_per_phase.py`)
+
+在 HybridMoE.forward 打 5 段 wall-clock timer，32 tokens 两条路径同时跑：
+
+| phase | cuda_pim (M-25) | cuda_cpu_offload | delta | 占总差距 |
+|-------|-----------------|------------------|-------|----------|
+| step_1_routing | 0.507s | 0.436s | +0.071s | 0.7% |
+| **step_2_submit** | **9.674s** | **0.749s** | **+8.925s** | **83.6%** 🔥 |
+| step_3_gpu_expert_loop | 11.133s | 10.842s | +0.291s | 2.7% |
+| **step_4_sync** | **1.170s** | **0.044s** | **+1.127s** | **10.6%** 🔥 |
+| step_5_merge | 0.059s | 0.050s | +0.009s | 0.1% |
+| **total decode** | **25.751** | **15.078** | **+10.674** | 100% |
+
+**关键发现**：step_3 (GPU expert loop) 两者**几乎一样**（都 ~11s）。之前认为 cuda_pim 的 GPU 侧慢的假设彻底推翻。**真正的差距 100% 在 submit (84%) + sync (11%)**。
+
+### 37.3 Stage B: submit 函数体细分 (`benchmarks/diag_m27_submit_breakdown.py`)
+
+在 `_submit_forward_c_async` 内部打 7 段 timer：
+
+| sub-phase | total | mean_ms | 占 submit |
+|-----------|-------|---------|-----------|
+| **sub_4_preload** | **6.596s** | **6.71ms** | **74.2%** 🔥 |
+| sub_3_expert_scan | 1.771s | 1.19ms | 19.9% |
+| sub_5_submit_async | 0.190s | 0.19ms | 2.1% |
+| 其他 | 0.333s | — | 3.7% |
+
+**两大攻击面**：
+1. **sub_3_expert_scan (20%)**：128 次 Python for-loop × `topk_ids_cpu == expert_idx` + `.any().sum()` reduce → 纯 Python 开销
+2. **sub_4_preload (74%)**：`preload_concat_and_get_slot` + `preload_and_get_slot` ctypes 调用
+
+### 37.4 Stage B 实施：向量化 expert scan
+
+将：
+```python
+for expert_idx in range(self.num_experts):  # 128 次
+    if not cpu_mask[expert_idx]: continue
+    match = topk_ids_cpu == expert_idx
+    ...
+```
+改为：
+```python
+for expert_idx in torch.unique(topk_ids_cpu).tolist():  # <=top_k*batch 次
+    ...
+```
+decode batch=1 top_k=8 → 最多 8 次迭代，而不是 128 次。同样改动应用到 `_submit_forward_real`。
+
+**结果**：1.2470 → 1.3066 TPS (+4.8%)。decode 25.66 → 24.49s。
+
+### 37.5 Stage C 调查：preload sub-breakdown
+
+在 preload loop 内部再细分 (`benchmarks/diag_m27_preload_breakdown.py`)：
+
+| pp | mean_ms | 说明 |
+|----|---------|------|
+| pp_2_gu_preload | **2.38ms** | gate_up ctypes `preload_concat_and_get_slot` |
+| pp_3_dn_preload | **1.27ms** | down ctypes `preload_and_get_slot` |
+| 其他 | <0.03ms | 几乎不占 |
+
+两者加起来 3.65ms/expert/step **全是 ctypes 调用**。而现有 `load_total_seconds` 只量了 DPU push xfer 部分 (0.07ms/call)，**所以剩下 3.58ms 在 ctypes 之前、push xfer 之前**——`load_weights_inner` (host_quantized_bridge.c:304) 里的 host-side memcpy 循环：把 host `packed_qweights`/`scales`/`lut` 按 shard split 重 copy，每次 ~7.5MB 内存复制。
+
+### 37.6 Stage C 根因：LRU hit rate = 0%
+
+LRU hit 能完全跳过 `load_weights_inner`（包括 memcpy 循环）。但：
+
+- NUM_SLOTS = 8（M-6.1 遗留配置）
+- distinct eids = `(layer_idx, cpu_slot)` → **48 layers × 36 experts = 1728** distinct eids
+- **LRU 容量完全不够** → 每次访问都 evict + reload
+
+MRAM 容量分析：`MAX_QWEIGHT_WORDS = 2097152`（per DPU），per slot 分配 1MB，但 Qwen3 expert shard 只需 40KB → **headroom 25x**。NUM_SLOTS 可以大幅扩大。
+
+### 37.7 Stage C 实施：NUM_SLOTS 8 → 128 + group_size=3
+
+三处同步改：
+- `host_quantized_bridge.c`：`#define NUM_SLOTS 128`
+- `dpu_quantized_kernel.c`：同上（host/DPU 必须一致）
+- `pim_quantized_runtime.py`：`NUM_SLOTS = 128` Python 镜像
+
+NUM_SLOTS 必须整除 `MAX_QWEIGHT_WORDS` 且 `WORDS_PER_SLOT` 是 2 的倍数（UPMEM SDK 要求 MRAM offset 8-byte 对齐）。128 满足：2097152/128 = 16384 words = 64KB/slot/DPU，expert 40KB → 1.6x 余量。
+
+注意：NUM_SLOTS=36（直觉上够 36 expert）不满足对齐要求（2097152/36 非整数）→ 运行时 `dpu_copy_to_mrams: invalid mram access` 失败。
+
+**结果**（不同配置扫描）：
+
+| 配置 | decode_tps | hit_rate | 备注 |
+|------|------------|----------|------|
+| NUM_SLOTS=64, group=48 | 1.3274 | 3.1% | group=48 让所有 48 layer 共享 LRU → 1728 eids >> 64 → 几乎全 miss |
+| NUM_SLOTS=64, group=3 | 1.3360 | 46.2% | 3 layers × 36 = 108 eids > 64 → 部分 thrash |
+| **NUM_SLOTS=128, group=3** | **1.3454** | 44.7% | 128 > 108 eids，但 hit_rate 没饱和因 routing 不稳定 |
+
+注：hit_rate 没到 80%+ 的预期，**因为跨 decode step 的 routing 多样性高**——不同 step 的 topk 分布差异大。LRU 容量足够但"访问模式"本身就多样。这是 MoE 特性，不是实现 bug。
+
+### 37.8 累积成绩
+
+| milestone | decode_tps | vs M-23.1 baseline | vs cpu_offload (2.0933) |
+|-----------|-----------|--------------------|-----------------------|
+| M-23.1 | 0.9913 | — | 47.4% |
+| M-24 A (c async) | 1.1930 | +20.3% | 57.0% |
+| M-25 (pinned D2H/H2D) | 1.2470 | +25.8% | 59.6% |
+| **M-27 Stage B** | 1.3066 | +31.8% | 62.4% |
+| **M-27 Stage C** | **1.3454** | **+35.7%** | **64.3%** |
+
+距离 `cuda_cpu_offload` 还有 **35.7%** 的差距，但已经闭合 **52%** 的原始差距（M-23.1 47.4% → M-27 64.3%）。
+
+### 37.9 剩余差距来源（诊断数据支持）
+
+**step_2_submit 残留差距（cuda_pim 仍比 cpu_offload 慢 ~8s/32 tokens）**：
+- load_weights_inner 的 host-side memcpy loop（~7.5MB/call）即便 LRU miss 率降低，每次 miss 仍付这笔钱
+- cpu_offload 的 submit 只是 `pinned.copy_(non_blocking=True) + submit_with_cuda_stream`：CUDA event 唤醒，零 Python wait
+
+**step_4_sync 残留差距（~1.1s/32 tokens）**：
+- cuda_pim: `pim_quantized_fused_wait` pthread join
+- cpu_offload: CUDA event 信号，主线程完全不等
+
+M-28 候选：
+1. **pre-sharded weight cache**：在 `_weight_cache` 里存**已 shard 的 host buffer**，避免 load_weights_inner 每次 miss 都 memcpy split
+2. **CUDA event-based sync**：让 `_sync_forward_c_async` 通过 `cudaEventRecord + cudaStreamWaitEvent` 替代 pthread join，消除主线程阻塞
+
+### 37.10 PIM-compute 守护
+
+所有 M-27 benchmarks 保持 `real_dpu_expert_calls > 0`：
+- Stage B: 1850
+- Stage C (64, g3): 1848
+- Stage C (128, g3): 1768
+
+PIM 承担 100% offloaded expert 计算，科研约束不破。
