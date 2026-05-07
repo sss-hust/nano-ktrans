@@ -105,6 +105,7 @@ def benchmark_backend(
     pim_enable_c_async: bool,
     pim_enable_m25_pinned: bool,
     pim_enable_m26_threaded: bool,
+    pim_enable_m28_bg_preload: bool,
     enable_dynamic_expert_scheduler: bool,
     scheduler_prefill_force_gpu_budget_per_layer: int | None,
     scheduler_prefill_collect_only: bool | None,
@@ -155,6 +156,7 @@ def benchmark_backend(
             "enable_c_async_submit": pim_enable_c_async,
             "enable_m25_pinned_d2h": pim_enable_m25_pinned,
             "enable_m26_threaded_submit": pim_enable_m26_threaded,
+            "enable_m28_bg_preload": pim_enable_m28_bg_preload,
         }
     elif backend == "cuda_pim_shadow":
         if not torch.cuda.is_available():
@@ -176,6 +178,7 @@ def benchmark_backend(
             "enable_c_async_submit": pim_enable_c_async,
             "enable_m25_pinned_d2h": pim_enable_m25_pinned,
             "enable_m26_threaded_submit": pim_enable_m26_threaded,
+            "enable_m28_bg_preload": pim_enable_m28_bg_preload,
         }
     else:
         raise ValueError(f"Unsupported backend: {backend}")
@@ -240,6 +243,7 @@ def benchmark_backend(
             "error": str(exc),
         }
     except Exception as exc:
+        import traceback as _tb
         return {
             "backend": backend,
             "status": "error",
@@ -248,6 +252,7 @@ def benchmark_backend(
             "offload_backend": offload_backend,
             "error_type": type(exc).__name__,
             "error": str(exc),
+            "traceback": _tb.format_exc(),
         }
     finally:
         if llm is not None:
@@ -481,6 +486,31 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Force --pim-enable-m26-threaded OFF.",
     )
+    # ADR-002 M-28 Stage A: surgical bg-thread preload — only the
+    # ctypes-only preload + submit_async block runs on a worker thread,
+    # while torch ops (unique scan, slot alloc, tensor slicing) stay
+    # on the main thread.  This avoids the M-26 GIL contention pitfall.
+    parser.add_argument(
+        "--pim-enable-m28-bg-preload",
+        dest="pim_enable_m28_bg_preload",
+        action="store_true",
+        default=False,
+        help=(
+            "ADR-002 M-28 Stage A: run only the ctypes-heavy preload "
+            "and submit_many_fused_silu_async block on a per-layer "
+            "background Python thread (NOT the entire submit body — "
+            "see M-26 for why that regressed).  Main thread keeps all "
+            "torch ops so the GPU expert loop dispatch is unblocked. "
+            "Requires --pim-enable-c-async + --pim-enable-m25-pinned. "
+            "Default OFF until validated."
+        ),
+    )
+    parser.add_argument(
+        "--no-pim-m28-bg-preload",
+        dest="pim_enable_m28_bg_preload",
+        action="store_false",
+        help="Force --pim-enable-m28-bg-preload OFF.",
+    )
     # ADR-002 M-18: routing-aware GPU residency.
     parser.add_argument(
         "--routing-freq-json",
@@ -613,6 +643,7 @@ def main() -> None:
                 pim_enable_c_async=args.pim_enable_c_async,
                 pim_enable_m25_pinned=args.pim_enable_m25_pinned,
                 pim_enable_m26_threaded=args.pim_enable_m26_threaded,
+                pim_enable_m28_bg_preload=args.pim_enable_m28_bg_preload,
                 enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
                 scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
                 scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,

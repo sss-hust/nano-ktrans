@@ -1,0 +1,25 @@
+{
+  "model_dims": {
+    "hidden": 2048,
+    "intermediate": 768,
+    "group_size": 128,
+    "bits": 4
+  },
+  "torch_version": "2.4.0+cu121",
+  "cuda_available": true,
+  "copies": {
+    "t_d2h_act_ms": 0.0183,
+    "t_h2d_act_ms": 0.0286,
+    "bytes_per_copy": 8192
+  },
+  "gpu_expert": {
+    "t_gpu_expert_ms": 0.0688
+  },
+  "cpu_expert": {
+    "t_cpu_expert_ms": 14.7724
+  },
+  "pim": {
+    "t_pim_preload_warm_hit_ms": 0.0019,
+    "t_pim_infer_per_expert_ms": 4.313
+  }
+}

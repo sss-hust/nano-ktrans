@@ -76,6 +76,7 @@ class PIMMoEBackend(CPUMoEBackend):
         enable_c_async_submit: bool = False,
         enable_m25_pinned_d2h: bool = False,
         enable_m26_threaded_submit: bool = False,
+        enable_m28_bg_preload: bool = False,
     ):
         self.pim_rank_count = pim_rank_count
         self.pim_bytes_per_dpu = pim_bytes_per_dpu
@@ -202,6 +203,35 @@ class PIMMoEBackend(CPUMoEBackend):
         self.m26_threaded_submit_wait_count: int = 0
         self.m26_threaded_submit_exc: Optional[BaseException] = None
         self._m26_submit_thread: Optional[threading.Thread] = None
+        # ADR-002 M-28 Stage A: surgical bg-thread preload.
+        #
+        # Why a new flag instead of reusing M-26?  M-26 moved the *whole*
+        # Python body of submit (including torch.unique, tensor slicing,
+        # _gptq_experts dict lookups) onto a Python thread, and every
+        # one of those torch ops re-acquired the GIL while the main
+        # thread's GPU expert loop was trying to dispatch CUDA kernels.
+        # Net effect: -28.6% TPS (ADR-002 §36, NEGATIVE result).
+        #
+        # M-28 Stage A is the corrected version: the main thread keeps
+        # *all* torch / Python work (unique scan, slot allocation, tensor
+        # slicing, gptq lookup) and only hands the **ctypes-only**
+        # block (preload calls + submit_many_fused_silu_async) to a
+        # background Python thread.  Every ctypes call inside that
+        # block automatically releases the GIL for the duration of the
+        # DPU DMA / launch, so the main thread's GPU expert loop runs
+        # almost uncontested.  Cost-model projection (M-28 §1):
+        #   step_2_main 6.50 ms -> 1.19 ms  (preload + submit moved out)
+        #   step_4_sync 0.79 ms -> ~1.05 ms (catch-up if bg behind GPU)
+        #   total per-layer 14.77 ms -> 9.72 ms (-34%)
+        #   projected decode TPS 1.3454 -> ~2.04
+        #
+        # Off by default until validated by benchmark + science guard.
+        self.enable_m28_bg_preload: bool = bool(enable_m28_bg_preload)
+        self.m28_bg_preload_count: int = 0
+        self.m28_bg_preload_wait_sum: float = 0.0
+        self.m28_bg_preload_wait_count: int = 0
+        self.m28_bg_preload_exc: Optional[BaseException] = None
+        self._m28_bg_thread: Optional[threading.Thread] = None
         # Lazy pinned-buffer cache keyed by (batch_size, hidden_size,
         # top_k).  Each slot holds three pinned tensors sized for
         # (flat_cpu, topk_ids_cpu, topk_weights_cpu).  We only allocate
@@ -871,6 +901,114 @@ class PIMMoEBackend(CPUMoEBackend):
             return True
 
         kernel_mode = 4
+        # ADR-002 M-28 Stage A: extract the ctypes-heavy preload +
+        # submit_async block so we can optionally run it on a background
+        # thread.  Unlike M-26 this helper does NO torch ops on the
+        # caller's GPU tensors (flat_cpu / topk_ids_cpu are CPU-only,
+        # already-materialised; activated_cpu_experts was built on the
+        # main thread).  Every ctypes call inside auto-releases the GIL,
+        # so when run on a worker thread the main thread's GPU expert
+        # loop runs almost uncontested.
+        #
+        # Returns False on any structural error (caller should fall back
+        # to the synchronous real path).  On success stashes the
+        # _c_async_handle + _c_async_meta as before.
+        if self.enable_m28_bg_preload:
+            # Defensive: join any straggling thread from the previous
+            # layer before spawning a new one (sync_forward_c_async
+            # should have joined it already; this is belt-and-braces).
+            if self._m28_bg_thread is not None and self._m28_bg_thread.is_alive():
+                self._m28_bg_thread.join()
+            self.m28_bg_preload_exc = None
+
+            # Capture references that the worker will need.  All Python
+            # objects below are either thread-safe (lists, dicts) or
+            # the worker is the sole writer to them (self._c_async_*).
+            _aexp = activated_cpu_experts
+            _flat = flat_cpu
+            _topk = topk_weights_cpu
+            _rgu = rt_gate_up
+            _rdn = rt_down
+            _bs = batch_size
+            _dev = hs_device
+            _dt = hs_dtype
+            _shape = hs_shape
+            _km = kernel_mode
+
+            def _bg_worker() -> None:
+                try:
+                    ok_inner = self._do_native_preload_and_submit_inline(
+                        activated_cpu_experts=_aexp,
+                        flat_cpu=_flat,
+                        topk_weights_cpu=_topk,
+                        rt_gate_up=_rgu,
+                        rt_down=_rdn,
+                        batch_size=_bs,
+                        hs_device=_dev,
+                        hs_dtype=_dt,
+                        hs_shape=_shape,
+                        kernel_mode=_km,
+                    )
+                    if not ok_inner:
+                        # Mark fallback so sync_forward routes to the
+                        # super().sync_forward path.
+                        self._c_async_handle = None
+                        self._c_async_meta = None
+                except BaseException as exc:  # noqa: BLE001
+                    self.m28_bg_preload_exc = exc
+                    self._c_async_handle = None
+                    self._c_async_meta = None
+
+            t = threading.Thread(
+                target=_bg_worker,
+                name=f"pim_m28_preload_L{self.layer_idx}",
+                daemon=True,
+            )
+            t.start()
+            self._m28_bg_thread = t
+            self.m28_bg_preload_count += 1
+            # Optimistic success: caller proceeds, sync_forward joins.
+            # Note: c_async_submit_count is bumped inside the inline
+            # helper after successful submit, NOT here.
+            return True
+
+        ok = self._do_native_preload_and_submit_inline(
+            activated_cpu_experts=activated_cpu_experts,
+            flat_cpu=flat_cpu,
+            topk_weights_cpu=topk_weights_cpu,
+            rt_gate_up=rt_gate_up,
+            rt_down=rt_down,
+            batch_size=batch_size,
+            hs_device=hs_device,
+            hs_dtype=hs_dtype,
+            hs_shape=hs_shape,
+            kernel_mode=kernel_mode,
+        )
+        return ok
+
+    def _do_native_preload_and_submit_inline(
+        self,
+        *,
+        activated_cpu_experts: list,
+        flat_cpu: torch.Tensor,
+        topk_weights_cpu: torch.Tensor,
+        rt_gate_up: PIMQuantizedRuntime,
+        rt_down: PIMQuantizedRuntime,
+        batch_size: int,
+        hs_device: torch.device,
+        hs_dtype: torch.dtype,
+        hs_shape: torch.Size,
+        kernel_mode: int,
+    ) -> bool:
+        """ADR-002 M-28 Stage A helper: per-expert ctypes preload +
+        submit_many_fused_silu_async.
+
+        Pure-ctypes / dict / list code path; does NOT touch GPU tensors.
+        Safe to call either inline (M-25/M-27 default) or from a
+        per-layer Python background thread (M-28 Stage A) — every
+        ctypes entry point auto-releases the GIL, so the main thread's
+        GPU expert loop is not meaningfully blocked.
+        """
         # Preload every expert's bundles + build the request list, same
         # as the sync fused path.
         requests: list[
@@ -945,6 +1083,12 @@ class PIMMoEBackend(CPUMoEBackend):
         Returns the fallback output tensor (GPU/CPU dtype-matching), or
         None if no C-async handle is pending (caller falls back to the
         super().sync_forward path).
+
+        ADR-002 M-28 Stage A invariant: the outer ``sync_forward`` has
+        already joined ``self._m28_bg_thread`` (if any), so by the time
+        we get here ``self._c_async_handle`` is guaranteed to be either
+        populated (submit succeeded) or ``None`` (m28 worker failed and
+        caller will fall back to ``super().sync_forward``).
         """
         handle = self._c_async_handle
         meta = self._c_async_meta
@@ -1943,6 +2087,29 @@ class PIMMoEBackend(CPUMoEBackend):
             if exc is not None:
                 raise exc
 
+        # ADR-002 M-28 Stage A: join the bg preload thread here too.
+        # We must do it BEFORE the ``if self._c_async_handle is not None``
+        # branch below, because the m28 thread is exactly what writes
+        # self._c_async_handle — if we check the handle before joining,
+        # we'd race past into super().sync_forward while the preload is
+        # still in flight (symptoms: mismatched slot bookkeeping in the
+        # next layer, or an AssertionError in the downstream attention
+        # store_kvcache when KV-cache state is read concurrently).
+        t28 = self._m28_bg_thread
+        if t28 is not None:
+            import time as _time
+            wait_start = _time.perf_counter()
+            t28.join()
+            wait_s = _time.perf_counter() - wait_start
+            self.m28_bg_preload_wait_sum += wait_s
+            self.m28_bg_preload_wait_count += 1
+            self._m28_bg_thread = None
+            exc28 = self.m28_bg_preload_exc
+            self.m28_bg_preload_exc = None
+            if exc28 is not None:
+                self._record_fallback("m28_bg_preload_failed")
+                raise exc28
+
         # Prefer C async path when a handle is pending (Stage A).
         if self._c_async_handle is not None:
             out = self._sync_forward_c_async()
@@ -2172,6 +2339,20 @@ class PIMMoEBackend(CPUMoEBackend):
                 "m26_threaded_submit_wait_mean": (
                     (self.m26_threaded_submit_wait_sum / self.m26_threaded_submit_wait_count)
                     if self.m26_threaded_submit_wait_count > 0
+                    else None
+                ),
+                # ADR-002 M-28 Stage A: surgical bg-thread preload diag.
+                # Unlike M-26 (which threaded the entire submit body and
+                # regressed -28.6%), M-28 only threads the ctypes-only
+                # preload + submit_async block; main thread keeps all
+                # torch ops so GPU expert loop dispatch is unblocked.
+                "enable_m28_bg_preload": self.enable_m28_bg_preload,
+                "m28_bg_preload_count": self.m28_bg_preload_count,
+                "m28_bg_preload_wait_sum": self.m28_bg_preload_wait_sum,
+                "m28_bg_preload_wait_count": self.m28_bg_preload_wait_count,
+                "m28_bg_preload_wait_mean": (
+                    (self.m28_bg_preload_wait_sum / self.m28_bg_preload_wait_count)
+                    if self.m28_bg_preload_wait_count > 0
                     else None
                 ),
                 # PIM real-compute participation ratio.  Offloaded experts
