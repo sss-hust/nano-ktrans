@@ -7898,7 +7898,10 @@ class TestPIMQuantizedRuntimeSlotLRU:
 
     def test_num_slots_is_public_constant(self):
         from nano_ktrans.kernels.pim_quantized_runtime import PIMQuantizedRuntime
-        assert PIMQuantizedRuntime.NUM_SLOTS == 8  # must match DPU binary's NUM_SLOTS
+        # ADR-002 M-27 Stage C: NUM_SLOTS bumped 8 -> 128.  Kept as a
+        # public constant so callers can size LRU expectations and
+        # tests can patch it for stress.  Must match DPU binary's NUM_SLOTS.
+        assert PIMQuantizedRuntime.NUM_SLOTS == 128
 
 
 
