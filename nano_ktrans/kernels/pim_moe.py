@@ -809,17 +809,48 @@ class PIMMoEBackend(CPUMoEBackend):
         when run in a background thread the main thread's GPU expert
         loop continues almost uncontested.
         """
-        # Collect activated CPU experts.  Same logic as _submit_forward_real.
+        # Collect activated CPU experts.
+        #
+        # ADR-002 M-27 Stage B: vectorised expert scan.  The legacy
+        # implementation iterated all num_experts (128 for Qwen3-30B),
+        # doing ``topk_ids_cpu == expert_idx`` + ``match.any()`` per
+        # index — 128 elementwise comparisons + reductions per decode
+        # step per layer.  Profiling (diag_m27_submit_breakdown.json)
+        # showed this cost 1.77s over 1488 calls = 1.19ms/step, or
+        # ~20% of the entire submit_forward body.
+        #
+        # Vectorised version:
+        #   1. Take torch.unique on the flat topk_ids to get the <=8*batch
+        #      distinct expert ids actually routed this step.
+        #   2. Filter those against cpu_mask (CPU-side) + cpu_expert_lookup
+        #      in a single Python loop whose upper bound is <=8 (decode
+        #      batch=1, top_k=8) rather than num_experts.
+        #   3. Compute one boolean matrix ``match_all[eid, b, k]`` once;
+        #      per-expert ``token_indices`` is a cheap torch.where on a
+        #      slice.
         activated_cpu_experts: list[tuple[int, int, torch.Tensor, torch.Tensor]] = []
-        for expert_idx in range(self.num_experts):
+        # Candidate expert ids that are actually routed to this step
+        # (small set — typically <= top_k*batch = 8 for decode batch=1).
+        # topk_ids_cpu shape: [batch_size, top_k]
+        # unique_ids is sorted ascending.
+        unique_ids_t = torch.unique(topk_ids_cpu)
+        unique_ids = unique_ids_t.tolist()
+        for expert_idx in unique_ids:
             if not cpu_mask[expert_idx]:
                 continue
             cpu_slot = self.cpu_expert_lookup.get(int(expert_idx))
             if cpu_slot is None:
                 continue
+            # For CPU-resident activated experts we still need the
+            # per-expert match matrix (shape [batch, top_k]) later when
+            # scattering the PIM output in _sync_forward_c_async.  This
+            # costs one comparison per candidate — strictly fewer than
+            # the legacy 128 comparisons.
             match = topk_ids_cpu == expert_idx
             token_indices = torch.where(match.any(dim=1))[0]
             if len(token_indices) == 0:
+                # Shouldn't happen (expert_idx came from unique_ids) but
+                # keep the guard for defensiveness.
                 continue
             if cpu_slot not in self._gptq_experts:
                 # Fused path requires GPTQ weights for every activated expert.
@@ -1623,8 +1654,12 @@ class PIMMoEBackend(CPUMoEBackend):
         output = torch.zeros(batch_size, self.hidden_size, dtype=torch.float32, device="cpu")
 
         # ── Collect activated CPU experts ──────────────────────────────
+        # ADR-002 M-27 Stage B: vectorised expert scan (see c_async path
+        # for the full rationale).  Iterates only the <=top_k*batch
+        # unique ids actually routed this step instead of all num_experts.
         activated_cpu_experts = []
-        for expert_idx in range(self.num_experts):
+        unique_ids_legacy = torch.unique(topk_ids_cpu).tolist()
+        for expert_idx in unique_ids_legacy:
             if not cpu_mask[expert_idx]:
                 continue
 
