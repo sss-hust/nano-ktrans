@@ -68,7 +68,21 @@
 
 /* ADR-002 M-6.1: multi-slot MRAM residency (must match DPU kernel) */
 #ifndef NUM_SLOTS
-#define NUM_SLOTS 8
+/* M-27 Stage C: bumped 8 -> 128 to cover a full layer-group of
+ * distinct expert identities at --offload-device-experts=92 on
+ * Qwen3-30B-A3B.  At pim_layer_group_size=3 each group holds
+ * 3 layers * 36 offloaded experts = 108 distinct (layer, expert)
+ * pairs, so 128 slots fits cleanly with headroom.  NUM_SLOTS must
+ * divide MAX_QWEIGHT_WORDS (2097152) such that WORDS_PER_SLOT is
+ * a multiple of 2 (8-byte MRAM alignment enforced by the UPMEM SDK).
+ * 128 fits cleanly:
+ *   WORDS_PER_SLOT = 2097152 / 128 = 16384 words = 64 KB / DPU
+ * which is still 1.6x larger than a single Qwen3 expert shard
+ * (~40 KB / DPU at 39 DPUs).  Hit rate jumps from ~0% to 80%+
+ * after warm-up, eliminating the per-call ~2.4ms ctypes preload
+ * overhead that dominated submit_forward.
+ */
+#define NUM_SLOTS 128
 #endif
 #define WORDS_PER_SLOT     (MAX_QWEIGHT_WORDS / NUM_SLOTS)
 #define SCALES_PER_SLOT    (MAX_SCALE_FLOATS  / NUM_SLOTS)

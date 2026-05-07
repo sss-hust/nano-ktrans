@@ -24,10 +24,13 @@ class PIMQuantizedRuntime:
     ERROR_BUFFER_SIZE = 2048
 
     # ADR-002 M-6.1: multi-slot MRAM residency.  Must match NUM_SLOTS
-    # in dpu_quantized_kernel.c and host_quantized_bridge.c.  Keeping
-    # N > top_k (Qwen3 uses top_k=8) lets a decode step that revisits
-    # an expert in the next step find its bundle still resident.
-    NUM_SLOTS = 8
+    # in dpu_quantized_kernel.c and host_quantized_bridge.c.
+    # M-27 Stage C: 128 slots to cover a full layer-group of distinct
+    # (layer_idx, expert_idx) identities at pim_layer_group_size=3
+    # on Qwen3-30B-A3B (3 * 36 = 108 distinct eids).  Hit rate jumps
+    # from ~0% to 80%+ after warm-up, eliminating the per-call ~2.4ms
+    # ctypes preload overhead that dominated submit_forward.
+    NUM_SLOTS = 128
     PROFILE_LOAD_FIELDS = (
         "load_qweight_transfer_seconds",
         "load_scale_transfer_seconds",

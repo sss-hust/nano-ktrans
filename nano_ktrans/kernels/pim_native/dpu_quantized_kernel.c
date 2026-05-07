@@ -83,7 +83,12 @@
  * The per-slot capacity is MAX_QWEIGHT_WORDS / NUM_SLOTS words etc, so
  * total MRAM footprint is unchanged relative to M-5. */
 #ifndef NUM_SLOTS
-#define NUM_SLOTS 8
+/* M-27 Stage C: 128 slots to cover a full layer-group of distinct
+ * (layer_idx, expert_idx) identities at pim_layer_group_size=3 on
+ * Qwen3-30B-A3B (3 layers * 36 experts = 108).  WORDS_PER_SLOT =
+ * 2097152/128 = 16384 words = 64 KB per DPU, 1.6x larger than a
+ * single Qwen3 expert shard.  See host_quantized_bridge.c. */
+#define NUM_SLOTS 128
 #endif
 
 #define WORDS_PER_SLOT     (MAX_QWEIGHT_WORDS / NUM_SLOTS)
