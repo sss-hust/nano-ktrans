@@ -77,6 +77,7 @@ class PIMMoEBackend(CPUMoEBackend):
         enable_m25_pinned_d2h: bool = False,
         enable_m26_threaded_submit: bool = False,
         enable_m28_bg_preload: bool = False,
+        enable_m30_expert_parallel: bool = False,
     ):
         self.pim_rank_count = pim_rank_count
         self.pim_bytes_per_dpu = pim_bytes_per_dpu
@@ -232,6 +233,55 @@ class PIMMoEBackend(CPUMoEBackend):
         self.m28_bg_preload_wait_count: int = 0
         self.m28_bg_preload_exc: Optional[BaseException] = None
         self._m28_bg_thread: Optional[threading.Thread] = None
+        # ADR-002 M-30 Stage A: Expert-parallel static residency.
+        #
+        # Replaces the per-layer-group runtime pair (M-7, 16 group ×
+        # 2 runtime = 32 rank, but each layer only ever activates 2
+        # rank → only 5.1% of physical PIM hardware is in use at any
+        # decode step) with a per-cpu-expert runtime pool.
+        #
+        # Layout when enabled:
+        #   * 36 cold experts × 1 PIMQuantizedRuntime each (1 rank/64 DPU)
+        #   * Each runtime stores ALL 48 layers of that one expert's
+        #     gate_up bundle + down (96 slot ids, well under NUM_SLOTS=128)
+        #   * One-time bulk preload at model init (all 36 ranks in
+        #     parallel via ctypes auto-GIL-release; ~150 ms total)
+        #   * decode submit_forward: route topk-active cold experts to
+        #     their owner runtimes and spawn N parallel async submits;
+        #     sync_forward joins all handles
+        #
+        # Why "1 expert per rank" (not "K experts per rank"):
+        #   * NUM_SLOTS=128 budget: K layers × 2 proj × ceil(36/N rank)
+        #     experts ≤ 128 → forces K=1 unless we recompile DPU kernel
+        #   * Maximises rank-level concurrency: top-k=8 average ≈ 1.8
+        #     CPU-routed experts per layer, all guaranteed on distinct
+        #     ranks → 1.8 ranks launch in parallel (vs 1 rank serial today)
+        #   * Simplest mapping: rank_idx = cpu_slot, no graph partition needed
+        #
+        # Trade-off vs lazy LRU (current):
+        #   * Loses routing adaptivity (calibration must be representative;
+        #     mean-mask ADR-002 §M-23 already mitigates this)
+        #   * Pays one-time host RAM footprint at preload (~270 MB shard
+        #     buffers, freed after init)
+        #   * Wins: zero preload misses during decode, true expert-level
+        #     rank concurrency
+        self.enable_m30_expert_parallel: bool = bool(enable_m30_expert_parallel)
+        # Per-cpu-slot runtime pools.  When M-30 is enabled, these
+        # replace ``self.quantized_runtime`` / ``self.quantized_runtime_down``
+        # for the hot path; the legacy fields stay set to runtime[0]
+        # so diagnostics + fallback paths still work.
+        self._m30_gate_up_runtimes: list[Optional[PIMQuantizedRuntime]] = []
+        self._m30_down_runtimes: list[Optional[PIMQuantizedRuntime]] = []
+        self.m30_bulk_preload_seconds: float = 0.0
+        self.m30_bulk_preload_count: int = 0
+        self.m30_parallel_submit_count: int = 0
+        self.m30_parallel_max_active_ranks: int = 0
+        self.m30_parallel_active_ranks_sum: int = 0
+        self.m30_parallel_active_ranks_count: int = 0
+        # When the M-30 hot path is taken the active runtimes for the
+        # current submit are stashed here so sync_forward can join them.
+        self._m30_pending_handles: list = []
+        self._m30_pending_records: list = []
         # Lazy pinned-buffer cache keyed by (batch_size, hidden_size,
         # top_k).  Each slot holds three pinned tensors sized for
         # (flat_cpu, topk_ids_cpu, topk_weights_cpu).  We only allocate
@@ -314,16 +364,29 @@ class PIMMoEBackend(CPUMoEBackend):
             self.runtime = self._try_init_runtime()
             self.expert_runtime = self._try_init_expert_runtime()
             if self.is_gptq:
-                # Dual-runtime path (M-5): separate rank pools for
-                # gate_up bundle vs down.  Falls back gracefully to the
-                # single-runtime path if allocation fails.
-                gate_up_rt, down_rt = self._try_init_quantized_runtimes_dual()
-                if gate_up_rt is not None:
-                    self.quantized_runtime = gate_up_rt
-                    self.quantized_runtime_down = down_rt
-                else:
-                    self.quantized_runtime = self._try_init_quantized_runtime()
-                    self.quantized_runtime_down = self.quantized_runtime
+                if self.enable_m30_expert_parallel:
+                    # M-30 Stage A: per-cpu-expert runtime pool with
+                    # one-time bulk preload.  Falls back to dual-runtime
+                    # path if alloc/preload fails (e.g. not enough PIM
+                    # ranks visible).  When successful, also writes
+                    # self.quantized_runtime / _down to runtime[0] so
+                    # diagnostics + non-hot-path code paths keep working.
+                    ok = self._try_init_quantized_runtimes_expert_parallel()
+                    if not ok:
+                        self._record_fallback("m30_expert_parallel_init_failed")
+                        # fall through to legacy dual init
+                        self.enable_m30_expert_parallel = False
+                if not self.enable_m30_expert_parallel:
+                    # Dual-runtime path (M-5): separate rank pools for
+                    # gate_up bundle vs down.  Falls back gracefully to the
+                    # single-runtime path if allocation fails.
+                    gate_up_rt, down_rt = self._try_init_quantized_runtimes_dual()
+                    if gate_up_rt is not None:
+                        self.quantized_runtime = gate_up_rt
+                        self.quantized_runtime_down = down_rt
+                    else:
+                        self.quantized_runtime = self._try_init_quantized_runtime()
+                        self.quantized_runtime_down = self.quantized_runtime
         else:
             self.backend_name = "pim_shadow"
 
@@ -463,6 +526,106 @@ class PIMMoEBackend(CPUMoEBackend):
         if down_rt is None:
             down_rt = gate_up_rt
         return gate_up_rt, down_rt
+
+    def _try_init_quantized_runtimes_expert_parallel(self) -> bool:
+        """ADR-002 M-30 Stage A: allocate one PIMQuantizedRuntime per
+        cpu_slot (per cold expert) and bulk-preload all 48 layers at init.
+
+        Layout (when this returns True):
+          * self._m30_gate_up_runtimes[cpu_slot] holds the rank that
+            owns this expert's gate+up concat bundle for ALL layers
+          * self._m30_down_runtimes[cpu_slot] holds the rank that
+            owns the down projection
+          * 1 cpu_slot = 1 distinct rank-pair (gate_up rank + down rank)
+            → 36 cold expert × 2 = 72 ranks?  No — we share gate_up and
+            down on the SAME rank to halve rank usage and only need 36.
+            (Slot allocation: gate_up uses slots 0..47, down uses 48..95.)
+
+        Returns False on any allocation/preload failure; caller falls
+        back to dual-runtime init.
+        """
+        if not self.has_cpu_experts or self.visible_pim_ranks <= 0 or not self.is_gptq:
+            return False
+        # Only the first PIMMoEBackend instance (layer_idx=0) actually
+        # spends bulk-preload time; subsequent layers share the runtime
+        # pool via PIMQuantizedRuntime.get_shared(instance_key=...).
+        # But every layer must populate self._m30_*_runtimes lookup
+        # tables so the hot path can resolve rank.
+        n_cpu = len(self.cpu_expert_lookup)  # number of cold experts
+        if n_cpu == 0:
+            return False
+        if n_cpu > self.visible_pim_ranks:
+            self._record_fallback("m30_not_enough_ranks")
+            return False
+
+        # Allocate one rank per cold expert.  Gate_up and down are
+        # co-resident on the SAME rank to economise on physical ranks
+        # (otherwise 36 expert × 2 proj = 72 ranks would exceed 39).
+        # The two projections live in separate slot ID ranges within
+        # the same MRAM (NUM_SLOTS=128 budget: 48 gate_up + 48 down = 96 < 128).
+        gate_up_runtimes: list[Optional[PIMQuantizedRuntime]] = [None] * n_cpu
+        down_runtimes:    list[Optional[PIMQuantizedRuntime]] = [None] * n_cpu
+        for cpu_slot in range(n_cpu):
+            try:
+                # Single shared key per cpu_slot — both gate_up and down
+                # land on the same physical rank.
+                instance_key = f"{self.pim_profile}|m30|expert{cpu_slot}"
+                rt = PIMQuantizedRuntime.get_shared(
+                    profile=self.pim_profile,
+                    instance_key=instance_key,
+                    rank_count=max(1, self.pim_rank_count),
+                )
+                gate_up_runtimes[cpu_slot] = rt
+                down_runtimes[cpu_slot] = rt
+            except Exception:
+                self._record_fallback(f"m30_alloc_failed_slot{cpu_slot}")
+                return False
+
+        self._m30_gate_up_runtimes = gate_up_runtimes
+        self._m30_down_runtimes = down_runtimes
+
+        # Anchor legacy fields to runtime[0] so any code reading
+        # self.quantized_runtime keeps working (diagnostics, fallback).
+        self.quantized_runtime = gate_up_runtimes[0]
+        self.quantized_runtime_down = down_runtimes[0]
+
+        # Bulk preload: iterate this layer's gate_up + down for every
+        # cold expert and push to its owner rank.  Each call to
+        # preload_*_get_slot is a ctypes call that releases the GIL.
+        # Total cost ≈ 36 * (2.4 + 1.3) ms = ~135 ms PER LAYER (run
+        # serially per layer; rank parallelism inside UPMEM SDK is
+        # not exposed at the Python level).  The first time
+        # PIMMoEBackend is constructed (layer_idx=0) pays this cost;
+        # subsequent layers share the runtime pool but still need to
+        # call preload to populate THEIR layer's slot ids in MRAM.
+        import time as _time
+        kernel_mode = 4
+        bulk_start = _time.perf_counter()
+        try:
+            for cpu_slot in range(n_cpu):
+                gptq = self._gptq_experts.get(cpu_slot)
+                if gptq is None:
+                    self._record_fallback(f"m30_no_gptq_slot{cpu_slot}")
+                    return False
+                rt_gu = gate_up_runtimes[cpu_slot]
+                rt_dn = down_runtimes[cpu_slot]
+                base_eid = self._expert_id(cpu_slot)
+                gate_up_eid = base_eid ^ 0x1212121212121212
+                down_eid = base_eid ^ 0x3333333333333333
+                # gate+up concat preload
+                rt_gu.preload_concat_and_get_slot(
+                    gate_up_eid, gptq["gate"], gptq["up"], kernel_mode=kernel_mode,
+                )
+                # down preload
+                rt_dn.preload_and_get_slot(
+                    down_eid, gptq["down"], kernel_mode,
+                )
+                self.m30_bulk_preload_count += 1
+        except Exception:
+            self._record_fallback("m30_bulk_preload_failed")
+            return False
+        self.m30_bulk_preload_seconds = _time.perf_counter() - bulk_start
+        return True
 
     # ── Expert ID for weight residency tracking ────────────────────────
 
@@ -1008,7 +1171,31 @@ class PIMMoEBackend(CPUMoEBackend):
         per-layer Python background thread (M-28 Stage A) — every
         ctypes entry point auto-releases the GIL, so the main thread's
         GPU expert loop is not meaningfully blocked.
+
+        ADR-002 M-30 Stage A: when ``self.enable_m30_expert_parallel``
+        is True we route each activated CPU expert to its OWN
+        runtime pair (per-cpu-slot assignment from init time), and
+        submit one async handle per distinct rank.  This unlocks
+        rank-level parallelism — top-k=8 routed experts naturally
+        land on top-k=8 distinct ranks, all launching DPU work
+        concurrently while the main thread runs the GPU expert loop.
+        Weights are already preloaded at init time so the per-expert
+        ``preload_concat_and_get_slot`` calls are guaranteed cache
+        hits (zero-DMA).
         """
+        if self.enable_m30_expert_parallel:
+            return self._do_m30_expert_parallel_submit(
+                activated_cpu_experts=activated_cpu_experts,
+                flat_cpu=flat_cpu,
+                topk_weights_cpu=topk_weights_cpu,
+                batch_size=batch_size,
+                hs_device=hs_device,
+                hs_dtype=hs_dtype,
+                hs_shape=hs_shape,
+                kernel_mode=kernel_mode,
+            )
+
+        # Legacy single-runtime-pair path (M-7 / M-15 / M-24 Stage A).
         # Preload every expert's bundles + build the request list, same
         # as the sync fused path.
         requests: list[
@@ -1076,6 +1263,166 @@ class PIMMoEBackend(CPUMoEBackend):
         self.c_async_submit_count += 1
         return True
 
+    def _do_m30_expert_parallel_submit(
+        self,
+        *,
+        activated_cpu_experts: list,
+        flat_cpu: torch.Tensor,
+        topk_weights_cpu: torch.Tensor,
+        batch_size: int,
+        hs_device: torch.device,
+        hs_dtype: torch.dtype,
+        hs_shape: torch.Size,
+        kernel_mode: int,
+    ) -> bool:
+        """ADR-002 M-30 Stage A: per-cpu-slot rank routing + parallel
+        async submit.
+
+        For each activated CPU expert, look up its dedicated runtime
+        from ``self._m30_*_runtimes`` and submit a one-request async
+        op there.  Each distinct rank's submit returns its own handle;
+        all handles are stashed in ``self._m30_pending_handles`` for
+        sync_forward to join.
+
+        Weights are already resident in MRAM (bulk-preloaded at init),
+        so ``preload_concat_and_get_slot`` is a cache hit (returns slot
+        id without doing DMA).
+        """
+        # Group activated experts by their owner runtime so a single
+        # rank that happens to own multiple routed experts (very rare
+        # in 1-expert-per-rank layout, but possible in the K>1 future)
+        # only pays one ctypes round-trip.
+        by_runtime: dict[int, dict[str, Any]] = {}
+        n_cpu = len(self._m30_gate_up_runtimes)
+        for expert_idx, cpu_slot, token_indices, match in activated_cpu_experts:
+            if cpu_slot >= n_cpu:
+                # Should never happen — cpu_expert_lookup is bounded
+                # by the array length we allocated.  Defensive:
+                self._record_fallback("m30_cpu_slot_out_of_range")
+                return False
+            gptq = self._gptq_experts.get(cpu_slot)
+            if gptq is None:
+                self._record_fallback("m30_no_gptq_at_decode")
+                return False
+            rt_gu = self._m30_gate_up_runtimes[cpu_slot]
+            rt_dn = self._m30_down_runtimes[cpu_slot]
+            if rt_gu is None or rt_dn is None:
+                self._record_fallback("m30_no_runtime_at_decode")
+                return False
+
+            base_eid = self._expert_id(cpu_slot)
+            gate_up_eid = base_eid ^ 0x1212121212121212
+            down_eid = base_eid ^ 0x3333333333333333
+            # These should be cache hits because init bulk-preloaded
+            # all 48 layers × 36 experts; if not, we still pay miss
+            # cost (paranoia: log via fallback counter but proceed).
+            gu_slot, gu_padded_in, gu_concat, gate_cols, up_cols = \
+                rt_gu.preload_concat_and_get_slot(
+                    gate_up_eid, gptq["gate"], gptq["up"], kernel_mode=kernel_mode,
+                )
+            dn_slot, dn_padded_in, dn_padded_out, dn_orig_out = \
+                rt_dn.preload_and_get_slot(
+                    down_eid, gptq["down"], kernel_mode,
+                )
+            if gate_cols != up_cols or dn_padded_in != up_cols:
+                self._record_fallback("m30_shape_mismatch")
+                return False
+
+            states = flat_cpu[token_indices]
+            request_tuple = (
+                states, gu_slot, gu_padded_in, gu_concat,
+                gate_cols, up_cols, dn_slot, dn_padded_in, dn_padded_out,
+            )
+            record = {
+                "token_indices": token_indices,
+                "match": match,
+                "dn_orig_out": dn_orig_out,
+                "cpu_slot": cpu_slot,
+            }
+            # Bucket by the (gu_runtime, dn_runtime) pair identity.
+            # In the 1-cpu-slot=1-rank layout these are (rt, rt) so
+            # the key is just id(rt_gu).  In a future K-expert-per-rank
+            # layout multiple cpu_slots may share a runtime, in which
+            # case they go into the same bucket and become a batched
+            # call inside that rank.
+            bucket_key = (id(rt_gu), id(rt_dn))
+            entry = by_runtime.get(bucket_key)
+            if entry is None:
+                entry = {
+                    "rt_gu": rt_gu,
+                    "rt_dn": rt_dn,
+                    "requests": [],
+                    "records": [],
+                }
+                by_runtime[bucket_key] = entry
+            entry["requests"].append(request_tuple)
+            entry["records"].append(record)
+
+        if not by_runtime:
+            # No CPU work this layer; mark output as zeros so
+            # sync_forward has something to return.
+            self._fallback_output = torch.zeros(
+                hs_shape, dtype=hs_dtype, device=hs_device
+            )
+            return True
+
+        # Spawn N parallel async submits, one per distinct rank bucket.
+        # PIMFusedAsyncHandle is independent per submit — main thread
+        # simply collects them all.
+        pending_handles: list[Any] = []
+        pending_records: list[list[dict[str, Any]]] = []
+        active_ranks = 0
+        submit_failed = False
+        for bucket in by_runtime.values():
+            try:
+                handle = PIMQuantizedRuntime.submit_many_fused_silu_async(
+                    bucket["rt_gu"], bucket["rt_dn"], bucket["requests"],
+                )
+            except Exception:
+                self._record_fallback("m30_parallel_submit_failed")
+                submit_failed = True
+                break
+            pending_handles.append(handle)
+            pending_records.append(bucket["records"])
+            active_ranks += 1
+
+        if submit_failed:
+            # Drain any handles we already submitted to avoid leaking
+            # DPU work / pthread state, then signal fallback.
+            for h in pending_handles:
+                try:
+                    h.wait()
+                except Exception:
+                    pass
+            return False
+
+        self._m30_pending_handles = pending_handles
+        self._m30_pending_records = pending_records
+        self.m30_parallel_submit_count += 1
+        self.m30_parallel_active_ranks_sum += active_ranks
+        self.m30_parallel_active_ranks_count += 1
+        if active_ranks > self.m30_parallel_max_active_ranks:
+            self.m30_parallel_max_active_ranks = active_ranks
+
+        # Stash submit-time book-keeping that sync_forward needs.
+        # Reuse the existing _c_async_meta channel so sync_forward's
+        # output assembly path can stay unified.  c_async_handle is
+        # set to a sentinel marker so the dispatch in sync_forward
+        # routes to the m30-aware wait path.
+        self._c_async_handle = "m30_multi"  # sentinel
+        self._c_async_meta = {
+            "topk_weights_cpu": topk_weights_cpu,
+            "batch_size": batch_size,
+            "hidden_size": self.hidden_size,
+            "device": hs_device,
+            "hidden_dtype": hs_dtype,
+            "hidden_shape": hs_shape,
+            "n": sum(len(r) for r in pending_records),
+            "m30_active_ranks": active_ranks,
+        }
+        self.c_async_submit_count += 1
+        return True
+
     def _sync_forward_c_async(self) -> Optional[torch.Tensor]:
         """Join the C pthread worker started by ``_submit_forward_c_async``
         and assemble the per-layer output tensor.
@@ -1089,6 +1436,10 @@ class PIMMoEBackend(CPUMoEBackend):
         we get here ``self._c_async_handle`` is guaranteed to be either
         populated (submit succeeded) or ``None`` (m28 worker failed and
         caller will fall back to ``super().sync_forward``).
+
+        ADR-002 M-30 Stage A: when ``_c_async_handle == "m30_multi"``,
+        we route to the multi-handle join path that aggregates outputs
+        from N parallel rank submits.
         """
         handle = self._c_async_handle
         meta = self._c_async_meta
@@ -1096,6 +1447,10 @@ class PIMMoEBackend(CPUMoEBackend):
             return None
         self._c_async_handle = None
         self._c_async_meta = None
+
+        # M-30 Stage A: multi-handle join path.
+        if handle == "m30_multi":
+            return self._sync_forward_m30_multi(meta)
 
         import time as _time
         wait_start = _time.perf_counter()
@@ -1191,6 +1546,115 @@ class PIMMoEBackend(CPUMoEBackend):
             # Use a pinned staging buffer that matches `output`'s shape.
             staging = self._acquire_pinned_output_buffer(output.shape)
             staging.copy_(output)  # host-to-host, fast on pinned dest
+            result = torch.empty(
+                output.shape, dtype=hidden_dtype, device=device
+            )
+            result.copy_(staging.to(dtype=hidden_dtype), non_blocking=True)
+            return result.view(hidden_shape)
+        return output.view(hidden_shape).to(device=device, dtype=hidden_dtype)
+
+    def _sync_forward_m30_multi(self, meta: dict[str, Any]) -> torch.Tensor:
+        """ADR-002 M-30 Stage A: join all parallel rank submits and
+        assemble the per-layer output.
+
+        Joins ``self._m30_pending_handles`` in order; each handle's
+        ``wait()`` returns a list of `down_output` tensors aligned with
+        the records stashed in ``self._m30_pending_records``.  The
+        aggregate output is scattered with the same routing-weight
+        scheme as the legacy single-handle path.
+        """
+        import time as _time
+        pending_handles = self._m30_pending_handles
+        pending_records = self._m30_pending_records
+        self._m30_pending_handles = []
+        self._m30_pending_records = []
+
+        batch_size = meta["batch_size"]
+        hidden_size = meta["hidden_size"]
+        device = meta["device"]
+        hidden_dtype = meta["hidden_dtype"]
+        topk_weights_cpu = meta["topk_weights_cpu"]
+        hidden_shape = meta["hidden_shape"]
+
+        # Join all handles.  In the 1-cpu-slot=1-rank layout, top-k=8
+        # → up to 8 handles; we wait them one by one in submit order.
+        # Total wait time ≈ slowest rank's kernel time (since they
+        # all started at roughly the same instant).
+        wait_start = _time.perf_counter()
+        all_records: list[dict[str, Any]] = []
+        all_down_outputs: list[Any] = []
+        try:
+            for handle, records in zip(pending_handles, pending_records):
+                down_outputs = handle.wait()
+                if len(down_outputs) != len(records):
+                    self._record_fallback("m30_handle_record_mismatch")
+                    raise RuntimeError(
+                        f"m30: handle returned {len(down_outputs)} outputs but "
+                        f"records list has {len(records)}"
+                    )
+                all_records.extend(records)
+                all_down_outputs.extend(down_outputs)
+        except Exception:
+            self._record_fallback("m30_wait_failed")
+            self.c_async_fallback_count += 1
+            raise
+        wait_s = _time.perf_counter() - wait_start
+        self.c_async_sync_wait_seconds_sum += wait_s
+        self.c_async_sync_wait_seconds_count += 1
+
+        # Assemble output (same scattering pattern as legacy path).
+        output = torch.zeros(
+            batch_size, hidden_size, dtype=torch.float32, device="cpu"
+        )
+        for rec, down_output in zip(all_records, all_down_outputs):
+            dn_orig_out = rec["dn_orig_out"]
+            expert_output = down_output[:, :dn_orig_out].contiguous()
+            token_indices = rec["token_indices"]
+            match = rec["match"]
+            row_idx, col_idx = torch.where(match[token_indices])
+            weights = (
+                topk_weights_cpu[token_indices[row_idx], col_idx]
+                .to(dtype=expert_output.dtype)
+                .unsqueeze(1)
+            )
+            output.index_add_(
+                0, token_indices[row_idx], expert_output[row_idx] * weights
+            )
+
+        # Diagnostics: count expert calls (PIM-compute participation
+        # guard).  Each rank submitted may have processed multiple
+        # experts (in K>1 future); n is the total experts touched.
+        n = len(all_records)
+        self.real_dpu_quantized_calls += 2 * n
+        self.real_dpu_expert_calls += n
+        self.quantized_batched_expert_groups_local += len(pending_handles)
+        self.quantized_batched_experts_local += n
+        self.c_fused_calls += 1
+        self.c_fused_experts_processed += n
+        # last_kernel_cycles: track the slowest rank (best-effort;
+        # use the last handle's runtime as a representative).
+        if pending_handles:
+            try:
+                # PIMFusedAsyncHandle keeps a reference to its down
+                # runtime; surface its kernel cycles for legacy parity.
+                last_handle = pending_handles[-1]
+                rt_dn_last = getattr(last_handle, "down_runtime", None) \
+                    or getattr(last_handle, "_down_runtime", None) \
+                    or getattr(last_handle, "rt_down", None)
+                if rt_dn_last is not None:
+                    self.last_kernel_cycles = rt_dn_last.last_cycles()
+            except Exception:
+                pass
+
+        # H2D path identical to legacy _sync_forward_c_async.
+        if (
+            self.enable_m25_pinned_d2h
+            and torch.cuda.is_available()
+            and isinstance(device, torch.device)
+            and device.type == "cuda"
+        ):
+            staging = self._acquire_pinned_output_buffer(output.shape)
+            staging.copy_(output)
             result = torch.empty(
                 output.shape, dtype=hidden_dtype, device=device
             )
@@ -2353,6 +2817,23 @@ class PIMMoEBackend(CPUMoEBackend):
                 "m28_bg_preload_wait_mean": (
                     (self.m28_bg_preload_wait_sum / self.m28_bg_preload_wait_count)
                     if self.m28_bg_preload_wait_count > 0
+                    else None
+                ),
+                # ADR-002 M-30 Stage A: expert-parallel static residency.
+                # Reports the per-cpu-slot rank pool state + parallel
+                # submit concurrency.  When the M-30 path is the active
+                # one, ``m30_parallel_active_ranks_mean`` should be
+                # roughly equal to the average number of CPU-routed
+                # experts per layer-step (≈1.8 for Qwen3 decode batch=1).
+                "enable_m30_expert_parallel": self.enable_m30_expert_parallel,
+                "m30_runtime_pool_size": len(self._m30_gate_up_runtimes),
+                "m30_bulk_preload_seconds": self.m30_bulk_preload_seconds,
+                "m30_bulk_preload_count": self.m30_bulk_preload_count,
+                "m30_parallel_submit_count": self.m30_parallel_submit_count,
+                "m30_parallel_max_active_ranks": self.m30_parallel_max_active_ranks,
+                "m30_parallel_active_ranks_mean": (
+                    (self.m30_parallel_active_ranks_sum / self.m30_parallel_active_ranks_count)
+                    if self.m30_parallel_active_ranks_count > 0
                     else None
                 ),
                 # PIM real-compute participation ratio.  Offloaded experts

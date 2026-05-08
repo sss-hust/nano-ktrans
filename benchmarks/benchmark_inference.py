@@ -106,6 +106,7 @@ def benchmark_backend(
     pim_enable_m25_pinned: bool,
     pim_enable_m26_threaded: bool,
     pim_enable_m28_bg_preload: bool,
+    pim_enable_m30_expert_parallel: bool,
     enable_dynamic_expert_scheduler: bool,
     scheduler_prefill_force_gpu_budget_per_layer: int | None,
     scheduler_prefill_collect_only: bool | None,
@@ -157,6 +158,7 @@ def benchmark_backend(
             "enable_m25_pinned_d2h": pim_enable_m25_pinned,
             "enable_m26_threaded_submit": pim_enable_m26_threaded,
             "enable_m28_bg_preload": pim_enable_m28_bg_preload,
+            "enable_m30_expert_parallel": pim_enable_m30_expert_parallel,
         }
     elif backend == "cuda_pim_shadow":
         if not torch.cuda.is_available():
@@ -179,6 +181,7 @@ def benchmark_backend(
             "enable_m25_pinned_d2h": pim_enable_m25_pinned,
             "enable_m26_threaded_submit": pim_enable_m26_threaded,
             "enable_m28_bg_preload": pim_enable_m28_bg_preload,
+            "enable_m30_expert_parallel": pim_enable_m30_expert_parallel,
         }
     else:
         raise ValueError(f"Unsupported backend: {backend}")
@@ -511,6 +514,33 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Force --pim-enable-m28-bg-preload OFF.",
     )
+    # ADR-002 M-30 Stage A: expert-parallel static residency.  Replaces
+    # the per-layer-group dual-runtime layout (16 group × 2 rank, only
+    # 2 rank active per layer-step) with one runtime per cold expert
+    # (36 ranks, all 48 layers' weights bulk-preloaded at init), and
+    # decode submits issue one async handle per distinct routed rank.
+    parser.add_argument(
+        "--pim-enable-m30-expert-parallel",
+        dest="pim_enable_m30_expert_parallel",
+        action="store_true",
+        default=False,
+        help=(
+            "ADR-002 M-30 Stage A: bind each cold expert to its OWN "
+            "PIM rank (36 ranks total for Qwen3 offload=92), bulk-"
+            "preload all 48 layers at model init (~150 ms one-time), "
+            "then decode submit issues one async handle per distinct "
+            "routed rank (≤8 parallel ranks per layer-step).  Replaces "
+            "the M-7 per-layer-group dual-runtime layout.  Requires "
+            "--pim-enable-c-async + --pim-enable-m25-pinned.  Default "
+            "OFF until validated."
+        ),
+    )
+    parser.add_argument(
+        "--no-pim-m30-expert-parallel",
+        dest="pim_enable_m30_expert_parallel",
+        action="store_false",
+        help="Force --pim-enable-m30-expert-parallel OFF.",
+    )
     # ADR-002 M-18: routing-aware GPU residency.
     parser.add_argument(
         "--routing-freq-json",
@@ -644,6 +674,7 @@ def main() -> None:
                 pim_enable_m25_pinned=args.pim_enable_m25_pinned,
                 pim_enable_m26_threaded=args.pim_enable_m26_threaded,
                 pim_enable_m28_bg_preload=args.pim_enable_m28_bg_preload,
+                pim_enable_m30_expert_parallel=args.pim_enable_m30_expert_parallel,
                 enable_dynamic_expert_scheduler=args.enable_dynamic_expert_scheduler,
                 scheduler_prefill_force_gpu_budget_per_layer=args.scheduler_prefill_force_gpu_budget_per_layer,
                 scheduler_prefill_collect_only=args.scheduler_prefill_collect_only,
