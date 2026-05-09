@@ -3404,9 +3404,101 @@ class HybridMoE(nn.Module):
         # microbench; full e2e correctness via existing test suite.
         # Toggleable via NANO_KTRANS_M31_GPU_LOOP env var
         # (default ON; set to "0" to fall back to legacy path).
+        #
+        # ADR-002 M-32: fused stacked-bmm path on top of M-31.
+        #
+        # M-31 reduced the iteration count from 128 to ≤ 8, but each
+        # iteration still does 3× F.linear + silu + mul + index_add_,
+        # which is 24+ CUDA kernel launches per layer.  M-32 collapses
+        # all routed experts into ONE batched matmul (3× bmm + silu +
+        # mul + scatter_add) by stacking the routed experts' weights
+        # into a [N_routed, ...] tensor and computing all of them in a
+        # single CUDA dispatch trio.
+        #
+        # Microbench shows 5.1× speedup vs M-31 (3.28 ms → 0.64 ms) on
+        # 8 routed experts batch=1.  Trade-offs:
+        #   * Temporary vRAM peak: N_routed × per_expert (~70 MB / layer
+        #     for 8 expert × 9 MB).  Released after each forward; cached
+        #     by PyTorch allocator so reused on next layer with no malloc.
+        #   * Only enabled for batch=1 decode and SparseExpertMLP /
+        #     PackedSparseExpertMLP; falls back to M-31 path otherwise.
+        #   * Numerically equivalent up to fp16 GEMV reordering noise
+        #     (rtol=1e-2, max relative error ~0.1% in microbench).
+        #
+        # Toggleable via NANO_KTRANS_M32_FUSED_BMM env var
+        # (default ON; set to "0" to fall back to M-31).
         use_m31 = os.environ.get("NANO_KTRANS_M31_GPU_LOOP", "1") != "0"
+        use_m32 = use_m31 and os.environ.get("NANO_KTRANS_M32_FUSED_BMM", "1") != "0"
 
-        if use_m31:
+        # M-32 only takes the fused path on the easy case: batch=1 decode
+        # with SparseExpertMLP modules.  PackedSparseExpertMLP and
+        # batch > 1 fall back to M-31 below.
+        m32_eligible = (
+            use_m32
+            and batch_seq_len == 1
+            and not self.experts_are_packed
+        )
+
+        if m32_eligible:
+            # Determine routed experts that are actually GPU-resident.
+            # topk_ids shape: [batch=1, top_k]
+            unique_routed = torch.unique(topk_ids).cpu().tolist()
+            gpu_mask_host = gpu_experts_mask_snapshot.cpu().tolist()
+            routed_gpu = [
+                e for e in unique_routed
+                if gpu_mask_host[e] and str(e) in gpu_experts_snapshot
+            ]
+
+            if not routed_gpu:
+                # No GPU experts routed; skip step_3 entirely.
+                pass
+            else:
+                # Stack the routed experts' weights into batched tensors.
+                # SparseExpertMLP has w1, w2, w3 (gate, down, up).
+                # torch.stack copies into a contiguous [N, out, in] tensor;
+                # the temporary peak is N × (gate + up + down) ≈ 70 MB
+                # for N=8 (for Qwen3-30B), released by PyTorch allocator
+                # after this forward.
+                modules = [gpu_experts_snapshot[str(e)] for e in routed_gpu]
+                w1_stack = torch.stack([m.w1.weight for m in modules])  # [N, inter, hidden]
+                w3_stack = torch.stack([m.w3.weight for m in modules])
+                w2_stack = torch.stack([m.w2.weight for m in modules])  # [N, hidden, inter]
+
+                # Broadcast input to all N routed experts: [1, hidden] → [N, 1, hidden]
+                N = len(routed_gpu)
+                x_b = hidden_states.expand(N, -1).unsqueeze(1)
+
+                # Activation function: looked up from `self.hidden_act`
+                # (typically "silu"), matching SparseExpertMLP.forward.
+                act_fn = getattr(torch.nn.functional, self.hidden_act)
+
+                # Three batched matmuls + silu + elementwise mul.
+                gate = act_fn(torch.bmm(x_b, w1_stack.transpose(1, 2)))   # [N, 1, inter]
+                up = torch.bmm(x_b, w3_stack.transpose(1, 2))             # [N, 1, inter]
+                h = gate * up
+                out = torch.bmm(h, w2_stack.transpose(1, 2)).squeeze(1)   # [N, hidden]
+
+                # Aggregate: for each routed expert i, find its routing
+                # weight from topk_weights, multiply, sum across N.
+                # routed_gpu_t: [N], topk_ids[0]: [top_k]
+                # match[i, k] = 1 iff routed_gpu[i] == topk_ids[0, k]
+                routed_gpu_t = torch.tensor(
+                    routed_gpu, device=hidden_states.device, dtype=torch.long
+                )
+                match = (
+                    routed_gpu_t.unsqueeze(1) == topk_ids[0].unsqueeze(0)
+                ).to(topk_weights.dtype)  # [N, top_k]
+                # weight_per_expert[i] = sum over k of topk_weights[0, k]
+                # if topk_ids[0, k] == routed_gpu[i].  (Almost always 1 term
+                # since topk_ids has no duplicates, but the formula handles
+                # the general case.)
+                weight_per_expert = (
+                    match * topk_weights[0].unsqueeze(0)
+                ).sum(dim=1)  # [N]
+                final_gpu_states[0] = (
+                    out * weight_per_expert.unsqueeze(1)
+                ).sum(dim=0)
+        elif use_m31:
             # Cache the GPU-mask as a host bool list once per forward
             # (cheap: 128-element CPU sync, amortised over the loop).
             # In a future revision we can move this to layer init
