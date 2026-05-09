@@ -102,10 +102,11 @@ audience: advisor
 |---|---|---|---|---|
 | 优化前起点（PIM）| 0.228 | 140.6 s | 1.0× | 10.9% |
 | 中期阶段（host overhead 消除）| 1.3234 | 24.2 s | 5.80× | 63.2% |
-| **当前 PIM**（expert-parallel 多 rank 并发）| **1.8152** | **17.6 s** | **7.96×** | **86.7%** |
+| 引入 expert-parallel 多 rank 并发 | 1.8152 | 17.6 s | 7.96× | 86.7% |
+| **当前 PIM**（叠加 GPU 侧向量化）| **2.7999** | **11.4 s** | **12.28×** | **133.9%** |
 | cuda_cpu_offload baseline | 2.0933 | 15.3 s | 9.18× | 100% |
 
-整个研究路径上，前后**累计完成约 30 个里程碑**（含 9 个登记在 ADR 中的 NEGATIVE 对照实验），每一步都有专门的 phase-level / submit-internal / preload-breakdown 三层诊断脚本支撑（详见附录 §A.8 工具链）。**PIM 的绝对提升是 7.96×**，相对 CPU baseline 仍差 **13.3%**。下面第三部分详细分析这 13% 差距的来源，以及 PIM 内部每个环节的时间去向。
+整个研究路径上，前后**累计完成约 30 个里程碑**（含 9 个登记在 ADR 中的 NEGATIVE 对照实验），每一步都有专门的 phase-level / submit-internal / preload-breakdown 三层诊断脚本支撑（详见附录 §A.8 工具链）。**PIM 的绝对提升是 12.28×**，**当前已超越 CPU baseline 33.9%**。下面第三部分详细分析 PIM 内部每个环节的时间去向。
 
 ---
 
@@ -527,7 +528,7 @@ PIM 相对 CPU 赢的充分条件 (满足任一):
 核心命题：**在 host RAM 受限 + GPU 装不下全部 MoE 的前提下，PIM 提供一个比 CPU 在线反量化更优的卸载路径**。目前证据：
 
 1. **PIM 真实承担计算**：所有 offloaded expert 100% 在 DPU 上算（`real_dpu_expert_calls > 0`，PIM-compute participation ratio = 1.000，已通过 9 个对照 NEGATIVE 实验严格防 cheat）
-2. **PIM 的 decode 性能已经接近 CPU baseline**：达 86.7%，差距完全归因于可识别的工程项（详见 §3.7）
+2. **PIM 的 decode 性能已经超越 CPU baseline**：达 133.9%，瓶颈从 GPU loop 转移到 PIM 自身（详见 §3.7）
 3. **PIM 的并行度已被实际利用起来**：单层 active rank 从早期方案的 1（5.1% 硬件利用率）提升到 max 7、mean 2.45（实测）
 4. **PIM 的 break-even 条件在本实验场景完全成立**：S=2.4 MB，落在 PIM 优势窗口 [0.5, 11] MB 中央
 
@@ -535,7 +536,7 @@ PIM 相对 CPU 赢的充分条件 (满足任一):
 
 当模型继续增长，"全模型驻留 PIM" 假设会在不同阶段破产：
 
-- **Qwen3-30B（S=2.4 MB）**：本研究已实证可行（86.7% CPU baseline）
+- **Qwen3-30B（S=2.4 MB）**：本研究已实证可行（**133.9% CPU baseline**，超越对照基线）
 - **Qwen2-57B / Qwen3-235B（S=6-10 MB）**：每 DPU 仅占 ~10 MB，仍可全驻留
 - **DeepSeek-V3 671B（S=22.8 MB）**：每 DPU 170 MB 超出 MRAM 硬件上限 → 必须 partial residency + prefetch
 - **更大模型**：引入路由预测（方向 D），用 layer-to-layer correlation 做 speculative preload
@@ -548,7 +549,7 @@ PIM 相对 CPU 赢的充分条件 (满足任一):
 
 1. **PIM 硬件天生不擅长算力比拼**：单 DPU 无硬件乘法器、无 SIMD、无 FPU，比 CPU AVX-512 慢 40×。PIM 的优势是"**大容量 MRAM 存权重 + 近存计算**"，**不是**"单位算力"。
 
-2. **当前成果**：decode TPS 从起点 **0.228 提升到 1.8152（7.96×）**，闭合到 CPU baseline 的 **86.7%**。整个优化路径横跨约 30 个里程碑（含 9 个有意保留的 NEGATIVE 对照实验，构成完整的"哪些路走不通"的科研记录）；剩余 13% 差距完全解释得通（sync 机制 + PCIe 共享，详见 §3.7）。
+2. **当前成果**：decode TPS 从起点 **0.228 提升到 2.7999（12.28×）**，**首次超越 CPU baseline 33.9%**。整个优化路径横跨约 30 个里程碑（含 9 个有意保留的 NEGATIVE 对照实验，构成完整的"哪些路走不通"的科研记录）；瓶颈成功从 GPU 侧 Python overhead 转移到了 PIM 自身（c_async_wait 从 0.08 ms 升到 1.0 ms 即是直接证据），后续优化空间转向 PIM 内部（in-DPU silu / DMA 聚合 / CUDA-event sync）。
 
 3. **最重要的工程胜利**：expert-parallel 多 rank 并发设计让 PIM 硬件利用率从早期 5.1%（仅 2 个 rank 活跃）提升到实测 max 7 rank 并行（+37.2% TPS 单点收益）。这是研究中**首次证明 PIM 的多 rank 并行能力可被实际利用**——此前的方案虽然 alloc 了 32 个 rank，但每层只用 2 个。
 
@@ -559,7 +560,7 @@ PIM 相对 CPU 赢的充分条件 (满足任一):
    - **Qwen3-30B 在本机场景恰好满足所有四个条件**，所以 PIM 有意义
 
 5. **论文主命题的精准表述**：
-   > "在存在 PCIe-connected PIM 硬件的推理系统中，对于满足特定约束（host RAM 受限、MoE decode 场景、expert 大小在 [0.5 MB, 11 MB] 区间）的大语言模型，PIM 提供了一个比 CPU 在线反量化路径更优的 offload 目标。通过 expert-parallel 静态驻留设计，PIM 能达到 CPU 基线的 86.7%，且该差距中 100% 来自可识别的工程层面（sync 机制、PCIe 共享），而非 PIM 硬件本身的算力局限。"
+   > "在存在 PCIe-connected PIM 硬件的推理系统中，对于满足特定约束（host RAM 受限、MoE decode 场景、expert 大小在 [0.5 MB, 11 MB] 区间）的大语言模型，PIM 提供了一个比 CPU 在线反量化路径更优的 offload 目标。通过 expert-parallel 静态驻留设计 + 配套的 GPU 侧编排优化，PIM+GPU 异构方案已实证可超越同等条件下的 CPU+GPU baseline（达到 CPU baseline 的 133.9%）。"
 
 ---
 
